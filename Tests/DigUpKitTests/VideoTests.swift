@@ -40,4 +40,14 @@ import Testing
         try await VideoExtractor.frame(at: seconds, of: Self.shots, pixels: 320, to: out)
         #expect(try ImageTests.decode(out.path).quadrants[0] == color)
     }
+
+    /// A video's location as phones and cameras write it (ISO 6709); a camera with no fix writes 0,0, which is none.
+    @Test func aVideosLocationIsReadAsWritten() {
+        let miami = Location(iso6709: "+25.7907-080.1300+003.000/", source: .quicktime)
+        #expect(miami == Location(latitude: 25.7907, longitude: -80.13, source: .quicktime))
+        #expect(Location(iso6709: "-34.9188+138.5968/", source: .quicktime)?.longitude == 138.5968)
+        #expect(Location(iso6709: "+00.0000+000.0000/", source: .quicktime) == nil)
+        #expect(Location(iso6709: "+2547.44-08007.80/", source: .quicktime) == nil)   // degrees and minutes: not read
+        #expect(Location(iso6709: "", source: .quicktime) == nil)
+    }
 }

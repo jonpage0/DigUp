@@ -129,4 +129,31 @@ import ImageIO
         return (image.width, image.height, image.pixels)
         #endif
     }
+
+    #if canImport(ImageIO)
+    /// Writes a 400×300 JPEG, with GPS tags when `point` is given (degrees, south and west below zero), written as a
+    /// camera writes them: unsigned degrees, and the hemisphere apart.
+    static func writeJPEG(_ url: URL, at point: (latitude: Double, longitude: Double)? = nil) throws {
+        guard let context = CGContext(data: nil, width: 400, height: 300, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { throw ExtractError.unreadable("no context") }
+        context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.8, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 400, height: 300))
+        guard let image = context.makeImage(),
+              let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil)
+        else { throw ExtractError.unreadable(url.path) }
+        var properties: [CFString: Any] = [:]
+        if let point {
+            properties[kCGImagePropertyGPSDictionary] = [
+                kCGImagePropertyGPSLatitude: abs(point.latitude),
+                kCGImagePropertyGPSLatitudeRef: point.latitude < 0 ? "S" : "N",
+                kCGImagePropertyGPSLongitude: abs(point.longitude),
+                kCGImagePropertyGPSLongitudeRef: point.longitude < 0 ? "W" : "E",
+            ] as [CFString: Any]
+        }
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { throw ExtractError.unreadable(url.path) }
+    }
+    #endif
 }

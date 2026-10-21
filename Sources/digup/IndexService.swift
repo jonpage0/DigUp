@@ -86,6 +86,8 @@ final class IndexService: @unchecked Sendable {
             }
             let again = try main.store.readAgainOnce()   // what older indexes couldn't read: scans' words, SVGs
             if again > 0 { emit(["event": "rescan", "files": again]) }
+            let located = try main.store.locateOnce()    // where the pictures and videos it read before were taken
+            if located > 0 { emit(["event": "located", "files": located]) }
             for part in parts {
                 try part.indexer.checkModel()   // a new model: everything is queued again
                 if let keepOnly = part.keepOnly {

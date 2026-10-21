@@ -14,8 +14,10 @@ let usage = """
       digup estimate <folder>... [--json]     what would be indexed, and how long the first pass takes
       digup index <folder>... [--limit N]     sync the index with these folders, embed what's new, then the rest
                                               of long PDFs and documents
-      digup search <words>... [--kind K,K] [-n 10] [--json]
-                                              "code: <words>" searches the code index
+      digup search [<words>...] [--kind K,K] [--with NAME]... [--album TITLE]... [--favorites]
+                   [--within LAT,LON,LAT,LON] [-n 10] [--json]
+                                              "code: <words>" searches the code index; with filters and no
+                                              words, the newest files they keep
       digup status                            what's in the index
       digup speed [--model [--if-needed] [--when-quiet S] [--tries N]] [--json]
                                               this machine's speed next to the M4 Pro behind the estimates, and
@@ -38,6 +40,12 @@ let usage = """
       --code               estimate, index or show the code index of these folders (code.sqlite in the index
                            folder): source files, their repos' docs and notebooks, minus what git ignores
       --kind K,K           screenshot, image, pdf, doc, audio, video
+      --with NAME          only pictures Photos says NAME is in (repeatable: all of them; a name several
+                           people share in Photos means any of them)
+      --album TITLE        only pictures in this Photos album (repeatable: any of them)
+      --favorites          only Photos' favorites
+      --within LAT,LON,LAT,LON
+                           only files taken inside the box with these two corners (degrees)
       --include-code       also index loose source code and data files as documents (outside code projects)
       --include-datasets   don't skip folders that look like datasets
       --exclude DIR        don't index this folder (repeatable)
@@ -69,8 +77,9 @@ struct Arguments {
     var flags: Set<String> = []
     static let valued: Set<String> = ["--index", "--limit", "--kind", "-n", "--zgate", "--word-weight", "--new-limit",
                                       "--linger", "--shot-tokens", "--code-stretch", "--encoder-idle", "--to",
-                                      "--memory-limit", "--time-limit", "--tries", "--when-quiet"]
-    static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude"]
+                                      "--memory-limit", "--time-limit", "--tries", "--when-quiet", "--within"]
+    static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude", "--with",
+                                        "--album"]
 
     init(_ raw: ArraySlice<String>) throws {
         var index = raw.startIndex
@@ -157,6 +166,44 @@ struct Arguments {
             }
             return kind
         })
+    }
+
+    /// A search's filters were given (`filter`).
+    var filtered: Bool {
+        lists["--with"] != nil || lists["--album"] != nil || flags.contains("--favorites") || values["--within"] != nil
+    }
+
+    /// The search's filter: --with NAME (every one in it; a name that several people in Photos share means any of
+    /// them), --album TITLE (in any of them), --favorites, --within LAT,LON,LAT,LON (two corners of a box).
+    func filter(in store: IndexStore) throws -> SearchFilter {
+        var filter = SearchFilter(favorites: flags.contains("--favorites"))
+        if let names = lists["--with"] {
+            let people = try store.photosPeople()
+            filter.people = try names.map { name in
+                let ids = Set(people.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame }.map(\.id))
+                guard !ids.isEmpty else {
+                    let named = Set(people.map(\.name)).sorted().joined(separator: ", ")
+                    throw CLIError("no one called \(name) in Photos"
+                                   + (named.isEmpty ? " (no one is named there)" : " (named there: \(named))"))
+                }
+                return ids
+            }
+        }
+        if let titles = lists["--album"] {
+            let albums = try store.photosAlbums()
+            filter.albums = try Set(titles.flatMap { title in
+                let ids = albums.filter { $0.title.caseInsensitiveCompare(title) == .orderedSame }.map(\.id)
+                guard !ids.isEmpty else { throw CLIError("no album called \(title) in Photos") }
+                return ids
+            })
+        }
+        if let box = values["--within"] {
+            let corners = box.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            guard corners.count == 4 else { throw CLIError("--within takes two corners: LAT1,LON1,LAT2,LON2") }
+            filter.area = SearchFilter.Area(latitudes: min(corners[0], corners[2])...max(corners[0], corners[2]),
+                                            longitudes: min(corners[1], corners[3])...max(corners[1], corners[3]))
+        }
+        return filter
     }
 }
 
@@ -317,6 +364,7 @@ func index(_ args: Arguments) throws {
     indexer.embedderSource = embedderSource()
     indexer.costsFolder = store.directory
     try store.readAgainOnce()   // what older indexes couldn't read: scanned pages' words, SVGs
+    try store.locateOnce()      // where the pictures and videos it read before were taken
     try indexer.checkModel()
     let folders = try args.folders()
     let sync = try indexer.sync(folders)
@@ -372,17 +420,20 @@ func queryVectors(_ queries: [String], store: IndexStore, searcher: Searcher,
 
 func search(_ args: Arguments) throws {
     var query = args.positional.joined(separator: " ")
-    guard !query.isEmpty else { throw CLIError("search for what?") }
+    guard !query.isEmpty || args.filtered else { throw CLIError("search for what?") }
     let code = CodeQuery.text(of: query)
     if let code { query = code }
-    guard !query.isEmpty else { throw CLIError("search the code for what?") }
+    guard code == nil || !query.isEmpty else { throw CLIError("search the code for what?") }
     let store = try IndexStore(directory: args.indexFolder, file: code == nil ? IndexStore.mainFile : IndexStore.codeFile)
-    let searcher = try Searcher(store: store)
+    // Photos' people, albums and favorites, and a box on the map: the main index's. With no words, the search lists
+    // what they keep.
+    let filter = code == nil ? try args.filter(in: store) : SearchFilter()
+    let searcher = try Searcher(store: store, loadVectors: !query.isEmpty)
     let started = Date()
-    let vector = try queryVectors([query], store: store, searcher: searcher,
-                                  prompt: code == nil ? Prompts.query : Prompts.codeQuery)?.first
+    let vector = query.isEmpty ? nil : try queryVectors([query], store: store, searcher: searcher,
+                                                        prompt: code == nil ? Prompts.query : Prompts.codeQuery)?.first
     let encoded = Date()
-    let hits = try searcher.search(query, queryVector: vector, kinds: try args.kinds(),
+    let hits = try searcher.search(query, queryVector: vector, kinds: try args.kinds(), filter: filter,
                                    limit: args.values["-n"].flatMap(Int.init) ?? 10, zGate: args.zGate,
                                    wordWeight: args.wordWeight)
     let searched = Date()
@@ -392,21 +443,29 @@ func search(_ args: Arguments) throws {
         print(String(data: data, encoding: .utf8) ?? "[]")
         return
     }
+    let locations = try store.locations(of: hits.map(\.path))
     if hits.isEmpty { print("no good matches") }
     for (rank, hit) in hits.enumerated() {
         let why = [hit.z.map { String(format: "z %.1f", $0) }, hit.keywordRank.map { "words #\($0)" }]
             .compactMap { $0 }.joined(separator: ", ")
-        let place = location(hit)
+        let place = why.isEmpty ? "" : location(hit)   // nothing matched in a list of what filters keep
         // A Photos library's picture: its name in Photos, and where it is in Photos.
         let name = hit.photos.flatMap { $0.title.isEmpty ? nil : $0.title } ?? (hit.path as NSString).lastPathComponent
         print("\(lpad("\(rank + 1)", 2)). \(pad(hit.kind.rawValue, 10)) \(name)"
-              + (place.isEmpty ? "" : "  [\(place)]") + "   (\(why))")
+              + (place.isEmpty ? "" : "  [\(place)]") + (why.isEmpty ? "" : "   (\(why))"))
         print("      " + (hit.photos.map { "\(tilde($0.library)) · \($0.uuid)" }
                           ?? tilde((hit.path as NSString).deletingLastPathComponent)))
+        if let taken = locations[hit.path] { print("      " + whereTaken(taken)) }
         if let excerpt = hit.excerpt, !excerpt.isEmpty { print("      “\(excerpt.prefix(160))”") }
     }
     print(String(format: "(%d vectors · query encoder %.2f s incl. start-up · search %.0f ms)", searcher.vectorCount,
                  encoded.timeIntervalSince(started), searched.timeIntervalSince(encoded) * 1000))
+}
+
+/// "taken at 51.50357, -0.13181 · St James's Park, London (photos)": where, and who said so.
+func whereTaken(_ location: Location) -> String {
+    String(format: "taken at %.5f, %.5f", location.latitude, location.longitude)
+        + (location.place.map { " · \($0)" } ?? "") + " (\(location.source.rawValue))"
 }
 
 func status(_ args: Arguments) throws {

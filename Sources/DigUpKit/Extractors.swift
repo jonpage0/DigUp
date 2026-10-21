@@ -19,14 +19,16 @@ enum ExtractError: Error, CustomStringConvertible {
     }
 }
 
-/// Pictures for the model: a downscaled copy of each image (`prepare`) and the camera's date. ImageIO on macOS (HEIC,
-/// RAW, WebP and friends); stb_image elsewhere (Platform/).
+/// Pictures for the model: a downscaled copy of each image (`prepare`), the camera's date and where it was taken.
+/// ImageIO on macOS (HEIC, RAW, WebP and friends); stb_image elsewhere (Platform/).
 enum ImageExtractor {
     struct Prepared: Sendable {
         let path: String
         let width: Int
         let height: Int
         let taken: String?   // EXIF DateTimeOriginal, as written by the camera
+        /// Its GPS tags (`Location.Source.exif`), where they're read (`readsLocations`).
+        let location: Location?
     }
 }
 

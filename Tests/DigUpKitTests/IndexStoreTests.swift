@@ -76,6 +76,110 @@ import WinSDK
     }
     #endif
 
+    @Test func theForksTablesAreAddedOnceAndTheSchemaStaysUpstreams() throws {
+        let fork: Set = ["locations", "photos_people", "photos_person_files", "photos_person_files_file",
+                         "photos_albums", "photos_album_files", "photos_album_files_file", "photos_assets"]
+        func check(_ store: IndexStore) throws {
+            var names = Set<String>(), version: Int64 = 0
+            try store.db.query("SELECT name FROM sqlite_master") { names.insert($0.text(0) ?? "") }
+            try store.db.query("PRAGMA user_version") { version = $0.int(0) }
+            #expect(fork.isSubset(of: names))
+            #expect(try store.meta("fork_photos_facts") == "1")
+            #expect(version == 5)
+        }
+        try check(try IndexStore(directory: folder))
+        // An index upstream's DigUp made, or kept on with: schema 5 without the fork's tables. They're added.
+        let upstream = try IndexStore(directory: folder)
+        try upstream.db.execute("""
+            DROP TABLE locations; DROP TABLE photos_person_files; DROP TABLE photos_people;
+            DROP TABLE photos_album_files; DROP TABLE photos_albums; DROP TABLE photos_assets;
+            DELETE FROM meta WHERE key = 'fork_photos_facts';
+            """)
+        let reopened = try IndexStore(directory: folder)
+        try check(reopened)
+        // Opened again: nothing made again, nothing lost.
+        let id = try reopened.insert(file("/a/x.jpg", inode: 1))
+        try reopened.setLocation(try #require(Location(latitude: 25.79, longitude: -80.13, source: .exif)), of: id)
+        let again = try IndexStore(directory: folder)
+        try check(again)
+        #expect(try again.locations(of: ["/a/x.jpg"]).count == 1)
+    }
+
+    #if canImport(ImageIO)
+    @Test func aPicturesOwnLocationGoesWhenItsReadAgain() throws {
+        let base = URL(fileURLWithPath: FolderSelection.realPath(folder.path))
+        let pictures = base.appendingPathComponent("pictures")
+        try FileManager.default.createDirectory(at: pictures, withIntermediateDirectories: true)
+        let beach = pictures.appendingPathComponent("beach.jpg")
+        try ImageTests.writeJPEG(beach, at: (25.7907, -80.13))
+        let store = try IndexStore(directory: base.appendingPathComponent("index"))
+        let indexer = try Indexer(store: store, options: IndexOptions(), makeEmbedder: { FakeEmbedder() })
+        _ = try indexer.sync([pictures])
+        _ = try indexer.run()
+        let miami = try #require(try store.locations(of: [beach.path])[beach.path])
+        #expect(miami.source == .exif && abs(miami.latitude - 25.7907) < 1e-4 && abs(miami.longitude + 80.13) < 1e-4)
+        // The picture changed: what was read from it goes, its location with it, until it's read again.
+        try ImageTests.writeJPEG(beach, at: (40.7128, -74.006))
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 60)], ofItemAtPath: beach.path)
+        #expect(try indexer.sync([pictures]).changed == 1)
+        #expect(try store.locations(of: [beach.path]).isEmpty)
+        _ = try indexer.run()
+        #expect(try abs((store.locations(of: [beach.path])[beach.path]?.latitude ?? 0) - 40.7128) < 1e-4)
+    }
+
+    @Test func picturesReadBeforeGetTheirLocationOnce() throws {
+        // As an index from before locations were kept has them: read, with no location.
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        let photo = folder.appendingPathComponent("photo.jpg")
+        let library = folder.appendingPathComponent("L.photoslibrary/originals/F")
+        try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+        let asset = library.appendingPathComponent("FC37DBA6-CF22-4E3E-AB70-755587454608.jpeg")
+        for (inode, url) in [photo, asset].enumerated() {
+            try ImageTests.writeJPEG(url, at: (25.79, -80.13))
+            try store.finish(try store.insert(file(url.path, inode: UInt64(inode))), state: "done")
+        }
+        #expect(try store.locateOnce() == 1)   // a library's picture has Photos' location, from the sync
+        #expect(try store.locations(of: [photo.path, asset.path]).keys.sorted() == [photo.path])
+        #expect(try store.locateOnce() == 0)
+    }
+
+    @Test func aPictureAwayWhenLocationsAreReadGetsItsLocationOnceItsBack() throws {
+        // Read before locations were kept: one picture here, one away for now (on a drive that's unplugged, say), and
+        // one away that leaves the index.
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        let pictures = folder.appendingPathComponent("pictures"), aside = folder.appendingPathComponent("aside")
+        for url in [pictures, aside] {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+        var ids: [Int64] = []
+        for (inode, name) in ["here.jpg", "away.jpg", "gone.jpg"].enumerated() {
+            let url = pictures.appendingPathComponent(name)
+            try ImageTests.writeJPEG(url, at: (25.79, -80.13))
+            ids.append(try store.insert(file(url.path, inode: UInt64(inode))))
+            try store.finish(ids[inode], state: "done")
+        }
+        for name in ["away.jpg", "gone.jpg"] {
+            try FileManager.default.moveItem(at: pictures.appendingPathComponent(name),
+                                             to: aside.appendingPathComponent(name))
+        }
+        #expect(try store.locateOnce() == 1)
+        let waiting = try #require(try store.meta("locations_read"))
+        #expect(Set(try JSONDecoder().decode([Int64].self, from: Data(waiting.utf8))) == [ids[1], ids[2]])
+        // Still away, and the other one's row gone: only the one away waits.
+        try store.delete(ids[2])
+        #expect(try store.locateOnce() == 0)
+        #expect(try store.meta("locations_read") == "[\(ids[1])]")
+        // Back as it was, so not read again: it gets its location now, and nothing waits any more.
+        try FileManager.default.moveItem(at: aside.appendingPathComponent("away.jpg"),
+                                         to: pictures.appendingPathComponent("away.jpg"))
+        #expect(try store.locateOnce() == 1)
+        let paths = ["here.jpg", "away.jpg"].map { pictures.appendingPathComponent($0).path }
+        #expect(try store.locations(of: paths).keys.sorted() == paths.sorted())
+        #expect(try store.meta("locations_read") == "1")
+        #expect(try store.locateOnce() == 0)
+    }
+    #endif
+
     @Test func modelFileHashesStreamInPieces() throws {
         let small = folder.appendingPathComponent("abc")
         try Data("abc".utf8).write(to: small)

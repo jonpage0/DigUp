@@ -17,6 +17,10 @@ public struct CrawlReport: Sendable {
     public var datasets: [String: Int] = [:]         // folder → files skipped as a dataset
     /// The candidates from Photos libraries (by path), with what Photos says about each (`PhotosLibrary`).
     public var photos: [String: PhotosLibrary.Asset] = [:]
+    /// The people and pets named in each library read, and its albums, by the library as its files spell it
+    /// (`PhotosLibrary.library(containing:)`): what the assets in `photos` refer to by uuid.
+    public var photosPeople: [String: [PhotosLibrary.Person]] = [:]
+    public var photosAlbums: [String: [PhotosLibrary.Album]] = [:]
     /// Folders whose files couldn't be listed this time (a Photos library osxphotos couldn't read), in both spellings
     /// (as chosen and real): what's indexed from them stays, as it does for a folder that's gone (`Indexer.sync`).
     public var unlisted: [String] = []
@@ -85,6 +89,10 @@ public enum Crawler {
                 found.append(Candidate(path: asset.path, kind: asset.kind, size: info.size, mtime: info.mtime,
                                        inode: info.inode, device: info.device))
                 report.photos[asset.path] = asset
+                if let library = PhotosLibrary.library(containing: asset.path), report.photosPeople[library] == nil {
+                    report.photosPeople[library] = listing.people
+                    report.photosAlbums[library] = listing.albums
+                }
             }
         }
 

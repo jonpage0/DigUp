@@ -106,6 +106,25 @@ extension VideoExtractor {
         try ImageExtractor.write(image, to: out, png: false)
     }
 
+    /// A video's location is read here (AVFoundation).
+    static let readsLocations = true
+
+    /// Where the video was taken, as the phone or camera wrote it (ISO 6709: an iPhone's QuickTime metadata, the
+    /// user data of an MP4), or nil. Its metadata only: nothing is decoded.
+    static func location(of url: URL) -> Location? {
+        let written = try? runBlocking { () async throws -> String? in
+            let items = try await AVURLAsset(url: url).load(.metadata)
+            let keys: [AVMetadataIdentifier] = [.quickTimeMetadataLocationISO6709, .quickTimeUserDataLocationISO6709]
+            for identifier in keys {
+                if let item = AVMetadataItem.metadataItems(from: items, filteredByIdentifier: identifier).first {
+                    return try await item.load(.stringValue)
+                }
+            }
+            return nil
+        }
+        return (written ?? nil).flatMap { Location(iso6709: $0, source: .quicktime) }
+    }
+
     static func averageHash(_ image: CGImage) -> UInt64 {
         let side = 8
         var pixels = [UInt8](repeating: 0, count: side * side)

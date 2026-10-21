@@ -72,6 +72,7 @@ public final class IndexStore {
         file = directory.appendingPathComponent(name)
         db = try Database(path: file.path)
         try migrate()
+        try migrateForkFacts()
     }
 
     /// Bytes on disk: the database and its write-ahead log.
@@ -97,6 +98,9 @@ public final class IndexStore {
         try db.transaction {
             try db.query("PRAGMA user_version") { version = $0.int(0) }
             if version == 0 { try create() }
+            // The fork's tables before upstream's steps, which read files again (`requeue`): that clears the fork's
+            // rows of them too.
+            try stepForkFacts()
             if version == 1 { try migrateKeywordSearch() }
             if (1...2).contains(version) { try migrateScreenshotText() }
             if (1...3).contains(version) { try migrateVectorNames() }
@@ -203,6 +207,90 @@ public final class IndexStore {
             PRAGMA user_version = 5;
             """)
     }
+
+    // MARK: The fork's tables
+
+    /// The fork's own tables, for what Photos says about a library's files and where files were taken
+    /// (`createForkFacts`), are versioned apart from upstream's schema: `meta` "fork_photos_facts" says how many of
+    /// the fork's steps an index has had, each run once and in order, and `PRAGMA user_version` stays upstream's.
+    /// Upstream owns those numbers: a fork's 6 would claim upstream's migration 6 had run when it hadn't. An upstream
+    /// DigUp still opens the index; it doesn't read Photos libraries, so it removes their files, and the foreign keys
+    /// take their facts with them. An index a later fork stepped further (a column added) is left as it is.
+    static let forkFactsKey = "fork_photos_facts"
+    static let forkFactsVersion = 1
+
+    /// An index already at upstream's current schema that hasn't had the fork's steps (made by upstream's DigUp, or by
+    /// the fork before these tables): `migrate` gives an older one theirs, before upstream's own steps.
+    private func migrateForkFacts() throws {
+        guard try forkFactsStepped() < Self.forkFactsVersion else { return }
+        // Opened by the app and its helper at once: as `migrate`.
+        try db.execute("PRAGMA busy_timeout = 60000")
+        defer { try? db.execute("PRAGMA busy_timeout = 5000") }
+        try db.transaction { try stepForkFacts() }
+    }
+
+    private func forkFactsStepped() throws -> Int { Int(try meta(Self.forkFactsKey) ?? "") ?? 0 }
+
+    /// The fork's steps the index hasn't had, in order (in a transaction).
+    private func stepForkFacts() throws {
+        let from = try forkFactsStepped()
+        guard from < Self.forkFactsVersion else { return }
+        if from < 1 { try createForkFacts() }
+        try setMeta(Self.forkFactsKey, "\(Self.forkFactsVersion)")
+    }
+
+    /// Fork step 1. Every row is rebuilt from Photos (the sync, from the listing) or from the file (the indexer)
+    /// whenever it's lost: nothing to fill in here. "File" is a row of `files`; a library's file is one Photos asset.
+    /// - `locations`: where a file was taken, one row at most (`Location`); `source` is 'photos' exactly when the file
+    ///   is in a Photos library. The sync writes those; the indexer writes the others when it reads a file, and
+    ///   reading it again drops them first, as it does its segments.
+    /// - `photos_people`, `photos_albums`: a library's named people and pets and its albums, each under Photos' uuid
+    ///   (a rename in Photos changes the row, not its id), with their files (`photos_person_files`,
+    ///   `photos_album_files`). One no file is linked to is deleted at the end of a sync.
+    /// - `photos_assets`: Photos' flags of a library's file; one row each.
+    private func createForkFacts() throws {
+        try db.execute("""
+            CREATE TABLE IF NOT EXISTS locations(
+                file INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                latitude REAL NOT NULL CHECK (latitude BETWEEN -90 AND 90),     -- WGS 84 degrees
+                longitude REAL NOT NULL CHECK (longitude BETWEEN -180 AND 180),
+                source TEXT NOT NULL CHECK (source IN ('photos', 'exif', 'quicktime')),
+                place TEXT                                                       -- Photos' name for it, for showing
+            );
+            CREATE TABLE IF NOT EXISTS photos_people(
+                id INTEGER PRIMARY KEY,
+                library TEXT NOT NULL,        -- the library's path, as the index spells it
+                uuid TEXT NOT NULL,           -- Photos' id for the person or pet
+                name TEXT NOT NULL CHECK (name != ''),
+                UNIQUE (library, uuid)
+            );
+            CREATE TABLE IF NOT EXISTS photos_person_files(
+                person INTEGER NOT NULL REFERENCES photos_people(id) ON DELETE CASCADE,
+                file INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                PRIMARY KEY (person, file)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS photos_person_files_file ON photos_person_files(file);
+            CREATE TABLE IF NOT EXISTS photos_albums(
+                id INTEGER PRIMARY KEY,
+                library TEXT NOT NULL,
+                uuid TEXT NOT NULL,           -- Photos' id for the album
+                title TEXT NOT NULL,
+                folders TEXT NOT NULL DEFAULT '[]',   -- JSON array of the folder names above it, outermost first
+                UNIQUE (library, uuid)
+            );
+            CREATE TABLE IF NOT EXISTS photos_album_files(
+                album INTEGER NOT NULL REFERENCES photos_albums(id) ON DELETE CASCADE,
+                file INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                PRIMARY KEY (album, file)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS photos_album_files_file ON photos_album_files(file);
+            CREATE TABLE IF NOT EXISTS photos_assets(
+                file INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                favorite INTEGER NOT NULL CHECK (favorite IN (0, 1))
+            );
+            """)
+    }
+
     // MARK: Meta
 
     public func meta(_ key: String) throws -> String? {
@@ -311,6 +399,7 @@ public final class IndexStore {
         try db.transaction {
             try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE kind NOT IN \(Self.crawlKinds))")
             try db.run("DELETE FROM segments WHERE kind NOT IN \(Self.crawlKinds)")
+            try db.run("DELETE FROM locations WHERE NOT \(Self.crawlLocation)")
             try db.run("UPDATE files SET state = 'pending', detail = NULL, info = NULL, indexed_at = NULL")
             try setMeta("fingerprint", nil)
         }
@@ -407,6 +496,63 @@ public final class IndexStore {
         return files.count
     }
 
+    /// `meta` "locations_read": "1" once every picture and video read before DigUp kept locations has had its look
+    /// (`locateOnce`), else the ids of the ones still waiting for it, as a JSON array.
+    static let locationsReadKey = "locations_read"
+    static let locationsAllRead = "1"
+
+    /// Pictures and videos read before DigUp kept where they were taken get it once per index, from their metadata
+    /// alone: a picture's GPS tags, a video's location, milliseconds a file, and nothing read for the model again. Not
+    /// a Photos library's files, whose location is Photos' (the sync's). A file that's away now (gone, on a drive
+    /// that's unplugged, or in the cloud, where reading it would download it) waits for a later call
+    /// (`locationsReadKey`), which looks at the waiting files alone; one whose row went, or that was read again since
+    /// (which reads its location), stops waiting. Only where this machine reads locations. Returns how many files got
+    /// one.
+    @discardableResult
+    public func locateOnce() throws -> Int {
+        var kinds: [FileKind] = []
+        if ImageExtractor.readsLocations { kinds += [.image, .screenshot] }
+        if VideoExtractor.readsLocations { kinds.append(.video) }
+        guard !kinds.isEmpty else { return 0 }
+        let waiting = try meta(Self.locationsReadKey)   // nil: the first look, at every file
+        guard waiting != Self.locationsAllRead else { return 0 }
+        let onlyWaiting = waiting == nil ? "" : " AND id IN (SELECT value FROM json_each(?))"
+        var files: [(id: Int64, path: String, kind: FileKind)] = []
+        try db.query("""
+            SELECT id, path, kind FROM files WHERE state = 'done' AND kind IN (\(Self.sqlList(kinds)))
+            AND id NOT IN (SELECT file FROM locations)\(onlyWaiting)
+            """, waiting.map { [.text($0)] } ?? []) { row in
+            let path = row.text(1) ?? ""
+            guard PhotosLibrary.library(containing: path) == nil, let kind = FileKind(rawValue: row.text(2) ?? "")
+            else { return }
+            files.append((row.int(0), path, kind))
+        }
+        // Every file looked at before anything is written: the index isn't held while they're read.
+        var found: [(file: Int64, location: Location)] = [], away: [Int64] = []
+        for file in files {
+            guard let info = FileSystem.info(of: file.path), info.isRegular, !info.dataless else {
+                away.append(file.id)
+                continue
+            }
+            let url = URL(fileURLWithPath: file.path)
+            let location = autoreleasepool {
+                file.kind == .video ? VideoExtractor.location(of: url) : ImageExtractor.location(of: url)
+            }
+            if let location { found.append((file.id, location)) }
+        }
+        try db.transaction {
+            for (file, location) in found { try setLocation(location, of: file) }
+            try setMeta(Self.locationsReadKey, away.isEmpty ? Self.locationsAllRead
+                        : String(decoding: try JSONEncoder().encode(away), as: UTF8.self))
+        }
+        return found.count
+    }
+
+    /// Kinds as an SQL list ("'image','video'").
+    static func sqlList(_ kinds: some Sequence<FileKind>) -> String {
+        kinds.map { "'\($0.rawValue)'" }.joined(separator: ",")
+    }
+
     /// A file the indexing helper had to stop on (reading it ran away): it isn't read again until it changes. A long
     /// file that was being finished keeps what was read of it. False when no file has that path.
     @discardableResult
@@ -454,10 +600,16 @@ public final class IndexStore {
     /// the file again (it changed, or the model did) keeps them.
     static let crawlKinds = "('\(SegmentKind.name.rawValue)', '\(SegmentKind.photosInfo.rawValue)')"
 
+    /// The locations the crawl writes: Photos', from the listing. The others come from reading the file, and go when
+    /// it's read again, as its segments do.
+    static let crawlLocation = "source = '\(Location.Source.photos.rawValue)'"
+
     private func deleteSegments(of file: Int64, keepingCrawled: Bool) throws {
         let filter = keepingCrawled ? "AND kind NOT IN \(Self.crawlKinds)" : ""
         try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE file = ? \(filter))", [.int(file)])
         try db.run("DELETE FROM segments WHERE file = ? \(filter)", [.int(file)])
+        let located = keepingCrawled ? "AND NOT \(Self.crawlLocation)" : ""
+        try db.run("DELETE FROM locations WHERE file = ? \(located)", [.int(file)])
     }
 
     /// "Screenshot 2026-10-01 at 9.41.07 PM.png" → searchable words. A Photos library's file is named for its asset's
@@ -479,42 +631,246 @@ public final class IndexStore {
 
     // MARK: Photos
 
-    /// What Photos says about a file from a Photos library, as its `photosInfo` segment keeps it.
+    /// What Photos says about a file from a Photos library: its words, title and date (its `photosInfo` segment),
+    /// whether it's a favorite (`photos_assets`), where it was taken (its `photos` location), and who is in it and
+    /// the albums it's in, as their rows of the file's library (`photos_people`, `photos_albums`). Rows, not Photos'
+    /// uuids: a library renamed or moved is a new library to the index (its people and albums are spelled with its
+    /// path), so its files are linked to its own rows again, and the old library's go.
     public struct PhotosFacts: Equatable, Sendable {
         public var title: String
         public var date: Double
         public var text: String
+        public var favorite: Bool
+        public var location: Location?
+        public var people: Set<Int64>
+        public var albums: Set<Int64>
 
-        public init(_ asset: PhotosLibrary.Asset) {
+        /// An asset's facts, with its people and albums as the rows of its library (`setPhotosPeople`,
+        /// `setPhotosAlbums`, by uuid): one the library's listing doesn't name has none, and isn't linked.
+        public init(_ asset: PhotosLibrary.Asset, people: [String: Int64], albums: [String: Int64]) {
             (title, date, text) = (asset.title, asset.date, asset.text)
+            (favorite, location) = (asset.favorite, asset.location)
+            self.people = Set(asset.people.compactMap { people[$0] })
+            self.albums = Set(asset.albums.compactMap { albums[$0] })
         }
 
-        init(title: String, date: Double, text: String) {
-            (self.title, self.date, self.text) = (title, date, text)
+        init(title: String, date: Double, text: String, favorite: Bool, location: Location? = nil,
+             people: Set<Int64> = [], albums: Set<Int64> = []) {
+            (self.title, self.date, self.text, self.favorite) = (title, date, text, favorite)
+            (self.location, self.people, self.albums) = (location, people, albums)
         }
     }
 
-    /// Every file's Photos facts, by file id.
+    /// Every library file's Photos facts, by file id. A file has them once its segment and its `photos_assets` row
+    /// are both written: an index from before the fork kept the rest has the segment alone, and the next sync writes
+    /// them all.
     func photosFacts() throws -> [Int64: PhotosFacts] {
         var facts: [Int64: PhotosFacts] = [:]
         try db.query("""
-            SELECT s.file, s.excerpt, s.loc, coalesce(fts.original, fts.body) FROM segments s
-            LEFT JOIN fts ON fts.rowid = s.id WHERE s.kind = '\(SegmentKind.photosInfo.rawValue)'
+            SELECT s.file, s.excerpt, s.loc, coalesce(fts.original, fts.body), a.favorite FROM segments s
+            JOIN photos_assets a ON a.file = s.file LEFT JOIN fts ON fts.rowid = s.id
+            WHERE s.kind = '\(SegmentKind.photosInfo.rawValue)'
             """) { row in
-            facts[row.int(0)] = PhotosFacts(title: row.text(1) ?? "", date: row.double(2), text: row.text(3) ?? "")
+            facts[row.int(0)] = PhotosFacts(title: row.text(1) ?? "", date: row.double(2), text: row.text(3) ?? "",
+                                            favorite: row.int(4) == 1)
         }
+        try db.query("SELECT file, latitude, longitude, source, place FROM locations WHERE \(Self.crawlLocation)") {
+            facts[$0.int(0)]?.location = Self.location($0, from: 1)
+        }
+        try db.query("SELECT file, person FROM photos_person_files") { facts[$0.int(0)]?.people.insert($0.int(1)) }
+        try db.query("SELECT file, album FROM photos_album_files") { facts[$0.int(0)]?.albums.insert($0.int(1)) }
         return facts
     }
 
-    /// Replaces a file's Photos facts: keyword search finds Photos' words in it from now on, and a result shows its title
-    /// and date. Nothing is embedded.
-    func setPhotosFacts(_ facts: PhotosFacts, of file: Int64) throws {
-        let kind = SegmentKind.photosInfo.rawValue
-        try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE file = ? AND kind = '\(kind)')",
-                   [.int(file)])
-        try db.run("DELETE FROM segments WHERE file = ? AND kind = '\(kind)'", [.int(file)])
-        try addSegment(file: file, kind: .photosInfo, modality: .none, loc: facts.date, excerpt: facts.title,
-                       text: facts.text)
+    /// Writes what differs between a library file's facts and the ones `stored` (nil: none written yet): keyword
+    /// search finds Photos' words in it, a result shows its title and date, and the filters see its favorite, place,
+    /// people and albums. Nothing is embedded.
+    func setPhotosFacts(_ facts: PhotosFacts, replacing stored: PhotosFacts?, of file: Int64) throws {
+        if stored.map({ ($0.title, $0.date, $0.text) != (facts.title, facts.date, facts.text) }) ?? true {
+            let kind = SegmentKind.photosInfo.rawValue
+            try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE file = ? AND kind = '\(kind)')",
+                       [.int(file)])
+            try db.run("DELETE FROM segments WHERE file = ? AND kind = '\(kind)'", [.int(file)])
+            try addSegment(file: file, kind: .photosInfo, modality: .none, loc: facts.date, excerpt: facts.title,
+                           text: facts.text)
+        }
+        if stored?.favorite != facts.favorite {
+            try db.run("""
+                INSERT INTO photos_assets(file, favorite) VALUES(?, ?)
+                ON CONFLICT(file) DO UPDATE SET favorite = excluded.favorite
+                """, [.int(file), .int(facts.favorite ? 1 : 0)])
+        }
+        if stored?.location != facts.location {
+            if let location = facts.location {
+                try setLocation(location, of: file)
+            } else {
+                try db.run("DELETE FROM locations WHERE file = ?", [.int(file)])
+            }
+        }
+        if stored?.people != facts.people {
+            try db.run("DELETE FROM photos_person_files WHERE file = ?", [.int(file)])
+            for person in facts.people {
+                try db.run("INSERT INTO photos_person_files(person, file) VALUES(?, ?)", [.int(person), .int(file)])
+            }
+        }
+        if stored?.albums != facts.albums {
+            try db.run("DELETE FROM photos_album_files WHERE file = ?", [.int(file)])
+            for album in facts.albums {
+                try db.run("INSERT INTO photos_album_files(album, file) VALUES(?, ?)", [.int(album), .int(file)])
+            }
+        }
+    }
+
+    /// Brings a library's people and pets up to date with its listing, each under Photos' uuid: one new to the index
+    /// is added, a renamed one keeps its row and takes the new name. Returns their ids, by uuid. The ones no file
+    /// shows any more go in `deleteUnlinkedPeopleAndAlbums`.
+    func setPhotosPeople(_ people: [PhotosLibrary.Person], of library: String) throws -> [String: Int64] {
+        var stored: [String: (id: Int64, name: String)] = [:]
+        try db.query("SELECT uuid, id, name FROM photos_people WHERE library = ?", [.text(library)]) {
+            stored[$0.text(0) ?? ""] = ($0.int(1), $0.text(2) ?? "")
+        }
+        var ids: [String: Int64] = [:]
+        for person in people where ids[person.uuid] == nil {
+            if let row = stored[person.uuid] {
+                if row.name != person.name {
+                    try db.run("UPDATE photos_people SET name = ? WHERE id = ?", [.text(person.name), .int(row.id)])
+                }
+                ids[person.uuid] = row.id
+            } else {
+                try db.run("INSERT INTO photos_people(library, uuid, name) VALUES(?, ?, ?)",
+                           [.text(library), .text(person.uuid), .text(person.name)])
+                ids[person.uuid] = db.lastInsertID
+            }
+        }
+        return ids
+    }
+
+    /// Brings a library's albums up to date with its listing, as `setPhotosPeople` does its people: an album renamed
+    /// or moved to another folder keeps its row.
+    func setPhotosAlbums(_ albums: [PhotosLibrary.Album], of library: String) throws -> [String: Int64] {
+        var stored: [String: (id: Int64, title: String, folders: [String])] = [:]
+        try db.query("SELECT uuid, id, title, folders FROM photos_albums WHERE library = ?", [.text(library)]) {
+            stored[$0.text(0) ?? ""] = ($0.int(1), $0.text(2) ?? "", Self.folders(fromJSON: $0.text(3)))
+        }
+        var ids: [String: Int64] = [:]
+        for album in albums where ids[album.uuid] == nil {
+            if let row = stored[album.uuid] {
+                if row.title != album.title || row.folders != album.folders {
+                    try db.run("UPDATE photos_albums SET title = ?, folders = ? WHERE id = ?",
+                               [.text(album.title), .text(try Self.json(folders: album.folders)), .int(row.id)])
+                }
+                ids[album.uuid] = row.id
+            } else {
+                try db.run("INSERT INTO photos_albums(library, uuid, title, folders) VALUES(?, ?, ?, ?)",
+                           [.text(library), .text(album.uuid), .text(album.title),
+                            .text(try Self.json(folders: album.folders))])
+                ids[album.uuid] = db.lastInsertID
+            }
+        }
+        return ids
+    }
+
+    /// Deletes the people and albums no file is linked to any more: no indexed picture shows them now (a name taken
+    /// off, an album emptied or deleted in Photos), or their pictures left the index.
+    func deleteUnlinkedPeopleAndAlbums() throws {
+        try db.run("DELETE FROM photos_people WHERE id NOT IN (SELECT person FROM photos_person_files)")
+        try db.run("DELETE FROM photos_albums WHERE id NOT IN (SELECT album FROM photos_album_files)")
+    }
+
+    /// An album's folders as its row keeps them: a JSON array of the names, outermost first (a name can hold any
+    /// character).
+    static func json(folders: [String]) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        return String(decoding: try encoder.encode(folders), as: UTF8.self)
+    }
+
+    static func folders(fromJSON json: String?) -> [String] {
+        json.flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) } ?? []
+    }
+
+    /// A person or pet named in a Photos library, and how many indexed files show them.
+    public struct PhotosPerson: Sendable, Equatable, Identifiable {
+        public let id: Int64
+        /// The library, as the index spells it (`PhotosHit.library`).
+        public let library: String
+        public let name: String
+        public let files: Int
+    }
+
+    /// An album of a Photos library, and how many indexed files are in it.
+    public struct PhotosAlbum: Sendable, Equatable, Identifiable {
+        public let id: Int64
+        public let library: String
+        public let title: String
+        /// The folders it's in, outermost first.
+        public let folders: [String]
+        public let files: Int
+    }
+
+    /// The people and pets named in the indexed libraries, by name. Two of one name stay two, as Photos keeps them.
+    public func photosPeople() throws -> [PhotosPerson] {
+        var people: [PhotosPerson] = []
+        try db.query("""
+            SELECT p.id, p.library, p.name, COUNT(l.file) FROM photos_people p
+            LEFT JOIN photos_person_files l ON l.person = p.id GROUP BY p.id ORDER BY p.name COLLATE NOCASE, p.id
+            """) {
+            people.append(PhotosPerson(id: $0.int(0), library: $0.text(1) ?? "", name: $0.text(2) ?? "",
+                                       files: Int($0.int(3))))
+        }
+        return people
+    }
+
+    /// The albums of the indexed libraries: the ones in no folder first, then folder by folder (by the folders' names,
+    /// outermost first), each folder's by title.
+    public func photosAlbums() throws -> [PhotosAlbum] {
+        var albums: [PhotosAlbum] = []
+        try db.query("""
+            SELECT a.id, a.library, a.title, a.folders, COUNT(l.file) FROM photos_albums a
+            LEFT JOIN photos_album_files l ON l.album = a.id GROUP BY a.id ORDER BY a.id
+            """) {
+            albums.append(PhotosAlbum(id: $0.int(0), library: $0.text(1) ?? "", title: $0.text(2) ?? "",
+                                      folders: Self.folders(fromJSON: $0.text(3)), files: Int($0.int(4))))
+        }
+        return albums.sorted {
+            $0.folders != $1.folders ? $0.folders.lexicographicallyPrecedes($1.folders)
+                : $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        }
+    }
+
+    // MARK: Locations
+
+    /// Sets where a file was taken, in place of what it had.
+    func setLocation(_ location: Location, of file: Int64) throws {
+        try db.run("""
+            INSERT INTO locations(file, latitude, longitude, source, place) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(file) DO UPDATE SET latitude = excluded.latitude, longitude = excluded.longitude,
+                source = excluded.source, place = excluded.place
+            """, [.int(file), .double(location.latitude), .double(location.longitude), .text(location.source.rawValue),
+                  .optional(location.place)])
+    }
+
+    /// Where the files at `paths` were taken (pins on a map), by path; a file without a location isn't in it.
+    public func locations(of paths: [String]) throws -> [String: Location] {
+        var found: [String: Location] = [:]
+        // A few hundred paths a query: SQLite limits the values one statement takes (999 before 3.32).
+        for start in stride(from: 0, to: paths.count, by: 500) {
+            let some = paths[start..<min(start + 500, paths.count)]
+            try db.query("""
+                SELECT f.path, l.latitude, l.longitude, l.source, l.place FROM locations l JOIN files f ON f.id = l.file
+                WHERE f.path IN (\(some.map { _ in "?" }.joined(separator: ",")))
+                """, some.map { .text($0) }) { row in
+                found[row.text(0) ?? ""] = Self.location(row, from: 1)
+            }
+        }
+        return found
+    }
+
+    /// A location from its row's latitude, longitude, source and place, starting at `column`.
+    static func location(_ row: Statement, from column: Int32) -> Location? {
+        guard let source = Location.Source(rawValue: row.text(column + 2) ?? "") else { return nil }
+        return Location(latitude: row.double(column), longitude: row.double(column + 1), source: source,
+                        place: row.text(column + 3))
     }
 
     // MARK: Stats

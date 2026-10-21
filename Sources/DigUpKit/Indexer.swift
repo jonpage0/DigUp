@@ -89,7 +89,8 @@ public final class Indexer {
 
     /// Crawls `roots` and reconciles the index: new files are queued, changed ones re-queued, moved ones re-pathed
     /// (no re-embedding), and files that are gone or newly excluded are removed. What Photos says about a Photos
-    /// library's files is brought up to date too, without reading them again.
+    /// library's files (its words, favorites, places, people and albums) is brought up to date too, without reading
+    /// them again, and a person or album no file is linked to any more is deleted.
     public func sync(_ roots: [URL]) throws -> SyncSummary {
         let crawl = Crawler.crawl(roots, options: options)
         let existing = try store.files(under: roots.map { $0.standardizedFileURL.path })
@@ -138,18 +139,41 @@ public final class Indexer {
                 try store.delete(row.id)
                 summary.removed += 1
             }
-            if !ids.isEmpty {
-                let stored = try store.photosFacts()
-                for (path, id) in ids {
-                    let facts = IndexStore.PhotosFacts(crawl.photos[path]!)
-                    if stored[id] != facts {
-                        try store.setPhotosFacts(facts, of: id)
-                        summary.described += 1
-                    }
+            try describe(ids, from: crawl, summary: &summary)
+            try store.deleteUnlinkedPeopleAndAlbums()
+        }
+        return summary
+    }
+
+    /// Writes what Photos says about the library files a sync found (`ids`, by path) where it differs from what's
+    /// stored: each library's people and albums first (the ones its files show), then each file's facts, linked to
+    /// its own library's rows (a file whose library was renamed or moved is linked to the new one's).
+    private func describe(_ ids: [String: Int64], from crawl: CrawlReport, summary: inout SyncSummary) throws {
+        guard !ids.isEmpty else { return }
+        let stored = try store.photosFacts()
+        var byLibrary: [String: [(path: String, id: Int64)]] = [:]
+        for (path, id) in ids {
+            guard let library = PhotosLibrary.library(containing: path) else { continue }
+            byLibrary[library, default: []].append((path, id))
+        }
+        for (library, files) in byLibrary {
+            let assets = files.compactMap { crawl.photos[$0.path] }
+            let shown = Set(assets.flatMap(\.people)), filed = Set(assets.flatMap(\.albums))
+            let people = try store.setPhotosPeople((crawl.photosPeople[library] ?? []).filter {
+                shown.contains($0.uuid) && !$0.name.isEmpty
+            }, of: library)
+            let albums = try store.setPhotosAlbums((crawl.photosAlbums[library] ?? []).filter {
+                filed.contains($0.uuid)
+            }, of: library)
+            for (path, id) in files {
+                guard let asset = crawl.photos[path] else { continue }
+                let facts = IndexStore.PhotosFacts(asset, people: people, albums: albums)
+                if stored[id] != facts {
+                    try store.setPhotosFacts(facts, replacing: stored[id], of: id)
+                    summary.described += 1
                 }
             }
         }
-        return summary
     }
 
     // MARK: Run
@@ -279,7 +303,7 @@ public final class Indexer {
             let worded = chunks.filter(SearchText.hasWords).count
             if worded > 0 { measured.add("docChunk", units: Double(worded), seconds: seconds) }
         case .audio(_, let duration): measured.add("audioSecond", units: duration, seconds: seconds)
-        case .video(_, _, let duration): measured.add("videoSecond", units: duration, seconds: seconds)
+        case .video(_, _, let duration, _): measured.add("videoSecond", units: duration, seconds: seconds)
         case .code(let file): measured.add("codeStretch", units: Double(file.pieces.count), seconds: seconds)
         case .nothing: break
         }
@@ -366,7 +390,8 @@ public final class Indexer {
         /// `chunks`: the ones in `read` (from 0) of the document's `total` (counted up to `IndexOptions.maxChunks` + 1).
         case doc(chunks: [String], read: Range<Int>, total: Int, characters: Int)
         case audio(pieces: [MediaPiece], duration: Double)
-        case video(frames: [MediaPiece], sound: [MediaPiece], duration: Double)
+        /// `location`: where it was taken, from its own metadata (none read for a Photos library's video).
+        case video(frames: [MediaPiece], sound: [MediaPiece], duration: Double, location: Location?)
         case code(CodeExtractor.File)
     }
 
@@ -490,7 +515,10 @@ public final class Indexer {
                     ? try runBlocking { try await AudioExtractor.windows(of: url, window: window, hop: hop, to: folder) }
                         .pieces
                     : []
-                prepared.payload = .video(frames: frames, sound: sound, duration: duration)
+                // A library's video has Photos' location (the sync's), the one the user sees and can correct.
+                let location = PhotosLibrary.library(containing: url.path) == nil
+                    ? VideoExtractor.location(of: url) : nil
+                prepared.payload = .video(frames: frames, sound: sound, duration: duration, location: location)
             case .code:
                 prepared.payload = .code(try CodeExtractor.read(url, options: options))
             }
@@ -538,8 +566,8 @@ public final class Indexer {
                                      later: later)
             case .audio(let pieces, let duration):
                 results[0] = try audio(batch[0], pieces: pieces, duration: duration)
-            case .video(let frames, let sound, let duration):
-                results[0] = try video(batch[0], frames: frames, sound: sound, duration: duration)
+            case .video(let frames, let sound, let duration, let location):
+                results[0] = try video(batch[0], frames: frames, sound: sound, duration: duration, location: location)
             case .code(let code):
                 results[0] = try self.code(batch[0], code)
             }
@@ -594,6 +622,11 @@ public final class Indexer {
                 if let taken = item.image.taken { info["taken"] = taken }
                 if screenshot { info["ocr_chars"] = "\(item.ocr.count)" }
                 try store.finish(file.id, state: "done", info: info)
+                // Where its GPS tags say it was taken. A library's picture has Photos' location instead (the sync's),
+                // the one the user sees and can correct.
+                if let location = item.image.location, PhotosLibrary.library(containing: file.path) == nil {
+                    try store.setLocation(location, of: file.id)
+                }
                 let note = item.fromPhotos ? (screenshot || !item.ocr.isEmpty ? "Photos' text \(item.ocr.count) chars" : nil)
                     : screenshot ? "ocr \(item.ocr.count) chars" : nil
                 results[item.slot] = ("done", note)
@@ -737,8 +770,8 @@ public final class Indexer {
         return ("done", "\(pieces.count) windows, \(Int(duration)) s")
     }
 
-    private func video(_ file: FileRecord, frames: [MediaPiece], sound: [MediaPiece], duration: Double) throws
-        -> (String, String?) {
+    private func video(_ file: FileRecord, frames: [MediaPiece], sound: [MediaPiece], duration: Double,
+                       location: Location?) throws -> (String, String?) {
         guard !frames.isEmpty || !sound.isEmpty else {
             try store.finish(file.id, state: "skipped", detail: "no frames or sound")
             return ("skipped", "no frames or sound")
@@ -757,6 +790,7 @@ public final class Indexer {
             }
             try store.finish(file.id, state: "done", info: ["duration": String(format: "%.1f", duration),
                                                             "frames": "\(frames.count)", "sound_windows": "\(sound.count)"])
+            if let location { try store.setLocation(location, of: file.id) }
         }
         return ("done", "\(frames.count) frames, \(sound.count) sound windows, \(Int(duration)) s")
     }

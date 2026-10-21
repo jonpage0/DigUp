@@ -187,5 +187,11 @@ extension VideoExtractor {
             throw ExtractError.unreadable("no frame at \(seconds) s")
         }
     }
+
+    /// A video's location isn't read here yet (ffprobe has it, as the "location" tag): off the Mac a video has no
+    /// location of its own.
+    static let readsLocations = false
+
+    static func location(of url: URL) -> Location? { nil }
 }
 #endif

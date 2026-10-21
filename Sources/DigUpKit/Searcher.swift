@@ -37,6 +37,53 @@ public struct PhotosHit: Sendable, Equatable {
     public let date: Double?
 }
 
+/// What a search keeps besides its kinds: Photos' facts about a library's files, and where files were taken. The
+/// parts combine with AND; an empty filter keeps every file.
+public struct SearchFilter: Sendable, Equatable {
+    /// People a file must show, every one of them (ids of `IndexStore.photosPeople`). An entry is one person, or the
+    /// people who share a name, any of whom counts for it.
+    public var people: [Set<Int64>]
+    /// Albums a file must be in, any of them (ids of `IndexStore.photosAlbums`).
+    public var albums: Set<Int64>
+    /// Only Photos' favorites.
+    public var favorites: Bool
+    /// Only files taken inside this box (`IndexStore.locations`).
+    public var area: Area?
+
+    /// A box on the map, in degrees: south to north, west to east.
+    public struct Area: Sendable, Equatable {
+        public var latitudes: ClosedRange<Double>
+        public var longitudes: ClosedRange<Double>
+
+        public init(latitudes: ClosedRange<Double>, longitudes: ClosedRange<Double>) {
+            (self.latitudes, self.longitudes) = (latitudes, longitudes)
+        }
+    }
+
+    public init(people: [Set<Int64>] = [], albums: Set<Int64> = [], favorites: Bool = false, area: Area? = nil) {
+        (self.people, self.albums, self.favorites, self.area) = (people, albums, favorites, area)
+    }
+
+    public var isEmpty: Bool { people.isEmpty && albums.isEmpty && !favorites && area == nil }
+
+    /// The files it keeps, as a query of their ids and the values it takes; nil when it keeps every file.
+    var query: (sql: String, values: [SQLValue])? {
+        func list(_ ids: Set<Int64>) -> String { ids.map(String.init).joined(separator: ",") }
+        var parts: [String] = [], values: [SQLValue] = []
+        for group in people {
+            parts.append("SELECT file FROM photos_person_files WHERE person IN (\(list(group)))")
+        }
+        if !albums.isEmpty { parts.append("SELECT file FROM photos_album_files WHERE album IN (\(list(albums)))") }
+        if favorites { parts.append("SELECT file FROM photos_assets WHERE favorite = 1") }
+        if let area {
+            parts.append("SELECT file FROM locations WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")
+            values += [.double(area.latitudes.lowerBound), .double(area.latitudes.upperBound),
+                       .double(area.longitudes.lowerBound), .double(area.longitudes.upperBound)]
+        }
+        return parts.isEmpty ? nil : (parts.joined(separator: " INTERSECT "), values)
+    }
+}
+
 /// Hybrid search: meaning (EmbeddingGemma's vectors) + words (FTS5).
 ///
 /// Meaning is the model's cosine similarity, put on one scale per query (`meaning`): every vector is scored anyway, so
@@ -126,12 +173,26 @@ public final class Searcher {
     public static let wordWeight = 2.0
     public static let codeWordWeight = 1.0
 
-    public func search(_ text: String, queryVector: [Float]?, kinds: Set<FileKind>? = nil, limit: Int = 20,
-                       zGate: Double = 2.0, wordWeight: Double? = nil, prefixLast: Bool = false) throws -> [SearchHit] {
+    /// `filter` narrows the files as `kinds` does. With no words (`text` blank) and a filter, the search lists what the
+    /// filter keeps instead, newest first (`browse`).
+    public func search(_ text: String, queryVector: [Float]?, kinds: Set<FileKind>? = nil,
+                       filter: SearchFilter = SearchFilter(), limit: Int = 20, zGate: Double = 2.0,
+                       wordWeight: Double? = nil, prefixLast: Bool = false) throws -> [SearchHit] {
+        if !filter.isEmpty, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return try browse(filter, kinds: kinds, limit: limit)
+        }
         let wordWeight = wordWeight ?? (isCode ? Self.codeWordWeight : Self.wordWeight)
         if queryVector != nil, !vectorsLoaded { try reload() }
         let fileKind = self.fileKind
-        let allowed = { (file: Int64) -> Bool in kinds == nil || fileKind[file].map { kinds!.contains($0) } ?? false }
+        let narrowing = filter.query
+        let kept = try narrowing.map { query -> Set<Int64> in
+            var files = Set<Int64>()
+            try store.db.query(query.sql, query.values) { files.insert($0.int(0)) }
+            return files
+        }
+        let allowed = { (file: Int64) -> Bool in
+            (kinds == nil || fileKind[file].map { kinds!.contains($0) } ?? false) && (kept?.contains(file) ?? true)
+        }
 
         // Meaning: score every vector on this query's scale (`meaning`), keep each file's best segment.
         var best: [Int64: (z: Double, cosine: Double, row: Int)] = [:]
@@ -163,11 +224,14 @@ public final class Searcher {
         }
         if !patterns.isEmpty {
             var seen = Set<Int64>()
+            // The filter narrows the matches before they're cut to the best 1,000: else a file it keeps could be
+            // outranked by that many matches it doesn't, and never be seen.
+            let onlyKept = narrowing.map { " AND s.file IN (\($0.sql))" } ?? ""
             try store.db.query("""
                 SELECT s.file, s.id, snippet(fts, 1, '«', '»', '…', 12), fts.original FROM fts
                 JOIN segments s ON s.id = fts.rowid
-                WHERE fts MATCH ? ORDER BY bm25(fts, 3.0, 1.0) LIMIT 1000
-                """, [.text(patterns.joined(separator: " OR "))]) { row in
+                WHERE fts MATCH ?\(onlyKept) ORDER BY bm25(fts, 3.0, 1.0) LIMIT 1000
+                """, [.text(patterns.joined(separator: " OR "))] + (narrowing?.values ?? [])) { row in
                 let file = row.int(0)
                 guard words.count < 100, allowed(file), seen.insert(file).inserted else { return }
                 // Text that normalizing changed is quoted as it's written (with its hamza, harakat, joiners).
@@ -221,16 +285,7 @@ public final class Searcher {
                                                    identifier: rank < 10 ? identifier : nil, query: text, terms: terms,
                                                    wordsHere: keyword?.1.segment == segmentID || identifier != nil)
             }
-            var path = "", kind = FileKind.doc, modified = 0.0, size: Int64 = 0, info: [String: String] = [:]
-            try store.db.query("SELECT path, kind, mtime, size, info FROM files WHERE id = ?", [.int(file)]) {
-                path = $0.text(0) ?? ""
-                kind = FileKind(rawValue: $0.text(1) ?? "") ?? .doc
-                modified = $0.double(2)
-                size = $0.int(3)
-                if let json = $0.text(4)?.data(using: .utf8) {
-                    info = (try? JSONSerialization.jsonObject(with: json) as? [String: String]) ?? [:]
-                }
-            }
+            let row = try fileRow(file)
             var segment = SegmentKind.name, loc: Double?, locEnd: Double?, storedExcerpt: String?
             try store.db.query("SELECT kind, loc, loc_end, excerpt FROM segments WHERE id = ?", [.int(segmentID)]) {
                 segment = SegmentKind(rawValue: $0.text(0) ?? "") ?? .name
@@ -239,17 +294,7 @@ public final class Searcher {
                 storedExcerpt = $0.text(3)
             }
             // Photos' facts keep the title and the date where other segments keep an excerpt and a place.
-            var photos: PhotosHit?
             if segment == .photosInfo { (loc, locEnd, storedExcerpt) = (nil, nil, nil) }
-            if let asset = PhotosLibrary.asset(ofFile: path) {
-                var title = "", date: Double?
-                try store.db.query("SELECT excerpt, loc FROM segments WHERE file = ? AND kind = ? LIMIT 1",
-                                   [.int(file), .text(SegmentKind.photosInfo.rawValue)]) {
-                    title = $0.text(0) ?? ""
-                    date = $0.isNull(1) ? nil : $0.double(1)
-                }
-                photos = PhotosHit(library: asset.library, uuid: asset.uuid, title: title, date: date)
-            }
             // Quote the matched words only when they come from the segment we point at, so a PDF hit on page 5
             // never shows page 2's words. A segment with no place and no text of its own (a screenshot's image
             // vector) can borrow them from its file's OCR text, which describes the same picture.
@@ -263,13 +308,68 @@ public final class Searcher {
                 }
                 if matchedKind != SegmentKind.name.rawValue { snippet = excerpt(text, limit: 400) }
             }
-            hits.append(SearchHit(path: path, kind: kind, score: score, z: semantic?.z, cosine: semantic?.cosine,
-                                  keywordRank: keyword?.0, segment: segment, segmentID: segmentID, loc: loc,
-                                  locEnd: locEnd,
-                                  excerpt: snippet ?? storedExcerpt, modified: modified, size: size, info: info,
-                                  focus: focus, photos: photos))
+            hits.append(SearchHit(path: row.path, kind: row.kind, score: score, z: semantic?.z,
+                                  cosine: semantic?.cosine, keywordRank: keyword?.0, segment: segment,
+                                  segmentID: segmentID, loc: loc, locEnd: locEnd, excerpt: snippet ?? storedExcerpt,
+                                  modified: row.modified, size: row.size, info: row.info, focus: focus,
+                                  photos: try photosHit(file: file, path: row.path)))
         }
         return hits
+    }
+
+    /// A search with no words and a filter: the newest files the filter keeps (of `kinds`), by when Photos says a
+    /// library's picture was taken, else by the file's modification date. Each points at its Photos facts, else at
+    /// its name.
+    private func browse(_ filter: SearchFilter, kinds: Set<FileKind>?, limit: Int) throws -> [SearchHit] {
+        guard let query = filter.query else { return [] }
+        let ofKinds = kinds.map { " AND f.kind IN (\(IndexStore.sqlList($0)))" } ?? ""
+        var files: [Int64] = []
+        try store.db.query("""
+            SELECT f.id FROM files f
+            LEFT JOIN segments s ON s.file = f.id AND s.kind = '\(SegmentKind.photosInfo.rawValue)'
+            WHERE f.id IN (\(query.sql))\(ofKinds) ORDER BY coalesce(s.loc, f.mtime) DESC, f.id DESC LIMIT ?
+            """, query.values + [.int(Int64(limit))]) { files.append($0.int(0)) }
+        return try files.map { file in
+            let row = try fileRow(file)
+            var segment = (id: Int64(0), kind: SegmentKind.name)
+            try store.db.query("""
+                SELECT id, kind FROM segments WHERE file = ? AND kind IN \(IndexStore.crawlKinds)
+                ORDER BY kind = '\(SegmentKind.name.rawValue)' LIMIT 1
+                """, [.int(file)]) { segment = ($0.int(0), SegmentKind(rawValue: $0.text(1) ?? "") ?? .name) }
+            return SearchHit(path: row.path, kind: row.kind, score: 0, z: nil, cosine: nil, keywordRank: nil,
+                             segment: segment.kind, segmentID: segment.id, loc: nil, locEnd: nil, excerpt: nil,
+                             modified: row.modified, size: row.size, info: row.info,
+                             photos: try photosHit(file: file, path: row.path))
+        }
+    }
+
+    /// A file's row, as a hit shows it.
+    private func fileRow(_ file: Int64) throws
+        -> (path: String, kind: FileKind, modified: Double, size: Int64, info: [String: String]) {
+        var row = (path: "", kind: FileKind.doc, modified: 0.0, size: Int64(0), info: [String: String]())
+        try store.db.query("SELECT path, kind, mtime, size, info FROM files WHERE id = ?", [.int(file)]) {
+            row.path = $0.text(0) ?? ""
+            row.kind = FileKind(rawValue: $0.text(1) ?? "") ?? .doc
+            row.modified = $0.double(2)
+            row.size = $0.int(3)
+            if let json = $0.text(4)?.data(using: .utf8) {
+                row.info = (try? JSONSerialization.jsonObject(with: json) as? [String: String]) ?? [:]
+            }
+        }
+        return row
+    }
+
+    /// A Photos library's file: the asset it shows, and its title and date in Photos (its `photosInfo` segment). Nil
+    /// for any other file.
+    private func photosHit(file: Int64, path: String) throws -> PhotosHit? {
+        guard let asset = PhotosLibrary.asset(ofFile: path) else { return nil }
+        var title = "", date: Double?
+        try store.db.query("SELECT excerpt, loc FROM segments WHERE file = ? AND kind = ? LIMIT 1",
+                           [.int(file), .text(SegmentKind.photosInfo.rawValue)]) {
+            title = $0.text(0) ?? ""
+            date = $0.isNull(1) ? nil : $0.double(1)
+        }
+        return PhotosHit(library: asset.library, uuid: asset.uuid, title: title, date: date)
     }
 
     /// Code: the stretch to point at, and the line in it to open at. A name looked up points at the stretch that

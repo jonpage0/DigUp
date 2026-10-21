@@ -34,7 +34,30 @@ extension ImageExtractor {
         try write(thumbnail, to: out, png: png)
         let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
         return Prepared(path: out.path, width: width, height: height,
-                        taken: exif?[kCGImagePropertyExifDateTimeOriginal] as? String)
+                        taken: exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
+                        location: location(in: properties))
+    }
+
+    /// A picture's GPS tags are read here (ImageIO).
+    static let readsLocations = true
+
+    /// Where the picture was taken, from its GPS tags (a phone's photo has them; a screenshot doesn't), or nil. Its
+    /// properties only: nothing is decoded.
+    static func location(of url: URL) -> Location? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        else { return nil }
+        return location(in: properties)
+    }
+
+    /// The GPS tags keep degrees without a sign, and the hemisphere apart (N or S, E or W).
+    private static func location(in properties: [CFString: Any]) -> Location? {
+        guard let gps = properties[kCGImagePropertyGPSDictionary] as? [CFString: Any],
+              let latitude = gps[kCGImagePropertyGPSLatitude] as? Double,
+              let longitude = gps[kCGImagePropertyGPSLongitude] as? Double else { return nil }
+        let south = (gps[kCGImagePropertyGPSLatitudeRef] as? String)?.uppercased() == "S"
+        let west = (gps[kCGImagePropertyGPSLongitudeRef] as? String)?.uppercased() == "W"
+        return Location(latitude: south ? -latitude : latitude, longitude: west ? -longitude : longitude, source: .exif)
     }
 
     /// A picture ImageIO can't read, like an SVG: AppKit draws it, straight at the size the model needs (a vector
@@ -60,7 +83,7 @@ extension ImageExtractor {
         guard let bitmap = context.makeImage() else { throw ExtractError.unreadable("can't draw this picture") }
         let out = folder.appendingPathComponent(UUID().uuidString + (png ? ".png" : ".jpg"))
         try write(bitmap, to: out, png: png)
-        return Prepared(path: out.path, width: width, height: height, taken: nil)
+        return Prepared(path: out.path, width: width, height: height, taken: nil, location: nil)
     }
 
     static func fullImage(_ url: URL) -> CGImage? {

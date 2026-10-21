@@ -47,6 +47,208 @@ import Testing
                             title: title ?? asset.title, date: asset.date, words: words)
     }
 
+    /// The same asset with what else Photos says about it: a favorite, where it was taken, who's in it, its albums.
+    func asset(_ asset: PhotosLibrary.Asset, favorite: Bool = false, at point: (Double, Double)? = nil,
+               place: String? = nil, people: [PhotosLibrary.Person] = [], albums: [PhotosLibrary.Album] = [])
+        -> PhotosLibrary.Asset {
+        PhotosLibrary.Asset(uuid: asset.uuid, path: asset.path, movie: asset.movie, screenshot: asset.screenshot,
+                            title: asset.title, date: asset.date, words: asset.words, favorite: favorite,
+                            latitude: point?.0, longitude: point?.1, place: place, people: people.map(\.uuid),
+                            albums: albums.map(\.uuid))
+    }
+
+    /// The same asset, its file in `library` instead of in `old` (the library renamed or moved).
+    func asset(_ asset: PhotosLibrary.Asset, movedFrom old: String, to library: String) -> PhotosLibrary.Asset {
+        PhotosLibrary.Asset(uuid: asset.uuid, path: library + asset.path.dropFirst(old.count), movie: asset.movie,
+                            screenshot: asset.screenshot, title: asset.title, date: asset.date, words: asset.words,
+                            favorite: asset.favorite, latitude: asset.latitude, longitude: asset.longitude,
+                            place: asset.place, people: asset.people, albums: asset.albums)
+    }
+
+    /// Rows this index's connection has written since it opened.
+    func writes(_ store: IndexStore) throws -> Int64 {
+        var count: Int64 = 0
+        try store.db.query("SELECT total_changes()") { count = $0.int(0) }
+        return count
+    }
+
+    @Test func photosPeopleAlbumsAndPlacesFollowTheListing() throws {
+        let (library, listed) = try library(3, in: folder)
+        let katie = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katie")
+        let suzy = PhotosLibrary.Person(uuid: "P-SUZY", name: "Suzy")
+        let otherSuzy = PhotosLibrary.Person(uuid: "P-SUZY-2", name: "Suzy")
+        let trip = PhotosLibrary.Album(uuid: "A-TRIP", title: "Trip", folders: ["2024", "Florida"])
+        let farm = PhotosLibrary.Album(uuid: "A-FARM", title: "Pumpkin Farm")
+        let empty = PhotosLibrary.Album(uuid: "A-EMPTY", title: "Nothing in it")
+        var assets = [asset(listed[0], favorite: true, at: (51.50357167, -0.1318055), place: "St James's Park",
+                            people: [katie, suzy], albums: [trip]),
+                      asset(listed[1], people: [otherSuzy], albums: [farm]),
+                      listed[2]]
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        let first = PhotosLibrary.Listing(assets: assets, people: [katie, suzy, otherSuzy], albums: [trip, farm, empty])
+        #expect(try indexer(store) { _ in first }.sync([library]).described == 3)
+        let people = try store.photosPeople()
+        #expect(people.map(\.name) == ["Katie", "Suzy", "Suzy"])   // one name, two people: two rows
+        #expect(people.map(\.files) == [1, 1, 1])
+        #expect(Set(people.map(\.library)) == [library.path])
+        let albums = try store.photosAlbums()   // an album no indexed picture is in isn't kept
+        #expect(albums.map(\.title) == ["Pumpkin Farm", "Trip"])
+        #expect(albums.map(\.folders) == [[], ["2024", "Florida"]])
+        let london = try #require(try store.locations(of: listed.map(\.path))[listed[0].path])
+        #expect(london == Location(latitude: 51.50357167, longitude: -0.1318055, source: .photos,
+                                   place: "St James's Park"))
+        var favorites: [Int64] = []
+        try store.db.query("SELECT favorite FROM photos_assets ORDER BY file") { favorites.append($0.int(0)) }
+        #expect(favorites == [1, 0, 0])   // one row a library file
+
+        // Unchanged: nothing is written.
+        let before = try writes(store)
+        #expect(try indexer(store) { _ in first }.sync([library]).described == 0)
+        #expect(try writes(store) == before)
+
+        // Renamed in Photos, an album renamed and moved, a name taken off a picture, a location removed: the same
+        // rows change in place, and a person no picture shows any more goes.
+        let katherine = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katherine")
+        let roadTrip = PhotosLibrary.Album(uuid: "A-TRIP", title: "Road trip", folders: ["2025"])
+        assets[0] = asset(listed[0], favorite: true, people: [katherine, suzy], albums: [roadTrip])
+        assets[1] = asset(listed[1], albums: [farm])
+        let second = PhotosLibrary.Listing(assets: assets, people: [katherine, suzy, otherSuzy],
+                                           albums: [roadTrip, farm])
+        #expect(try indexer(store) { _ in second }.sync([library]).described == 2)
+        let renamed = try store.photosPeople()
+        #expect(renamed.map(\.name) == ["Katherine", "Suzy"])
+        #expect(renamed.map(\.id) == [people[0].id, people[1].id])
+        let moved = try store.photosAlbums()
+        #expect(moved.map(\.title) == ["Pumpkin Farm", "Road trip"])
+        #expect(moved.last?.id == albums.last?.id && moved.last?.folders == ["2025"])
+        #expect(try store.locations(of: listed.map(\.path)).isEmpty)
+    }
+
+    @Test func aLibraryRenamedInAChosenFolderHasItsPeopleAndAlbumsUnderItsNewName() throws {
+        let pictures = folder.appendingPathComponent("Pictures")
+        let (library, listed) = try library(2, in: pictures)
+        let katie = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katie")
+        let trip = PhotosLibrary.Album(uuid: "A-TRIP", title: "Trip")
+        let assets = [asset(listed[0], favorite: true, people: [katie], albums: [trip]),
+                      asset(listed[1], people: [katie])]
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        // The listing names the files under the library's path as it is when it's read.
+        let indexer = try indexer(store) { path in
+            PhotosLibrary.Listing(assets: assets.map { asset($0, movedFrom: library.path, to: path) }, people: [katie],
+                                  albums: [trip])
+        }
+        #expect(try indexer.sync([pictures]).described == 2)
+
+        // Renamed in Pictures: its files move with it (nothing is read again), and they're linked to the people and
+        // album of the library under its new name; the old name's rows go with their last links.
+        let renamed = pictures.appendingPathComponent("Renamed.photoslibrary")
+        try FileManager.default.moveItem(at: library, to: renamed)
+        let sync = try indexer.sync([pictures])
+        #expect(sync.moved == 2 && sync.added == 0 && sync.removed == 0 && sync.queued.isEmpty)
+        #expect(sync.described == 2)
+        let people = try store.photosPeople()
+        #expect(people.map(\.library) == [renamed.path] && people.map(\.files) == [2])
+        let albums = try store.photosAlbums()
+        #expect(albums.map(\.library) == [renamed.path] && albums.map(\.files) == [1])
+        let katieID = try #require(people.first?.id)
+        let withKatie = try Searcher(store: store, loadVectors: false)
+            .search("", queryVector: nil, filter: SearchFilter(people: [[katieID]]))
+        #expect(withKatie.count == 2 && withKatie.allSatisfy { $0.path.hasPrefix(renamed.path + "/") })
+
+        // Unchanged since: nothing is written.
+        let before = try writes(store)
+        let again = try indexer.sync([pictures])
+        #expect(again.unchanged == 2 && again.described == 0)
+        #expect(try writes(store) == before)
+    }
+
+    @Test func filtersKeepWhoIsInItTheAlbumsFavoritesAndPlace() throws {
+        let (library, listed) = try library(4, in: folder)   // taken in this order, a second apart
+        let katie = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katie")
+        let suzy = PhotosLibrary.Person(uuid: "P-SUZY", name: "Suzy")
+        let otherSuzy = PhotosLibrary.Person(uuid: "P-SUZY-2", name: "Suzy")
+        let trip = PhotosLibrary.Album(uuid: "A-TRIP", title: "Trip")
+        let farm = PhotosLibrary.Album(uuid: "A-FARM", title: "Pumpkin Farm")
+        let assets = [asset(listed[0], favorite: true, at: (51.5, -0.13), people: [katie, suzy], albums: [trip]),
+                      asset(listed[1], at: (-34.9, 138.6), people: [katie], albums: [farm]),
+                      asset(listed[2], people: [otherSuzy], albums: [farm]),
+                      listed[3]]
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        let listing = PhotosLibrary.Listing(assets: assets, people: [katie, suzy, otherSuzy], albums: [trip, farm])
+        _ = try indexer(store) { _ in listing }.sync([library])
+        // A picture of London from outside the library, newer than all of them, located by its own GPS tags.
+        let elsewhere = try store.insert(Candidate(path: "/elsewhere/london.jpg", kind: .image, size: 1,
+                                                   mtime: 1_700_000_010, inode: 99, device: 1))
+        try store.setLocation(try #require(Location(latitude: 51.51, longitude: -0.12, source: .exif)), of: elsewhere)
+
+        let people = try store.photosPeople()
+        let katieID = try #require(people.first { $0.name == "Katie" }?.id)
+        let suzys = Set(people.filter { $0.name == "Suzy" }.map(\.id))
+        let albums = Set(try store.photosAlbums().map(\.id))
+        let london = SearchFilter.Area(latitudes: 51...52, longitudes: -1...1)
+        let searcher = try Searcher(store: store, loadVectors: false)
+        // With no words: what the filter keeps, newest first.
+        func kept(_ filter: SearchFilter, kinds: Set<FileKind>? = nil) throws -> [String] {
+            try searcher.search("", queryVector: nil, kinds: kinds, filter: filter).map(\.path)
+        }
+        #expect(try kept(SearchFilter(people: [[katieID]])) == [assets[1].path, assets[0].path])
+        // People: each one in it. A name two people share: either of them.
+        #expect(try kept(SearchFilter(people: [[katieID], suzys])) == [assets[0].path])
+        #expect(try kept(SearchFilter(people: [suzys])) == [assets[2].path, assets[0].path])
+        // Albums: any of them.
+        #expect(try kept(SearchFilter(albums: albums)) == [assets[2].path, assets[1].path, assets[0].path])
+        #expect(try kept(SearchFilter(favorites: true)) == [assets[0].path])
+        // A box on the map: by Photos' date, else the file's own.
+        #expect(try kept(SearchFilter(area: london)) == ["/elsewhere/london.jpg", assets[0].path])
+        #expect(try kept(SearchFilter(favorites: true, area: london)) == [assets[0].path])
+        #expect(try kept(SearchFilter(area: london), kinds: [.video]).isEmpty)
+        let first = try #require(try searcher.search("", queryVector: nil, filter: SearchFilter(favorites: true)).first)
+        #expect(first.segment == .photosInfo && first.photos?.title == assets[0].title)
+
+        // With words, the filter narrows what they find.
+        let found = try searcher.search("Beach", queryVector: nil, filter: SearchFilter(people: [[katieID]]))
+        #expect(Set(found.map(\.path)) == [assets[0].path, assets[1].path])
+        #expect(try searcher.search("Beach", queryVector: nil).count == 4)
+    }
+
+    @Test func aFilterKeepsItsFilesAmongMoreWordMatchesThanSearchLooksAt() throws {
+        let (library, listed) = try library(2, in: folder)
+        let assets = [asset(listed[0], favorite: true), listed[1]]
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        _ = try indexer(store) { _ in PhotosLibrary.Listing(assets: assets) }.sync([library])
+        // More notes than keyword search keeps matches of (1,000), each saying "beach" more than Photos' words do.
+        try store.db.transaction {
+            for number in 0..<1_100 {
+                let id = try store.insert(Candidate(path: "/notes/beach \(number).txt", kind: .doc, size: 1, mtime: 1,
+                                                    inode: UInt64(1_000 + number), device: 1))
+                try store.addSegment(file: id, kind: .chunk, modality: .text, text: "beach beach")
+            }
+        }
+        let searcher = try Searcher(store: store, loadVectors: false)
+        #expect(try searcher.search("beach", queryVector: nil, filter: SearchFilter(favorites: true)).map(\.path)
+                == [assets[0].path])
+    }
+
+    #if canImport(ImageIO)
+    @Test func aLibrarysPictureHasPhotosLocationNeverItsOwn() throws {
+        // Both pictures' files carry GPS tags (Miami). Photos says the first was taken in Adelaide (as a location typed
+        // or corrected in Photos would), and has no location for the second.
+        let (library, listed) = try library(2, in: folder)
+        for asset in listed { try ImageTests.writeJPEG(URL(fileURLWithPath: asset.path), at: (25.79, -80.13)) }
+        let assets = [asset(listed[0], at: (-34.9, 138.6)), listed[1]]
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        var options = IndexOptions()
+        options.photos = PhotosLibrary.Reader { _ in PhotosLibrary.Listing(assets: assets) }
+        let indexer = try Indexer(store: store, options: options, makeEmbedder: { FakeEmbedder() })
+        _ = try indexer.sync([library])
+        #expect(try indexer.run()["done"] == 2)   // both read: their tags were there to take
+        let locations = try store.locations(of: listed.map(\.path))
+        #expect(locations.count == 1)
+        let adelaide = try #require(locations[listed[0].path])
+        #expect(adelaide.source == .photos && adelaide.latitude == -34.9)
+    }
+    #endif
+
     @Test func aLibraryInAChosenFolderIsReadThroughItsCatalog() throws {
         // Pictures, with a library in it: 300 pictures to a folder, named for their uuids, which a walk would take
         // for a dataset. Its database is never a candidate: only what the listing names is.

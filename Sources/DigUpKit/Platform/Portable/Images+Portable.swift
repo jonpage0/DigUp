@@ -39,8 +39,14 @@ extension ImageExtractor {
         }
         let out = folder.appendingPathComponent(UUID().uuidString + (png ? ".png" : ".jpg"))
         try image.write(to: out, png: png)
-        return Prepared(path: out.path, width: width, height: height, taken: exif?.dateTimeOriginal)
+        return Prepared(path: out.path, width: width, height: height, taken: exif?.dateTimeOriginal, location: nil)
     }
+
+    /// A picture's GPS tags aren't read here yet (`EXIF` reads the orientation and the date taken, not the GPS
+    /// directory): off the Mac a picture has no location of its own.
+    static let readsLocations = false
+
+    static func location(of url: URL) -> Location? { nil }
 
     /// The whole picture, through ffmpeg as 8-bit RGB (PPM down a pipe), turned the way the file says (irot/imir in
     /// HEIF, the EXIF orientation elsewhere) and, for a tiled HEIC, stitched whole. ffmpeg 8.1 and later do both

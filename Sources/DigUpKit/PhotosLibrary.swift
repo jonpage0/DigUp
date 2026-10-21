@@ -13,8 +13,9 @@ import Foundation
 /// - every file read from a library is named after its asset's uuid: an original (originals/F/<uuid>.heic), an edited
 ///   version (resources/renders/F/<uuid>_1_201_a.heic) or a preview (resources/derivatives/F/<uuid>_1_105_c.jpeg).
 ///   That's how a result finds its way back to Photos (`asset(ofFile:)`), and the crawl keeps only files named so.
-/// - what Photos knows goes to keyword search in a segment of its own (`SegmentKind.photosInfo`), which the crawl keeps
-///   up to date without reading the picture again.
+/// - what Photos knows goes to keyword search in a segment of its own (`SegmentKind.photosInfo`), and what can be
+///   filtered on (who is in it, its albums, favorites, where it was taken) to tables of its own
+///   (`IndexStore.PhotosFacts`). The crawl keeps both up to date without reading the picture again.
 /// - the words in a picture are the ones Photos read in it (`RecognizedText`): a screenshot isn't read again, and a
 ///   photo is found by the words in it too (a sign, a label, a saved post).
 /// - a photo whose original is only in iCloud ("Optimize Mac Storage") is read from Photos' own preview: 1,024 pixels on
@@ -87,27 +88,76 @@ public enum PhotosLibrary {
         /// a place ("Sun Belt"), which would match thousands of pictures at once, nor the words Photos read in the
         /// picture, which come with the picture when it's read (`RecognizedText`).
         public let words: [String]
+        /// A favorite in Photos.
+        public let favorite: Bool
+        /// Where it was taken, as Photos shows it (nil, nil: Photos has no location for it), and Photos' name for the
+        /// place.
+        public let latitude: Double?
+        public let longitude: Double?
+        public let place: String?
+        /// The uuids of the people and pets named in it (`Listing.people`), and of its albums (`Listing.albums`).
+        public let people: [String]
+        public let albums: [String]
 
         public init(uuid: String, path: String, movie: Bool, screenshot: Bool, title: String, date: Double,
-                    words: [String]) {
+                    words: [String], favorite: Bool = false, latitude: Double? = nil, longitude: Double? = nil,
+                    place: String? = nil, people: [String] = [], albums: [String] = []) {
             (self.uuid, self.path, self.movie, self.screenshot) = (uuid, path, movie, screenshot)
             (self.title, self.date, self.words) = (title, date, words)
+            (self.favorite, self.latitude, self.longitude, self.place) = (favorite, latitude, longitude, place)
+            (self.people, self.albums) = (people, albums)
         }
 
         public var kind: FileKind { movie ? .video : screenshot ? .screenshot : .image }
 
         /// Photos' words as keyword search keeps them, one a line.
         public var text: String { words.joined(separator: "\n") }
+
+        /// Where Photos says it was taken.
+        public var location: Location? {
+            guard let latitude, let longitude else { return nil }
+            return Location(latitude: latitude, longitude: longitude, source: .photos, place: place)
+        }
     }
 
-    /// What a library holds for DigUp, and what was left out of it and why (reason → assets).
+    /// A person or pet someone named in Photos. Faces nobody named aren't listed: there's nothing to find them by.
+    public struct Person: Codable, Sendable, Equatable {
+        /// Photos' id for them: a rename in Photos keeps it, and two people of the same name have one each.
+        public let uuid: String
+        public let name: String
+
+        public init(uuid: String, name: String) {
+            (self.uuid, self.name) = (uuid, name)
+        }
+    }
+
+    /// An album someone made in Photos, as osxphotos' `album_info` lists them: not smart albums, Photos' own
+    /// collections ("Recents", "Favorites") or projects.
+    public struct Album: Codable, Sendable, Equatable {
+        /// Photos' id for it: a rename or a move to another folder keeps it.
+        public let uuid: String
+        public let title: String
+        /// The names of the folders it's in, outermost first.
+        public let folders: [String]
+
+        public init(uuid: String, title: String, folders: [String] = []) {
+            (self.uuid, self.title, self.folders) = (uuid, title, folders)
+        }
+    }
+
+    /// What a library holds for DigUp, and what was left out of it and why (reason → assets); the people and pets
+    /// named in it and its albums, which its assets refer to by uuid.
     public struct Listing: Codable, Sendable, Equatable {
         public var assets: [Asset]
         public var skipped: [String: Int]
+        public var people: [Person]
+        public var albums: [Album]
 
-        public init(assets: [Asset], skipped: [String: Int] = [:]) {
+        public init(assets: [Asset], skipped: [String: Int] = [:], people: [Person] = [], albums: [Album] = []) {
             self.assets = assets
             self.skipped = skipped
+            self.people = people
+            self.albums = albums
         }
     }
 
@@ -401,13 +451,23 @@ public enum PhotosLibrary {
                 return []
 
 
+        def plain(value):
+            """Photos wraps place names in direction marks ("\u2068Adelaide\u2069"): not part of the words."""
+            return value.replace("\u2068", "").replace("\u2069", "").strip() if isinstance(value, str) else ""
+
+
+        def named(name):
+            """The name of a person or pet, or None for a face nobody named."""
+            name = plain(name)
+            return name if name and name != "_UNKNOWN_" else None
+
+
         def words(photo):
             found, seen = [], set()
 
             def add(values):
                 for value in [values] if isinstance(values, str) else values or []:
-                    # Photos wraps place names in direction marks ("\u2068Adelaide\u2069"): not part of the words.
-                    value = value.replace("\u2068", "").replace("\u2069", "").strip() if isinstance(value, str) else ""
+                    value = plain(value)
                     if value and value != "_UNKNOWN_" and value.casefold() not in seen:
                         seen.add(value.casefold())
                         found.append(value)
@@ -421,6 +481,12 @@ public enum PhotosLibrary {
                 for name in SEARCH_INFO:
                     add(quietly(lambda: getattr(info, name)))
             return found
+
+
+        def place(photo):
+            """Photos' name for where it was taken, or None."""
+            info = quietly(lambda: photo.place)
+            return (plain(quietly(lambda: info.name)) or None) if info else None
 
 
         def picture(photo):
@@ -470,9 +536,23 @@ public enum PhotosLibrary {
                     "title": photo.title or photo.original_filename or "",
                     "date": photo.date.timestamp(),
                     "words": words(photo),
+                    "favorite": bool(photo.favorite),
+                    # None, None: Photos has no location for it (its catalog says -180, -180).
+                    "latitude": photo.latitude,
+                    "longitude": photo.longitude,
+                    "place": place(photo),
+                    "people": sorted({p.uuid for p in quietly(lambda: photo.person_info) if named(p.name)}),
+                    # A shared album too, but a shared album's pictures are left out above.
+                    "albums": sorted({a.uuid for a in quietly(lambda: photo.album_info)}),
                 })
+            people = [{"uuid": p.uuid, "name": named(p.name)}
+                      for p in quietly(lambda: db.person_info) if named(p.name)]
+            # The albums someone made: not smart albums, Photos' own ("Recents", "Favorites"), projects or shared ones.
+            albums = [{"uuid": a.uuid, "title": a.title or "", "folders": list(quietly(lambda: a.folder_names))}
+                      for a in quietly(lambda: db.album_info)]
             with open(output + ".partial", "w", encoding="utf-8") as file:
-                json.dump({"assets": assets, "skipped": skipped}, file, ensure_ascii=False)
+                json.dump({"assets": assets, "skipped": skipped, "people": people, "albums": albums}, file,
+                          ensure_ascii=False)
             os.replace(output + ".partial", output)
 
 

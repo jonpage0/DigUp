@@ -38,6 +38,48 @@ public enum Modality: String, Sendable, CaseIterable {
     case none, text, image, audio
 }
 
+/// Where a file was taken: a point in WGS 84 degrees, and who said so. The index keeps at most one a file (its
+/// `locations` table); a file without one has none.
+public struct Location: Sendable, Equatable {
+    /// Who said where. Photos, for a Photos library's file: the location Photos shows, which the user can type or
+    /// correct there, so a library's file never takes its picture's own tags instead. Any other file: its own
+    /// metadata, a picture's EXIF GPS tags or a video's QuickTime location.
+    public enum Source: String, Sendable {
+        case photos, exif, quicktime
+    }
+
+    public let latitude: Double
+    public let longitude: Double
+    public let source: Source
+    /// Photos' name for the place ("St James's Park, London, England, United Kingdom"), for showing; nil from a
+    /// file's own metadata.
+    public let place: String?
+
+    /// Nil when there's no place to keep: 0,0 (what a camera without a fix writes) and degrees off the globe. Photos
+    /// keeps "no location" as −180, −180, which osxphotos already reports as none.
+    public init?(latitude: Double, longitude: Double, source: Source, place: String? = nil) {
+        guard (-90...90).contains(latitude), (-180...180).contains(longitude), latitude != 0 || longitude != 0
+        else { return nil }
+        (self.latitude, self.longitude, self.source, self.place) = (latitude, longitude, source, place)
+    }
+
+    /// A video's location as ISO 6709 writes it ("+25.7907-080.1300+003.000/": latitude, longitude, then an altitude
+    /// that isn't kept), in decimal degrees as phones and cameras write them. The rarer forms in degrees and minutes
+    /// read as no location.
+    init?(iso6709 text: String, source: Source) {
+        let characters = Array(text.trimmingCharacters(in: .whitespaces))
+        guard let first = characters.first, first == "+" || first == "-" else { return nil }
+        var split = 1   // where the longitude starts, at its sign
+        while split < characters.count, characters[split] != "+", characters[split] != "-" { split += 1 }
+        guard split < characters.count else { return nil }
+        var end = split + 1
+        while end < characters.count, !"+-/".contains(characters[end]) { end += 1 }
+        guard let latitude = Double(String(characters[0..<split])),
+              let longitude = Double(String(characters[split..<end])) else { return nil }
+        self.init(latitude: latitude, longitude: longitude, source: source)
+    }
+}
+
 /// Indexing settings. Anything that changes vectors is part of `fingerprint`; an index never mixes settings.
 public struct IndexOptions: Sendable {
     /// This index is the code index: the code folders' source files, their repos' docs and their notebooks, read as
