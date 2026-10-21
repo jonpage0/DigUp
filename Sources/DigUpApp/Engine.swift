@@ -886,27 +886,44 @@ nonisolated final class Engine: @unchecked Sendable {
             searchQueue.async { [self] in
                 let unreadable = Set(lock.withLock { code ? status.code.unreadableRoots : status.unreadableRoots })
                 let store = code ? codeStore : searchStore
-                let summaries = lock.withLock { code ? codeRoots : roots }.map { root -> RootSummary in
-                    var summary = RootSummary(path: root.path, missing: !AppSettings.isFolder(root),
-                                              unreadable: unreadable.contains(root.path))
-                    for file in (try? store?.files(under: [root.path])) ?? [] {
-                        summary.files += 1
-                        summary.kinds[file.kind, default: 0] += 1
-                        switch file.state {
-                        case "done": summary.indexed += 1
-                        case "partial":
-                            summary.indexed += 1
-                            summary.unfinished += 1
-                        case "pending": summary.pending += 1
-                        case "failed": summary.failed += 1
-                        default: summary.skipped += 1
-                        }
-                    }
-                    return summary
+                let summaries = lock.withLock { code ? codeRoots : roots }.map { root in
+                    Self.summary(of: root.path, in: store, missing: !AppSettings.isFolder(root),
+                                 unreadable: unreadable.contains(root.path))
                 }
                 continuation.resume(returning: summaries)
             }
         }
+    }
+
+    /// What's indexed under each of `folders`, chosen or not (a Photos library inside Pictures), in the main index.
+    func summaries(of folders: [String]) async -> [RootSummary] {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: folders.map {
+                    Self.summary(of: $0, in: searchStore, missing: !AppSettings.isFolder(URL(fileURLWithPath: $0)),
+                                 unreadable: false)
+                })
+            }
+        }
+    }
+
+    private static func summary(of folder: String, in store: IndexStore?, missing: Bool, unreadable: Bool)
+        -> RootSummary {
+        var summary = RootSummary(path: folder, missing: missing, unreadable: unreadable)
+        for file in (try? store?.files(under: [folder])) ?? [] {
+            summary.files += 1
+            summary.kinds[file.kind, default: 0] += 1
+            switch file.state {
+            case "done": summary.indexed += 1
+            case "partial":
+                summary.indexed += 1
+                summary.unfinished += 1
+            case "pending": summary.pending += 1
+            case "failed": summary.failed += 1
+            default: summary.skipped += 1
+            }
+        }
+        return summary
     }
 
     /// Bytes on disk: the database and its write-ahead log.

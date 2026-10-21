@@ -3,10 +3,10 @@ import DigUpKit
 import Observation
 import SwiftUI
 
-/// First launch, in four steps: what DigUp does, which folders to search (with how long the first pass takes), the
-/// hotkey (try it), and done; a fifth, code search, when there are folders with code on the Mac (it stays off unless
-/// you turn it on there). The model downloads from Get Started on, shown at the bottom of every later step, and
-/// the chosen folders start indexing as soon as you continue past them.
+/// First launch, in four steps: what DigUp does, which folders to search (with how long the first pass takes, and the
+/// Photos library when there is one), the hotkey (try it), and done; a fifth, code search, when there are folders with
+/// code on the Mac (it stays off unless you turn it on there). The model downloads from Get Started on, shown at the
+/// bottom of every later step, and the chosen folders start indexing as soon as you continue past them.
 final class OnboardingController: NSObject, NSWindowDelegate {
     let state: OnboardingState
     private unowned let app: AppController
@@ -74,6 +74,10 @@ final class OnboardingState {
     }
     /// You pressed the hotkey on the shortcut step.
     private(set) var hotkeyWorked = false
+    /// The Photos libraries in the folders offered (Pictures holds the one Photos makes), or chosen before.
+    let libraries: [URL]
+    /// osxphotos, which reads them (`PhotosLibrary.osxphotos`), as last looked for.
+    private(set) var osxphotos = PhotosLibrary.osxphotos
     var launchAtLogin: Bool
     var indexOnBattery: Bool
     /// File types to skip as typed ("heic, txt"): applied on Return, and on Continue (a click there doesn't end the
@@ -104,6 +108,7 @@ final class OnboardingState {
         launchAtLogin = app.launchesAtLogin || app.suggestsLaunchAtLogin
         indexOnBattery = settings.indexOnBattery
         skippedTypesText = settings.excludedTypes.joined(separator: ", ")
+        libraries = app.photosLibraries
     }
 
     var model: AppModel { app.model }
@@ -211,6 +216,25 @@ final class OnboardingState {
             self?.codeFolders.add(picked)
         }
     }
+
+    // MARK: Photos libraries (on the folder step: one of its folders' subfolders, or a folder of its own)
+
+    func isSearching(_ library: URL) -> Bool { folders.isSearched(library.path) }
+
+    func setLibrary(_ library: URL, on: Bool) {
+        folders.setLibrary(library.path, on: on)
+    }
+
+    /// After installing osxphotos: found now, the libraries' folders are looked at again (their estimates had left the
+    /// libraries out).
+    func checkForOSXPhotos() {
+        let before = osxphotos
+        osxphotos = PhotosLibrary.osxphotos
+        log("onboarding: osxphotos \(osxphotos.map(tildePath) ?? "not found")")
+        if before == nil, osxphotos != nil {
+            for library in libraries { folders.estimateAgain(holding: library.path) }
+        }
+    }
 }
 
 // MARK: Views
@@ -223,7 +247,7 @@ struct OnboardingView: View {
         VStack(spacing: 0) {
             Group {
                 switch state.step {
-                case .welcome: WelcomeStep()
+                case .welcome: WelcomeStep(photos: !state.libraries.isEmpty)
                 case .folders: FoldersStep(state: state)
                 case .code: CodeStep(state: state)
                 case .shortcut: ShortcutStep(state: state)
@@ -348,6 +372,9 @@ struct DownloadStatus: View {
 }
 
 private struct WelcomeStep: View {
+    /// This Mac has a Photos library to offer.
+    let photos: Bool
+
     var body: some View {
         VStack(spacing: 0) {
             Image(nsImage: NSApp.applicationIconImage)
@@ -368,6 +395,10 @@ private struct WelcomeStep: View {
                         example: "“the clause about pets in the lease”, “flight receipt”")
                 Feature(symbol: "waveform", title: "Moments inside audio and video",
                         example: "“where they talk about sleep”, “the part with the drums”")
+                if photos {
+                    Feature(symbol: "photo.on.rectangle.angled", title: "Your Photos library",
+                            example: "“Tati at the beach”, “Grandma in Lisbon”, by who and where")
+                }
             }
             .padding(.top, 30)
             HStack(alignment: .top, spacing: 12) {
@@ -436,6 +467,9 @@ private struct FoldersStep: View {
                           + "anytime in Settings.")
             ScrollView {
                 VStack(spacing: 6) {
+                    ForEach(state.libraries, id: \.path) { library in
+                        PhotosChoice(state: state, library: library)
+                    }
                     FolderList(choices: state.folders, addTitle: "Add Folder…") {
                         state.addFolders(from: NSApp.keyWindow)
                     }
@@ -452,6 +486,87 @@ private struct FoldersStep: View {
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
             .padding(.bottom, 14)
+        }
+    }
+}
+
+/// A Photos library on the folder step: a switch, what comes along from Photos and how long reading it takes; or,
+/// without osxphotos, the one command that installs it. The same choice as its checkbox under its folder (Pictures).
+private struct PhotosChoice: View {
+    @Bindable var state: OnboardingState
+    let library: URL
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: library.path))
+                .resizable()
+                .frame(width: 30, height: 30)
+            VStack(alignment: .leading, spacing: 4) {
+                Text((library.lastPathComponent as NSString).deletingPathExtension)
+                    .font(.system(size: 13, weight: .semibold))
+                if state.osxphotos == nil {
+                    Text("To search your photos too, install osxphotos once, in Terminal; DigUp reads the library "
+                         + "through it.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    InstallOSXPhotos(checkAgain: { state.checkForOSXPhotos() })
+                } else {
+                    Text("Found by what's in each picture, and by what Photos knows: the people you've named, places, "
+                         + "keywords, albums. Results open in Photos.")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(cost).foregroundStyle(.tertiary)
+                }
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            if state.osxphotos != nil {
+                Toggle("Search \(library.lastPathComponent)",
+                       isOn: Binding(get: { state.isSearching(library) }, set: { state.setLibrary(library, on: $0) }))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(Color.primary.opacity(state.osxphotos != nil && state.isSearching(library) ? 0.055 : 0.025)))
+    }
+
+    /// "52,153 pictures and videos · ≈ 2.1 h", once the estimate is in.
+    private var cost: String {
+        guard let estimate = state.folders.estimate(ofLibrary: library.path) else {
+            return "Looking at it… macOS may ask whether DigUp can see your photos."
+        }
+        let count = estimate.files.values.reduce(0, +)
+        guard count > 0 else { return "DigUp couldn't look inside it (macOS may not allow it yet)." }
+        return "\(count.formatted()) pictures and videos · \(approximately(estimate.seconds))"
+    }
+}
+
+/// The command that installs osxphotos, to copy, and a button to look for it again once it's in.
+struct InstallOSXPhotos: View {
+    let checkAgain: () -> Void
+    @State private var copied = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(PhotosLibrary.installCommand)
+                .font(.system(size: 11, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.07)))
+            Button(copied ? "Copied" : "Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(PhotosLibrary.installCommand, forType: .string)
+                copied = true
+            }
+            .controlSize(.small)
+            Button("Check Again", action: checkAgain)
+                .controlSize(.small)
+            Link("About osxphotos", destination: URL(string: "https://github.com/RhetTbull/osxphotos")!)
+                .font(.system(size: 11))
+                .foregroundStyle(.tint)
         }
     }
 }

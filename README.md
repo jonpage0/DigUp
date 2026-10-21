@@ -153,10 +153,11 @@ llama.cpp.
 
 ## Apple Photos
 
-DigUp can search your Photos library too. It's a folder like any other here: choose Pictures, which holds the
-system library, and the library is one of its subfolders, with its own estimate and checkbox; or choose a
-`.photoslibrary` on its own (Add Folders lets you pick one). Its pictures are found by what they show, as everywhere
-else, and also by what Photos knows that no picture shows:
+DigUp can search your Photos library too. Setup offers it on the folder step, with a switch and how long reading it
+takes, and Settings → Photos shows each library, what's indexed of it and what Photos' last listing left out and why.
+To the rest of DigUp it's a folder like any other: inside Pictures it's one of Pictures' subfolders (its switch and its
+checkbox there are the same choice), and a `.photoslibrary` kept elsewhere can be chosen in Add Folders like a folder.
+Its pictures are found by what they show, as everywhere else, and also by what Photos knows that no picture shows:
 
 - "Tati at the beach" finds the photos of the person you named Tati in Photos that show a beach
 - "Grandma in Lisbon", "receipt": the people and pets you've named, places from the street to the country, titles,

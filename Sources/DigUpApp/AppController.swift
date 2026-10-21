@@ -144,6 +144,34 @@ final class AppController {
         applyFolders(model.settings.roots.filter { $0.path != root.path })
     }
 
+    // MARK: Photos libraries
+
+    /// The Photos libraries to offer: those chosen as folders of their own, and those right inside a chosen folder or
+    /// one onboarding offers (Pictures holds the one Photos makes).
+    var photosLibraries: [URL] {
+        let roots = model.settings.roots
+        let folders = roots.filter { !PhotosLibrary.isLibrary($0.path) } + OnboardingState.candidates()
+        var seen = Set<String>()
+        return (roots.map(\.path).filter(PhotosLibrary.isLibrary) + folders.flatMap { PhotosLibrary.libraries(in: $0.path) })
+            .filter { seen.insert($0).inserted }.map(AppSettings.folderURL)
+    }
+
+    /// Whether a library is searched: chosen on its own, or inside a chosen folder and not skipped there.
+    func searches(library: URL) -> Bool {
+        FolderSelection.isSearched(library.path, folders: model.settings.roots.map(\.path),
+                                   skipped: model.settings.excludedFolders.map(\.path))
+    }
+
+    /// Searches a Photos library, or stops: inside a chosen folder it's skipped there (or searched again), anywhere else
+    /// it's a folder of its own (`FolderSelection.setSubfolder`).
+    func setLibrary(_ library: URL, on: Bool) {
+        var selection = FolderSelection(chosen: model.settings.roots.map(\.path),
+                                        skipped: model.settings.excludedFolders.map(\.path))
+        selection.setSubfolder(library.path, on: on)
+        log("photos: \(tildePath(library.path)) \(on ? "on" : "off")")
+        applyFolders(selection.chosen.map(AppSettings.folderURL), excluded: selection.skipped.map(AppSettings.folderURL))
+    }
+
     func setExcluded(_ folders: [URL]) {
         AppSettings.save(excludedFolders: folders)
         model.settings.excludedFolders = folders

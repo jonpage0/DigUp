@@ -41,7 +41,7 @@ import SwiftUI
 ///                             -debugMenuViewAfter seconds
 ///     -debugReshow N          after the query's final results, hide and show the panel N times (logs show times)
 ///     -debugWindow PAGE       open a window instead of the panel and snapshot it: search (with -debugQuery),
-///                             settings:general|folders|code|storage, settings:add (Folders with Add Folders open),
+///                             settings:general|folders|photos|code|storage, settings:add (Folders with Add Folders open),
 ///                             settings:addcode (Code with its folders' sheet open),
 ///                             onboarding:welcome|folders|code|shortcut|ready
 ///                             (-debugCloseWindow YES closes it afterwards, to measure what closing gives back;
@@ -325,7 +325,7 @@ enum DebugHooks {
             case "settings":
                 let tab = SettingsTab(rawValue: parts.count > 1 ? parts[1] : "general") ?? .general
                 app.showSettings(tab)
-                loaded = { app.settingsWindow.state.isLoaded }
+                loaded = { app.settingsWindow.state.isLoaded && (tab != .photos || app.settingsWindow.state.photosLoaded) }
                 draw = { try app.settingsWindow.snapshot(to: $0) }
                 close = {}
             case "onboarding":

@@ -4,12 +4,13 @@ import Observation
 import SwiftUI
 
 enum SettingsTab: String, CaseIterable {
-    case general, folders, code, storage
+    case general, folders, photos, code, storage
 
     var title: String {
         switch self {
         case .general: "General"
         case .folders: "Folders"
+        case .photos: "Photos"
         case .code: "Code"
         case .storage: "Storage"
         }
@@ -19,6 +20,7 @@ enum SettingsTab: String, CaseIterable {
         switch self {
         case .general: "gearshape"
         case .folders: "folder"
+        case .photos: "photo.on.rectangle.angled"
         case .code: "chevron.left.forwardslash.chevron.right"
         case .storage: "internaldrive"
         }
@@ -149,6 +151,11 @@ final class SettingsState {
         codeIndexSize = app.engine.codeIndexSize
         codeSummaries = await app.engine.rootSummaries(code: true)
         summaries = await app.engine.rootSummaries()
+        // The Photos tab's counts follow indexing as the folders' do (its listings and access are looked at when it shows).
+        if !libraries.isEmpty {
+            let counts = await app.engine.summaries(of: libraries.map(\.url.path))
+            for (index, summary) in counts.enumerated() where index < libraries.count { libraries[index].summary = summary }
+        }
     }
 
     /// The index changed: refresh the folder counts, at most every 2 s while files are being indexed.
@@ -165,6 +172,69 @@ final class SettingsState {
 
     /// Ready to be drawn (debug snapshots wait for this).
     var isLoaded: Bool { summaries != nil }
+
+    // MARK: Photos
+
+    /// A Photos library the Photos tab offers: searched or not, what's indexed of it, what its last listing found, and
+    /// whether macOS lets DigUp in.
+    struct Library: Identifiable {
+        let url: URL
+        var searched: Bool
+        /// The chosen folder it's searched as part of (Pictures), when it isn't chosen on its own.
+        var within: String?
+        var summary: Engine.RootSummary?
+        var listing: PhotosLibrary.ListingSummary?
+        var access: PhotosLibrary.Access?
+        var estimate: FolderEstimate?
+        var id: String { url.path }
+    }
+
+    private(set) var libraries: [Library] = []
+    private(set) var osxphotos = PhotosLibrary.osxphotos
+    /// The Photos tab has looked at its libraries once (debug snapshots wait for this).
+    private(set) var photosLoaded = false
+    @ObservationIgnored private var estimating: [Process] = []
+
+    /// The Photos tab, when it shows: osxphotos looked for again, each library's counts and last listing, whether macOS
+    /// lets DigUp in (asking may bring up macOS's question, so only here), and for one not searched, what reading it
+    /// would take.
+    func refreshPhotos() async {
+        osxphotos = PhotosLibrary.osxphotos
+        let urls = app.photosLibraries
+        let settings = model.settings
+        let selection = FolderSelection(chosen: settings.roots.map(\.path), skipped: settings.excludedFolders.map(\.path))
+        let summaries = await app.engine.summaries(of: urls.map(\.path))
+        let index = settings.indexDirectory
+        var found: [Library] = []
+        for (url, summary) in zip(urls, summaries) {
+            let searched = selection.isSearched(url.path)
+            let within = selection.searchedAs(url.path).flatMap { $0 == url.path ? nil : $0 }
+            let (listing, access) = await Task.detached(priority: .utility) {
+                (PhotosLibrary.lastListing(of: url.path, keptIn: index), PhotosLibrary.access(url.path))
+            }.value
+            found.append(Library(url: url, searched: searched, within: within, summary: summary, listing: listing,
+                                 access: access, estimate: libraries.first { $0.id == url.path }?.estimate))
+        }
+        libraries = found
+        photosLoaded = true
+        estimating.removeAll { !$0.isRunning }
+        let unestimated = found.filter { !$0.searched && $0.estimate == nil && $0.access == .allowed }.map(\.url)
+        guard osxphotos != nil, !unestimated.isEmpty, estimating.isEmpty else { return }
+        if let helper = Estimates.run(unestimated, update: { [weak self] estimate in
+            guard let self, let index = libraries.firstIndex(where: { $0.id == estimate.folder }) else { return }
+            libraries[index].estimate = estimate
+        }) {
+            estimating.append(helper)
+        }
+    }
+
+    func setLibrary(_ library: Library, on: Bool) {
+        app.setLibrary(library.url, on: on)
+        Task {
+            await refreshPhotos()
+            await refresh()
+        }
+    }
 }
 
 /// One tab's content, at the width every tab shares.
@@ -181,6 +251,7 @@ private struct SettingsPane: View {
                 switch tab {
                 case .general: GeneralSettings(state: state)
                 case .folders: FolderSettings(state: state)
+                case .photos: PhotosSettings(state: state)
                 case .code: CodeSettings(state: state)
                 case .storage: StorageSettings(state: state)
                 }
@@ -595,6 +666,161 @@ private struct StorageSettings: View {
         }
         .formStyle(.grouped)
         .scrollDisabled(true)
+    }
+}
+
+/// Photos: the libraries DigUp can search (each on or off, with what's indexed of it and what its last listing left
+/// out and why), osxphotos, which reads them, and what comes along from Photos.
+private struct PhotosSettings: View {
+    @Bindable var state: SettingsState
+
+    var body: some View {
+        Form {
+            Section {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Search your Photos library").font(.system(size: 13, weight: .semibold))
+                    Text("Its pictures are found by what they show, as any picture is, and by what Photos knows that "
+                         + "no picture shows: the people and pets you've named, places, titles, captions, keywords, "
+                         + "albums and Photos' own labels, as in “Tati at the beach”. Results open in Photos.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Section {
+                if let path = state.osxphotos {
+                    LabeledContent("osxphotos") {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                            Text(tildePath(path)).lineLimit(1).truncationMode(.middle)
+                        }
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                            Text("osxphotos isn't installed").font(.system(size: 13, weight: .medium))
+                        }
+                        Text("DigUp reads Photos libraries through osxphotos, a free tool you install once, in "
+                             + "Terminal. Until then a library is skipped, as an app would be.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        InstallOSXPhotos(checkAgain: { Task { await state.refreshPhotos() } })
+                    }
+                }
+            } header: {
+                Text("Reader")
+            }
+            Section {
+                if !state.photosLoaded {
+                    ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+                } else if state.libraries.isEmpty {
+                    Text("No Photos library in Pictures. To search one kept elsewhere, add it in Folders → Add "
+                         + "Folders… (it can be chosen like a folder).")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(state.libraries) { library in
+                    LibraryRow(library: library, set: { state.setLibrary(library, on: $0) })
+                }
+            } header: {
+                Text("Libraries")
+            } footer: {
+                Text("Each picture is read as Photos shows it, edited or not; when the original is only in iCloud, "
+                     + "from Photos' own preview. Left out: what's hidden or in Recently Deleted, the shots of a burst "
+                     + "nobody picked, shared albums, Shared with You items not saved to the library, and videos that "
+                     + "are only in iCloud (DigUp never downloads anything). Your pictures, and what Photos knows about "
+                     + "them, are never changed.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .formStyle(.grouped)
+        .scrollDisabled(true)
+        .task { await state.refreshPhotos() }
+        .onChange(of: state.model.status) { state.statusChanged() }
+    }
+}
+
+/// A Photos library: on or off, what's indexed of it, and what Photos' last listing of it left out.
+private struct LibraryRow: View {
+    let library: SettingsState.Library
+    let set: (Bool) -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: library.url.path))
+                .resizable()
+                .frame(width: 32, height: 32)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text((library.url.lastPathComponent as NSString).deletingPathExtension)
+                        .font(.system(size: 13, weight: .semibold))
+                    if library.access == .denied {
+                        Text("No access")
+                            .font(.system(size: 10, weight: .semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.orange.opacity(0.2)))
+                        Button("Allow in Settings…", action: openPhotosPrivacySettings)
+                            .buttonStyle(.link)
+                            .font(.system(size: 11))
+                    }
+                }
+                Text(tildePath(library.url.path))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let within = library.within {
+                    Text("Searched as part of “\((within as NSString).lastPathComponent)”: off skips it there.")
+                }
+                ForEach(lines, id: \.self) { line in
+                    Text(line).fixedSize(horizontal: false, vertical: true)
+                }
+                if library.searched, let kinds = library.summary?.kinds, !kinds.isEmpty {
+                    KindCounts(counts: kinds).padding(.top, 1)
+                }
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Toggle("Search \(library.url.lastPathComponent)", isOn: Binding(get: { library.searched }, set: set))
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// What's indexed of it, or what reading it would take; then what Photos' last listing found and left out.
+    private var lines: [String] {
+        var lines: [String] = []
+        if library.searched, let summary = library.summary, summary.files > 0 {
+            lines.append("\(summary.indexed.formatted()) of \(summary.files.formatted()) indexed"
+                         + (summary.pending > 0 ? " · \(summary.pending.formatted()) waiting" : ""))
+        } else if !library.searched, let estimate = library.estimate {
+            let count = estimate.files.values.reduce(0, +)
+            if count > 0 {
+                lines.append("\(count.formatted()) pictures and videos to read, \(approximately(estimate.seconds))")
+            }
+        }
+        if let listing = library.listing {
+            let left = listing.skipped.sorted { $0.value > $1.value }
+                .map { "\($0.value.formatted()) \($0.key)" }.joined(separator: " · ")
+            lines.append("Last read from Photos " + listing.listedAt.formatted(.relative(presentation: .named))
+                         + ": \(listing.assets.formatted()) pictures and videos"
+                         + (left.isEmpty ? "" : "; left out: \(left)"))
+        }
+        return lines
+    }
+}
+
+/// System Settings → Privacy & Security → Photos.
+func openPhotosPrivacySettings() {
+    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Photos") {
+        NSWorkspace.shared.open(url)
     }
 }
 

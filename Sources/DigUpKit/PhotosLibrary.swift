@@ -125,8 +125,9 @@ public enum PhotosLibrary {
 
     /// The osxphotos program: $DIGUP_OSXPHOTOS (empty: none), else where `uv tool install`, pipx, `pip install --user`,
     /// Homebrew or MacPorts put it, else on PATH. The app's helpers run with launchd's PATH, which has none of those.
-    /// Nil where it isn't installed, and off the Mac.
-    public static let osxphotos: String? = {
+    /// Nil where it isn't installed, and off the Mac. Looked for each time (a few file checks): installed while the app
+    /// runs, it's found without a relaunch.
+    public static var osxphotos: String? {
         #if os(macOS)
         let environment = ProcessInfo.processInfo.environment
         let fm = FileManager.default
@@ -139,7 +140,46 @@ public enum PhotosLibrary {
         #else
         return nil
         #endif
-    }()
+    }
+
+    /// The command that installs osxphotos, as the app shows it.
+    public static let installCommand = "uv tool install osxphotos"
+
+    /// The Photos libraries right inside `folder`, by name (Pictures holds the one Photos makes).
+    public static func libraries(in folder: String) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []).filter(isLibrary).sorted()
+            .map { (folder as NSString).appendingPathComponent($0) }
+    }
+
+    /// Whether macOS lets DigUp into a library. Asking can bring up macOS's question, and waits for the answer: never on
+    /// the main thread.
+    public enum Access: Sendable {
+        case allowed, denied, missing
+    }
+
+    public static func access(_ library: String) -> Access {
+        var isFolder: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: library, isDirectory: &isFolder), isFolder.boolValue else {
+            return .missing
+        }
+        return (try? FileManager.default.contentsOfDirectory(atPath: library + "/originals")) == nil ? .denied : .allowed
+    }
+
+    /// What the last listing of a library found (kept in the index folder by `osxphotosReader`), or nil before one.
+    public struct ListingSummary: Sendable, Equatable {
+        public let listedAt: Date
+        public let assets: Int
+        /// Reason → assets left out ("in iCloud, not downloaded", "in a shared album"…).
+        public let skipped: [String: Int]
+    }
+
+    public static func lastListing(of library: String, keptIn index: URL) -> ListingSummary? {
+        let file = index.appendingPathComponent("photos").appendingPathComponent(keptName(of: library))
+        guard let data = try? Data(contentsOf: file), let kept = try? JSONDecoder().decode(Kept.self, from: data),
+              kept.library == library else { return nil }
+        return ListingSummary(listedAt: Date(timeIntervalSince1970: kept.listedAt), assets: kept.listing.assets.count,
+                              skipped: kept.listing.skipped)
+    }
 
     /// A listing is used again while the library's pictures are as they were, and while it's younger than this when the
     /// database alone changed (Photos writes it all the time). A big library takes osxphotos a while to read, and a

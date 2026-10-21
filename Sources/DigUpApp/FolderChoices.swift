@@ -130,6 +130,32 @@ final class FolderChoices {
         }
     }
 
+    // MARK: Photos libraries
+
+    /// A Photos library, checked or not: as one of a listed folder's subfolders (Pictures holds the one Photos makes),
+    /// as a row when it's one, or as a new row when it's in no listed folder.
+    func setLibrary(_ path: String, on: Bool) {
+        note = nil
+        if rows.contains(where: { $0.path == path }) {
+            selection.setFolder(path, on: on)
+        } else if !on || rows.contains(where: { FolderSelection.isInside(path, $0.path) }) {
+            selection.setSubfolder(path, on: on)
+            if let row = rows.first(where: { $0.path == FolderSelection.parent(path) }) { expanded.insert(row.path) }
+        } else {
+            add([URL(fileURLWithPath: path)])
+        }
+    }
+
+    /// What reading a library takes: its row's estimate, or its folder's estimate of it as a subfolder.
+    func estimate(ofLibrary path: String) -> FolderEstimate? {
+        estimates[path] ?? rows.compactMap { estimates[$0.path] }.flatMap(\.subfolders).first { $0.folder == path }
+    }
+
+    /// Estimates the rows that hold `path` (or are it) again: osxphotos was installed since.
+    func estimateAgain(holding path: String) {
+        estimate(rows.filter { $0.path == path || FolderSelection.isInside(path, $0.path) })
+    }
+
     /// File types to skip, as typed ("heic, txt"); every estimate runs again when they change.
     func setTypes(_ text: String) {
         let types = IndexOptions.extensions(text).sorted()
