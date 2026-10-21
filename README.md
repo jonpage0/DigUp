@@ -43,7 +43,9 @@ so a search gets both the meaning and the exact string. On a Mac that includes t
 ## Private
 
 Nothing you index leaves your computer. DigUp goes online only to download the model once and to check for updates
-once a day. The update check sends nothing about your files, and you can turn it off. No account, no telemetry.
+once a day. The update check sends nothing about your files, and you can turn it off. No account, no telemetry. The
+search window's map is Apple Maps: while it's showing, Apple is sent the area in view to draw it, nothing about your
+files, and it never shows unless you open it.
 
 ## Install
 
@@ -168,6 +170,10 @@ Its pictures are found by what they show, as everywhere else, and also by what P
 
 A result opens in Photos (macOS asks once whether DigUp may control it), and Show in Photos (⌘↩) does the same. Photos
 can show a picture only from the library it has open: a result from another library brings Photos forward without it.
+
+The search window's map (its map button) shows where results were taken: Photos' place for a library's pictures, a
+photo's GPS tags and a video's location for other files. Search This Area keeps the results to what's in view, and
+with nothing typed it lists everything taken there, newest first. The map is Apple Maps, so it's online (see Private).
 
 DigUp reads the library through [osxphotos](https://github.com/RhetTbull/osxphotos), which needs installing once:
 `uv tool install osxphotos` (or `pipx install osxphotos`). DigUp looks for it in `~/.local/bin`, Homebrew's and

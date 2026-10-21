@@ -603,6 +603,8 @@ nonisolated final class Engine: @unchecked Sendable {
         case "rest":
             update { $0.activity = .finishing(done: int("done"), total: int("total"), files: int("files")) }
             refreshSearcher(force: false)
+        case "located":
+            log("index: where \(int("files")) files already indexed were taken, read from their metadata")
         case "summary":
             let states = (event["states"] as? [String: Int] ?? [:]).sorted { $0.key < $1.key }
                 .map { "\($0.value) \($0.key)" }.joined(separator: " · ")
@@ -809,9 +811,10 @@ nonisolated final class Engine: @unchecked Sendable {
     /// Hybrid search. Without a vector it's keyword-only (file names, OCR and document text), which is what the panel
     /// shows while the query encoder starts. Files that are gone (deleted since the last sync, or on a drive that's
     /// unplugged) are left out.
-    /// `code`: the code index (its own folders), never anything else.
+    /// `code`: the code index (its own folders), never anything else. `filter`: only files with these Photos facts or
+    /// inside this area of the map; with no words it lists the files it keeps (`Searcher.search`).
     func search(_ text: String, vector: QueryVector?, prefixLast: Bool, kinds: Set<FileKind>? = nil,
-                limit: Int = 40, code: Bool = false) async -> [SearchHit] {
+                filter: SearchFilter = SearchFilter(), limit: Int = 40, code: Bool = false) async -> [SearchHit] {
         if code { return await searchCode(text, vector: vector, prefixLast: prefixLast, limit: limit) }
         return await withCheckedContinuation { continuation in
             searchQueue.async { [self] in
@@ -823,7 +826,7 @@ nonisolated final class Engine: @unchecked Sendable {
                     }
                     values = nil
                 }
-                let hits = try? searcher?.search(text, queryVector: values, kinds: kinds, limit: limit,
+                let hits = try? searcher?.search(text, queryVector: values, kinds: kinds, filter: filter, limit: limit,
                                                  prefixLast: prefixLast)
                 // Only files that are searched (`FolderSelection`'s rule, as the crawler walks them) and of types not
                 // skipped: a removed folder's rows (or a newly skipped type's) can outlive it until a helper syncs
@@ -837,6 +840,15 @@ nonisolated final class Engine: @unchecked Sendable {
                         && !types.contains((hit.path as NSString).pathExtension.lowercased())
                         && FileManager.default.fileExists(atPath: hit.path)
                 })
+            }
+        }
+    }
+
+    /// Where the files at `paths` were taken (the map's pins), by path.
+    func locations(of paths: [String]) async -> [String: Location] {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: (try? searchStore?.locations(of: paths)) ?? [:])
             }
         }
     }

@@ -1,5 +1,6 @@
 import AppKit
 import DigUpKit
+import MapKit
 import Observation
 import Quartz
 import SwiftUI
@@ -213,6 +214,15 @@ final class SearchModel {
     var selection: String?
     var showWeaker = false
     var showsPreview = true
+    /// The map above the results: a pin for each result that was taken somewhere. Apple Maps draws it, so showing it
+    /// sends the area in view to Apple (nothing about the files).
+    var showsMap = false
+    /// Only results taken inside this area of the map ("Search This Area"); with no words, every file taken there.
+    var area: SearchFilter.Area? {
+        didSet { if area != oldValue { run() } }
+    }
+    /// Where the results were taken, by path (the map's pins).
+    private(set) var locations: [String: Location] = [:]
     /// You moved the selection with the arrow keys since the last edit: Space and ← → act on results then.
     private(set) var navigated = false
     /// The grid's columns right now (↑ ↓ move by a row).
@@ -228,6 +238,11 @@ final class SearchModel {
 
     /// Every result shown, in order (strong ones, then the weaker ones once they're unfolded).
     var rows: [ResultRow] { results.ranked + (showWeaker ? results.weaker : []) }
+
+    /// What the results are kept to besides their kind.
+    var searchFilter: SearchFilter { SearchFilter(area: area) }
+    /// There's something to show: words typed, or a filter that lists files by itself.
+    var isSearching: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !searchFilter.isEmpty }
 
     /// A search of code: the Code filter, or "code:" typed.
     var isCode: Bool { filter == .code || CodeQuery.text(of: query) != nil }
@@ -272,10 +287,11 @@ final class SearchModel {
         let code = isCode
         let text = CodeQuery.text(of: typed) ?? typed
         codePhase = nil
-        guard !typed.isEmpty else {
+        guard !typed.isEmpty || !searchFilter.isEmpty else {
             results = .empty
             counts = [:]
             hasResults = false
+            locations = [:]
             return
         }
         if code, !engine.hasCode || text.isEmpty {
@@ -285,9 +301,11 @@ final class SearchModel {
             codePhase = engine.hasCode ? .codeHint : .codeOff
             return
         }
-        engine.prewarm()
-        engine.embedAhead(text, code: code)
-        let filter = self.filter
+        let filter = self.filter, searchFilter = self.searchFilter
+        if !text.isEmpty {
+            engine.prewarm()
+            engine.embedAhead(text, code: code)
+        }
         let showAt = ContinuousClock.now + SearchPanelController.typingPause
         if code {
             task = Task {
@@ -306,22 +324,25 @@ final class SearchModel {
             return
         }
         task = Task {
-            let vector = await engine.embedQuery(text)
+            let vector = text.isEmpty ? nil : await engine.embedQuery(text)
             guard !Task.isCancelled, current == generation else { return }
-            let all = await engine.search(text, vector: vector, prefixLast: false, limit: 120)
+            let all = await engine.search(text, vector: vector, prefixLast: false, filter: searchFilter, limit: 120)
             let shown = filter == nil ? all : await engine.search(text, vector: vector, prefixLast: false,
-                                                                    kinds: filter!.kinds, limit: 120)
+                                                                    kinds: filter!.kinds, filter: searchFilter,
+                                                                    limit: 120)
+            let located = await engine.locations(of: shown.map(\.path))
             try? await Task.sleep(until: showAt, tolerance: .milliseconds(1), clock: .continuous)
             guard !Task.isCancelled, current == generation else { return }
             var counts: [ResultGroupKind: Int] = [:]
             for hit in all.prefix(Searcher.strongCount(all)) { counts[ResultGroupKind(hit.kind), default: 0] += 1 }
             self.counts = counts
             results = ResultSet(shown, query: text)
+            locations = located
             showWeaker = false
             if !rows.contains(where: { $0.id == selection }) { selection = rows.first?.id }
             hasResults = true
-            log("window: \"\(text)\"\(filter.map { " in \($0.title)" } ?? ""): \(results.ranked.count) results "
-                + "+ \(results.weaker.count) weaker")
+            log("window: \"\(text)\"\(filter.map { " in \($0.title)" } ?? "")\(area == nil ? "" : " in a map area"): "
+                + "\(results.ranked.count) results + \(results.weaker.count) weaker, \(located.count) with a place")
         }
     }
 }
@@ -339,8 +360,15 @@ struct SearchWindowView: View {
             header
             Divider()
             HStack(spacing: 0) {
-                content
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 0) {
+                    if search.showsMap, model.hasFolders, !search.isCode {
+                        ResultsMap(search: search)
+                            .frame(height: 260)
+                        Divider()
+                    }
+                    content
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
                 if search.showsPreview, let row = search.selectedRow, search.hasResults {
                     Divider()
                     ScrollView {
@@ -391,6 +419,16 @@ struct SearchWindowView: View {
                     .strokeBorder(Color.accentColor.opacity(fieldFocused ? 0.6 : 0), lineWidth: 2))
                 .animation(.easeOut(duration: 0.15), value: fieldFocused)
                 Button {
+                    search.showsMap.toggle()
+                } label: {
+                    Image(systemName: "map")
+                        .font(.system(size: 15))
+                        .foregroundStyle(search.showsMap ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                }
+                .buttonStyle(.plain)
+                .help(search.showsMap ? "Hide Map"
+                      : "Show Map: where results were taken (Apple Maps draws it, so the area in view is sent to Apple)")
+                Button {
                     search.showsPreview.toggle()
                 } label: {
                     Image(systemName: "sidebar.right")
@@ -411,7 +449,28 @@ struct SearchWindowView: View {
             }
             .padding(.leading, 78)   // beside the window buttons
             .frame(height: 52)
-            KindFilters(search: search, showsCode: model.hasCode)
+            HStack(spacing: 10) {
+                KindFilters(search: search, showsCode: model.hasCode)
+                if search.area != nil {
+                    Button {
+                        search.area = nil
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "map").font(.system(size: 10.5))
+                            Text("In the map's area")
+                            Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).opacity(0.7)
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.accentColor))
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Only results taken in the area you searched on the map; click to search everywhere")
+                }
+            }
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 10)
@@ -433,16 +492,18 @@ struct SearchWindowView: View {
             }
             .padding(.bottom, 24)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if search.query.trimmingCharacters(in: .whitespaces).isEmpty {
+        } else if !search.isSearching {
             SearchHome(search: search, model: model, engine: app.engine)
         } else if let phase = search.codePhase {
             CodeOffOrHint(phase: phase, search: search) { app.chooseCodeFolders() }
         } else if !search.hasResults {
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if search.results.isEmpty {
+            let words = search.query.trimmingCharacters(in: .whitespaces)
             EmptyState(symbol: search.isCode ? FileKind.code.symbol : "magnifyingglass",
-                       title: "No good matches for “\(search.query.trimmingCharacters(in: .whitespaces))”",
+                       title: words.isEmpty ? "Nothing taken in this area" : "No good matches for “\(words)”",
                        message: search.isCode ? "Try saying what the code does, or a name that's in it."
+                           : words.isEmpty ? "Move the map and search that area, or type what you're looking for."
                            : "Try describing what's in it: what you'd see or hear, or words you remember.")
         } else if search.isCode {
             CodeResultsList(search: search)
@@ -462,7 +523,7 @@ struct SearchWindowView: View {
                 .lineLimit(1)
                 .help("Folders and indexing")
             Spacer()
-            if search.hasResults, !search.query.isEmpty {
+            if search.hasResults, search.isSearching {
                 Text(model.resultsCaveat ?? resultCount).lineLimit(1)
             }
             if let version = model.updateAvailable {
@@ -530,7 +591,7 @@ private struct KindFilters: View {
             HStack(spacing: 5) {
                 if let symbol { Image(systemName: symbol).font(.system(size: 10.5)) }
                 Text(title)
-                if let count, !search.query.isEmpty {
+                if let count, search.isSearching {
                     Text("\(count)").monospacedDigit().opacity(0.6)
                 }
             }
@@ -545,6 +606,70 @@ private struct KindFilters: View {
         .buttonStyle(.plain)
         .help("\(title) (⌘\(number))")
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// The results that were taken somewhere, as pins on Apple's map; a click on one selects its result. "Search This
+/// Area" keeps the results (or, with no words, every file) to the box in view. Apple Maps draws the map, so it's
+/// online: the area in view is sent to Apple to draw it, and nothing about the files.
+private struct ResultsMap: View {
+    @Bindable var search: SearchModel
+    @State private var position: MapCameraPosition = .automatic
+    @State private var inView: MKCoordinateRegion?
+
+    private struct Pin: Identifiable {
+        let row: ResultRow
+        let location: Location
+        var id: String { row.id }
+    }
+
+    var body: some View {
+        let pins = search.rows.compactMap { row in search.locations[row.id].map { Pin(row: row, location: $0) } }
+        Map(position: $position, selection: selection) {
+            ForEach(pins) { pin in
+                Marker(pin.row.name, systemImage: pin.row.kind.symbol,
+                       coordinate: CLLocationCoordinate2D(latitude: pin.location.latitude,
+                                                          longitude: pin.location.longitude))
+                    .tag(pin.id)
+            }
+        }
+        .mapStyle(.standard(pointsOfInterest: .excludingAll))
+        .mapControls { MapZoomStepper() }
+        .onMapCameraChange(frequency: .onEnd) { inView = $0.region }
+        // New results: the map fits their pins again.
+        .onChange(of: pins.map(\.id)) { _, _ in position = .automatic }
+        .overlay(alignment: .top) {
+            HStack(spacing: 8) {
+                if pins.isEmpty {
+                    Text(search.isSearching ? "None of these results says where it was taken" : "Search, or move the map")
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(.regularMaterial, in: Capsule())
+                }
+                if let inView {
+                    Button("Search This Area") { search.area = Self.area(of: inView) }
+                        .controlSize(.small)
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(10)
+        }
+    }
+
+    /// Selecting a pin selects its result, and the selected result's pin shows selected.
+    private var selection: Binding<String?> {
+        Binding(get: { search.selectedRow?.id }, set: { id in
+            if let id, let row = search.rows.first(where: { $0.id == id }) { search.select(row) }
+        })
+    }
+
+    /// The box in view, in degrees. A view across the 180° meridian is cut there: the box can't wrap.
+    static func area(of region: MKCoordinateRegion) -> SearchFilter.Area {
+        let (latitude, longitude) = (region.center.latitude, region.center.longitude)
+        let (height, width) = (region.span.latitudeDelta / 2, region.span.longitudeDelta / 2)
+        return SearchFilter.Area(latitudes: max(-90, latitude - height)...min(90, latitude + height),
+                                 longitudes: max(-180, longitude - width)...min(180, longitude + width))
     }
 }
 

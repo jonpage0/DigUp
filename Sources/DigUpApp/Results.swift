@@ -17,6 +17,8 @@ struct ResultRow: Identifiable, Equatable {
     let excerpt: String?    // matched words are wrapped in « »
     let matchedMeaning: Bool
     let matchedWords: Bool
+    /// Here because a filter keeps it (the map's area…), with no words typed.
+    let listed: Bool
     let modified: Date
     let size: Int64
     let info: [String: String]
@@ -52,6 +54,8 @@ struct ResultRow: Identifiable, Equatable {
         excerpt = hit.excerpt.flatMap { $0.isEmpty ? nil : $0 }
         matchedMeaning = (hit.z ?? 0) >= 2
         matchedWords = hit.keywordRank != nil
+        // Listed by a filter with no words typed (`Searcher.search` browsing): no score of any kind.
+        listed = hit.score == 0 && hit.z == nil && hit.keywordRank == nil
         // A Photos library's picture: the day it was taken (its file's date is the day it came into the library).
         modified = Date(timeIntervalSince1970: hit.photos?.date ?? hit.modified)
         size = hit.size
@@ -109,7 +113,8 @@ struct ResultRow: Identifiable, Equatable {
         guard matchedMeaning else {
             // Photos' words: a person's name, a place, a keyword or an album.
             if matchedWords, segment == .photosInfo { return "Has your words in Photos" }
-            return matchedWords ? "Has your words" : "Matches its name"
+            if matchedWords { return "Has your words" }
+            return listed ? "Fits your filters" : "Matches its name"
         }
         let place = loc.map(Self.clock) ?? ""
         let page = loc.map { "page \(Int($0))" } ?? "a page"

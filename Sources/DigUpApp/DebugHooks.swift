@@ -1,4 +1,5 @@
 import AppKit
+import DigUpKit
 import Quartz
 import ServiceManagement
 import SwiftUI
@@ -53,6 +54,8 @@ import SwiftUI
 ///                             open panel), unskip:PATH, types:heic,txt. NAME is the end of a listed folder's path.
 ///     -debugAdd YES           after the snapshot, press Add Folders' Add (or the code sheet's) and log what it applied
 ///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot
+///     -debugMap YES           with -debugWindow search: the map shows above the results
+///     -debugArea "lat1,lon1,lat2,lon2"   with -debugWindow search: results kept to that box of the map
 ///     -debugUpdateCheck YES   check for updates in the background a second after launch, as the daily check does
 ///     -debugUseModelFiles a:b take these files as the model, as Use Files… does, a second after launch
 ///     -debugHelperArgs "…"    more arguments for the indexing helper, in dev runs ("--time-limit 0")
@@ -352,7 +355,13 @@ enum DebugHooks {
                 let search = app.searchWindow.search
                 // The field with the cursor, as on screen (an offscreen window doesn't take it by itself).
                 if defaults.bool(forKey: "debugFocus") { DispatchQueue.main.async { search.focusField() } }
-                loaded = { search.query.isEmpty || search.hasResults }
+                search.showsMap = defaults.bool(forKey: "debugMap")
+                let box = (defaults.string(forKey: "debugArea") ?? "").split(separator: ",").compactMap { Double($0) }
+                if box.count == 4 {
+                    search.area = SearchFilter.Area(latitudes: min(box[0], box[2])...max(box[0], box[2]),
+                                                    longitudes: min(box[1], box[3])...max(box[1], box[3]))
+                }
+                loaded = { !search.isSearching || search.hasResults }
                 draw = { try app.searchWindow.snapshot(to: $0) }
                 close = { app.searchWindow.close() }
             }
