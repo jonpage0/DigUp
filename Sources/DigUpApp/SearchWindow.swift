@@ -119,7 +119,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         case 36, 76:   // ↩
             guard let row = search.selectedRow else { return false }
             if modifiers == .command {
-                NSWorkspace.shared.activateFileViewerSelecting([row.url])
+                Opener.reveal(row.url)
             } else if modifiers.isEmpty {
                 search.open(row)
             } else {
@@ -348,7 +348,7 @@ struct SearchWindowView: View {
                             PreviewPane(row: row, imageSize: CGSize(width: 292, height: 230),
                                         open: { search.open(row) })
                             PreviewActions(row: row, open: { search.open(row) },
-                                           reveal: { NSWorkspace.shared.activateFileViewerSelecting([row.url]) })
+                                           reveal: { Opener.reveal(row.url) })
                         }
                         .padding(16)
                     }

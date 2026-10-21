@@ -206,7 +206,7 @@ final class OnboardingState {
     }
 
     func addCodeFolders(from window: NSWindow?) {
-        app.pickFolders(for: window) { [weak self] picked in
+        app.pickFolders(for: window, photos: false) { [weak self] picked in
             guard !picked.isEmpty else { return }
             self?.codeFolders.add(picked)
         }

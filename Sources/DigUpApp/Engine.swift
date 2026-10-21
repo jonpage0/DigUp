@@ -456,8 +456,11 @@ nonisolated final class Engine: @unchecked Sendable {
     /// the helper to sync; a running batch yields to that at its next boundary.
     private func foldersChanged(_ paths: [String]) {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let readsPhotos = PhotosLibrary.osxphotos != nil   // as the helper finds it (`PhotosLibrary.osxphotosReader`)
         let paths = paths.filter { path in
-            watchedRoots.contains { Rules.isWalked(path, root: $0, home: home, excluded: watchedSkips) }
+            watchedRoots.contains {
+                Rules.isWalked(path, root: $0, home: home, excluded: watchedSkips, readsPhotos: readsPhotos)
+            }
         }
         guard !paths.isEmpty else { return }
         log("watch: \(paths.count) changed (\((paths.first as NSString?)?.lastPathComponent ?? ""))")

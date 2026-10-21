@@ -119,9 +119,11 @@ public enum Estimator {
 
     /// Estimates for each subfolder one level down, and for the files right in `folder` (under its own path), from
     /// the same look at each file: the folder lists show where a big first pass comes from.
-    /// Subfolders are named under `folder` as given, though the walk reports real paths (/private/var for /var).
+    /// Subfolders are named under `folder` as given, though the walk reports real paths (/private/var for /var). A Photos
+    /// library has none to show: its own folders (originals, resources) aren't for choosing among.
     public static func estimates(bySubfolder candidates: [Candidate], of folder: String, options: IndexOptions,
                                  costs: Costs = Costs()) -> [String: Estimate] {
+        if PhotosLibrary.isLibrary(folder) { return [folder: estimate(candidates, options: options, costs: costs)] }
         let prefix = folder.hasSuffix("/") ? folder : folder + "/"
         let real = FolderSelection.realPath(folder) + "/"
         var groups: [String: [Candidate]] = [:]

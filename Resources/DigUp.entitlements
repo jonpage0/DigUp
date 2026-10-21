@@ -2,8 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Opening a recording at the moment that matched asks QuickTime Player to go there (macOS asks you once). -->
+	<!-- Opening a recording at the moment that matched asks QuickTime Player to go there, and a picture from a Photos
+	     library asks Photos to show it (macOS asks you once for each). -->
 	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+	<!-- A Photos library's pictures: the thumbnails and previews the app draws (the helper reads them to index them). -->
+	<key>com.apple.security.personal-information.photos-library</key>
 	<true/>
 </dict>
 </plist>

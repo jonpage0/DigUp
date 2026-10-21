@@ -43,10 +43,14 @@ extension ResultRow {
     /// opens with your words in Preview's search, but Preview doesn't go to the page by itself. Code opens in the
     /// editor chosen for it: "Open in Zed".
     var openTitle: String {
+        if photos != nil { return "Open in Photos" }
         if kind == .code, !CodeEditor.current.id.isEmpty { return "Open in \(CodeEditor.current.name)" }
         if let moment, moment >= 1, Opener.jumpsToMoments(url) { return "Open at \(Self.clock(moment))" }
         return "Open"
     }
+
+    /// "Show in Finder", or for a picture in a Photos library, where Finder can't show it, "Show in Photos".
+    var revealTitle: String { Opener.revealTitle(url) }
 
     /// The line a code result opens at: where the name is defined or the query's words are, else where its stretch
     /// starts (a notebook's at its top: editors can't be told a cell).
@@ -81,6 +85,7 @@ extension Engine {
     /// Opens `row` in its app: a PDF with words from its page to search for, a recording at its moment when the app
     /// can be told it (see `Opener`).
     func open(_ row: ResultRow) {
+        if let photos = row.photos { return Opener.showInPhotos(photos.uuid, name: row.name) }
         if row.kind == .code { return CodeEditor.current.open(row.url, line: row.codeLine) }
         guard let page = row.page else { return Opener.open(row, searching: nil) }
         let (url, words) = (row.url, row.foundWords + row.terms)
@@ -112,6 +117,58 @@ enum Opener {
     static func jumpsToMoments(_ url: URL) -> Bool {
         guard let app = NSWorkspace.shared.urlForApplication(toOpen: url) else { return false }
         return [quickTime, iina].contains(Bundle(url: app)?.bundleIdentifier)
+    }
+
+    /// Shows the file in Finder; a picture in a Photos library, in Photos (Finder would show the library's insides,
+    /// which are Photos' to change).
+    static func reveal(_ url: URL) {
+        if let asset = PhotosLibrary.asset(ofFile: url.path) {
+            return showInPhotos(asset.uuid, name: url.lastPathComponent)
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    static func revealTitle(_ url: URL) -> String {
+        PhotosLibrary.asset(ofFile: url.path) == nil ? "Show in Finder" : "Show in Photos"
+    }
+
+    /// Shows a picture or video of the Photos library in Photos, as Spotlight does (macOS asks once whether DigUp may
+    /// control Photos). Photos shows it if it's in the library it has open; failing that, Photos just comes forward.
+    /// osascript, as for QuickTime Player, so that macOS's question doesn't block the main thread.
+    static func showInPhotos(_ uuid: String, name: String) {
+        let photos = URL(fileURLWithPath: "/System/Applications/Photos.app")
+        if dryRun {
+            log("open (dry run): \(name) in Photos")
+            return
+        }
+        log("open: \(name) in Photos")
+        let script = """
+            on run argv
+                tell application "Photos"
+                    activate
+                    spotlight media item id (item 1 of argv)
+                end tell
+            end run
+            """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script, "\(uuid)/L0/001"]   // a media item's id in Photos' scripting
+        let errors = Pipe()
+        process.standardError = errors
+        process.standardOutput = FileHandle.nullDevice
+        process.terminationHandler = { process in
+            guard process.terminationStatus != 0 else { return }
+            let message = String(data: errors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            DispatchQueue.main.async {
+                log("open: Photos didn't show it (\(message.trimmingCharacters(in: .whitespacesAndNewlines)))")
+                NSWorkspace.shared.openApplication(at: photos, configuration: NSWorkspace.OpenConfiguration())
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            NSWorkspace.shared.openApplication(at: photos, configuration: NSWorkspace.OpenConfiguration())
+        }
     }
 
     /// `words`: what to search for in a PDF (`Landmark.find`).

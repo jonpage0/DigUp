@@ -138,14 +138,14 @@ struct PreviewPane: View {
                     .truncationMode(.middle)
                     .textSelection(.enabled)
                 Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([row.url])
+                    Opener.reveal(row.url)
                 } label: {
                     Text(row.folder).lineLimit(1).truncationMode(.head)
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .help("Show in Finder")
+                .help(row.revealTitle)
                 Text(row.details)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
@@ -159,7 +159,7 @@ struct PreviewPane: View {
     }
 }
 
-/// Open and Show in Finder, under the preview (the panel and the window).
+/// Open and Show in Finder (Show in Photos, for a Photos library's picture), under the preview (the panel and the window).
 struct PreviewActions: View {
     let row: ResultRow
     let open: () -> Void
@@ -170,7 +170,7 @@ struct PreviewActions: View {
         HStack(spacing: 8) {
             Button(row.openTitle, action: open)
                 .keyboardShortcut(.defaultAction)
-            Button("Show in Finder", action: reveal)
+            Button(row.revealTitle, action: reveal)
         }
         .controlSize(controlSize)
     }

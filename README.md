@@ -11,6 +11,10 @@ Search the files on your computer by what's in them, with Google DeepMind's
 <a href="https://github.com/ARahim3/DigUp/releases/tag/v0.7.0-beta.2"><b>Linux (beta)</b></a><br>
 <sub>Free and open source. Everything runs on your computer.</sub></p>
 
+> **This fork** of [ARahim3/DigUp](https://github.com/ARahim3/DigUp) adds Apple Photos libraries, read through
+> [osxphotos](https://github.com/RhetTbull/osxphotos): see [Apple Photos](#apple-photos). The downloads above are
+> upstream's and don't have it; build from source (below) for this fork.
+
 <p align="center"><img src="docs/demo.gif" width="800" alt="DigUp's search panel on a Mac, on Windows and on Linux: a zebra in a video, a podcast minute, a clause in a lease, a dog on the beach in English, Bengali and Arabic, and code that opens in Zed."></p>
 
 EmbeddingGemma 2 is the multimodal embedding model Google DeepMind released in October 2026. It puts text, images,
@@ -112,6 +116,8 @@ Only the folders you choose:
 - audio of any length: the model listens to 30 seconds at a time, so DigUp takes overlapping 30-second windows and a
   match points to its moment
 - video of any length: a frame every few seconds, one per shot, plus the soundtrack the same way as audio
+- on a Mac with osxphotos installed, a Photos library's pictures and videos, by what they show and by what Photos knows
+  about them (see [Apple Photos](#apple-photos))
 
 Outside the folders you pick for code search, it never reads code, and inside a code project (a folder with `.git`,
 `package.json` and the like) it reads only screenshots. It never reads keys, certificates, password files, hidden
@@ -143,6 +149,45 @@ working on code, the index catches up a minute after things go quiet.
 
 On a Mac, reading code takes about 20 seconds for a small app, and about 20 minutes and 130 MB of index for all of
 llama.cpp.
+
+## Apple Photos
+
+DigUp can search your Photos library too. It's a folder like any other here: choose Pictures, which holds the
+system library, and the library is one of its subfolders, with its own estimate and checkbox; or choose a
+`.photoslibrary` on its own (Add Folders lets you pick one). Its pictures are found by what they show, as everywhere
+else, and also by what Photos knows that no picture shows:
+
+- "Tati at the beach" finds the photos of the person you named Tati in Photos that show a beach
+- "Grandma in Lisbon", "receipt": the people and pets you've named, places from the street to the country, titles,
+  captions, keywords, albums, and the labels Photos' own analysis gave each picture (what's in it, activities,
+  holidays, landmarks, documents)
+
+A result opens in Photos (macOS asks once whether DigUp may control it), and Show in Photos (⌘↩) does the same.
+
+DigUp reads the library through [osxphotos](https://github.com/RhetTbull/osxphotos), which needs installing once:
+`uv tool install osxphotos` (or `pipx install osxphotos`). DigUp looks for it in `~/.local/bin`, Homebrew's and
+MacPorts' folders and on PATH; `DIGUP_OSXPHOTOS` names another, and an empty one turns libraries off. Without it, a
+library is skipped like any other bundle. macOS asks once whether DigUp may see your photos.
+
+What it reads of a library, and what it leaves alone:
+
+- each picture as Photos shows it: the edited version, else the original. When the original is only in iCloud
+  ("Optimize Mac Storage"), it reads Photos' own preview instead, about 1,100 pixels across, more than the model looks
+  at. DigUp never downloads anything, so a video that's only in iCloud is left out until it's on this Mac.
+- not what's hidden or in Recently Deleted, the shots of a burst nobody picked, shared albums, or what's Shared with
+  You and not saved to the library. Live Photos are read as their photo.
+- dates, cameras and file types aren't among Photos' words here (they'd match thousands of pictures at once), nor the
+  text Photos reads in pictures: DigUp reads a screenshot's text itself, as it does elsewhere.
+- it never changes the library. osxphotos reads Photos' database, which Apple doesn't document; osxphotos follows each
+  macOS release, so after a macOS update you may need `uv tool upgrade osxphotos`.
+
+A big library takes osxphotos a while to read, so its listing is kept in the index folder (`photos/`) and read again
+when pictures arrive, change or download. A change that's only in Photos' database (a name given to a face, a keyword)
+reaches keyword search with the next look at your folders, five minutes after the last listing at the earliest. A
+library that can't be read for a while keeps what's indexed from it.
+
+This fork's Mac app still checks upstream's update feed: turn off update checks in Settings, or an update will
+replace it with upstream's release, which doesn't read Photos libraries.
 
 ## How it works
 
@@ -233,7 +278,8 @@ and [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT). The Mac app uses [
 (MIT) for updates. The Windows and Linux app is built with [Tauri](https://tauri.app) (MIT or Apache 2.0) and reads
 files with [PDFium](https://pdfium.googlesource.com/pdfium/) (BSD), [FFmpeg](https://ffmpeg.org) (LGPL),
 [stb](https://github.com/nothings/stb) (public domain) and [miniz](https://github.com/richgel999/miniz) (MIT). Their
-license notices ship with the app.
+license notices ship with the app. This fork reads Photos libraries through Rhet Turnbull's
+[osxphotos](https://github.com/RhetTbull/osxphotos) (MIT), which you install yourself.
 
 DigUp isn't affiliated with Google, Apple or Microsoft. Gemma is a trademark of Google LLC; Mac and Spotlight are
 trademarks of Apple Inc.; Windows is a trademark of Microsoft Corporation.

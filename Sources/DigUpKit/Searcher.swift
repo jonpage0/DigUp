@@ -21,6 +21,20 @@ public struct SearchHit: Sendable {
     /// Code: the line to open at, in the stretch (`loc`…`locEnd`): where the name looked up is defined, or the first
     /// line with the query's words. Nil: the stretch's first line.
     public var focus: Double? = nil
+    /// A picture or video of a Photos library: where it is in Photos, and what Photos calls it.
+    public var photos: PhotosHit? = nil
+}
+
+/// A hit from a Photos library (`PhotosLibrary`): the asset it shows, and its title and date in Photos (from its
+/// `photosInfo` segment).
+public struct PhotosHit: Sendable, Equatable {
+    /// The library, as the index spells it (a real path).
+    public let library: String
+    public let uuid: String
+    /// Its title in Photos, else the name of the file it came in as ("" if the crawl hasn't said yet).
+    public let title: String
+    /// When it was taken, in seconds since 1970.
+    public let date: Double?
 }
 
 /// Hybrid search: meaning (EmbeddingGemma's vectors) + words (FTS5).
@@ -224,6 +238,18 @@ public final class Searcher {
                 locEnd = $0.isNull(2) ? nil : $0.double(2)
                 storedExcerpt = $0.text(3)
             }
+            // Photos' facts keep the title and the date where other segments keep an excerpt and a place.
+            var photos: PhotosHit?
+            if segment == .photosInfo { (loc, locEnd, storedExcerpt) = (nil, nil, nil) }
+            if let asset = PhotosLibrary.asset(ofFile: path) {
+                var title = "", date: Double?
+                try store.db.query("SELECT excerpt, loc FROM segments WHERE file = ? AND kind = ? LIMIT 1",
+                                   [.int(file), .text(SegmentKind.photosInfo.rawValue)]) {
+                    title = $0.text(0) ?? ""
+                    date = $0.isNull(1) ? nil : $0.double(1)
+                }
+                photos = PhotosHit(library: asset.library, uuid: asset.uuid, title: title, date: date)
+            }
             // Quote the matched words only when they come from the segment we point at, so a PDF hit on page 5
             // never shows page 2's words. A segment with no place and no text of its own (a screenshot's image
             // vector) can borrow them from its file's OCR text, which describes the same picture.
@@ -241,7 +267,7 @@ public final class Searcher {
                                   keywordRank: keyword?.0, segment: segment, segmentID: segmentID, loc: loc,
                                   locEnd: locEnd,
                                   excerpt: snippet ?? storedExcerpt, modified: modified, size: size, info: info,
-                                  focus: focus))
+                                  focus: focus, photos: photos))
         }
         return hits
     }

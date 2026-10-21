@@ -25,6 +25,10 @@ public enum SegmentKind: String, Sendable {
     case frame            // a video keyframe
     case lines            // a stretch of a code file: loc to loc_end are its first and last lines
     case cells            // a stretch of a notebook: loc to loc_end are its first and last cells, from 1
+    /// What Apple Photos knows about a picture or video of a Photos library (`PhotosLibrary.Asset`), for keyword search
+    /// only: its text is Photos' words, its excerpt the title a result shows, its loc the date it was taken (seconds
+    /// since 1970). The crawl writes it and keeps it current, as it does the name row; reading the file doesn't touch it.
+    case photosInfo = "photos_info"
 }
 
 /// What produced a segment's vector. Scores are normalized per modality because text vectors score higher than
@@ -67,6 +71,9 @@ public struct IndexOptions: Sendable {
     public var audioHop = 25.0
     public var excludedFolders: [String] = []
     public var excludedExtensions: Set<String> = []
+    /// How Photos libraries are read (`PhotosLibrary`): nil, and a library is skipped like any other bundle. Never for
+    /// the code index.
+    public var photos: PhotosLibrary.Reader?
 
     public init() {}
 

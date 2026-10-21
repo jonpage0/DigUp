@@ -15,10 +15,20 @@ public struct CrawlReport: Sendable {
     public var skipped: [String: Int] = [:]          // reason → files
     public var skippedFolders: [String: Int] = [:]   // reason → folders not walked into
     public var datasets: [String: Int] = [:]         // folder → files skipped as a dataset
+    /// The candidates from Photos libraries (by path), with what Photos says about each (`PhotosLibrary`).
+    public var photos: [String: PhotosLibrary.Asset] = [:]
+    /// Folders whose files couldn't be listed this time (a Photos library osxphotos couldn't read), in both spellings
+    /// (as chosen and real): what's indexed from them stays, as it does for a folder that's gone (`Indexer.sync`).
+    public var unlisted: [String] = []
+    /// Why each of `unlisted` couldn't be read.
+    public var problems: [String] = []
 }
 
 /// Walks the chosen folders and applies `Rules`. Reads metadata only, never file contents (except the 600-byte
 /// sniff that tells a real MPEG-TS video from a TypeScript file).
+///
+/// A Photos library (chosen, or met inside a chosen folder) isn't walked: its catalog says which of its files to read
+/// (`PhotosLibrary`, through `IndexOptions.photos`).
 ///
 /// For the code index (`IndexOptions.code`) it walks the code folders instead: code files only (`Rules.classifyCode`),
 /// in a git repo only those git keeps (`GitFiles`), and none in vendored or built folders.
@@ -34,7 +44,55 @@ public enum Crawler {
         var foundPaths = Set<String>()   // a folder inside another root would be walked twice
         let rootPaths = Set(roots.map { $0.standardizedFileURL.path })
 
+        /// A Photos library, through its catalog: the file that shows each of its assets is a candidate like any other.
+        func readLibrary(_ path: String) {
+            guard let reader = options.photos else {
+                report.skippedFolders["Photos library (osxphotos isn't installed)", default: 0] += 1
+                return
+            }
+            let listing: PhotosLibrary.Listing
+            do {
+                listing = try reader.list(path)
+            } catch {
+                report.skippedFolders["Photos library that couldn't be read", default: 0] += 1
+                report.unlisted += Set([path, FolderSelection.realPath(path)])
+                report.problems.append("\(error)")
+                return
+            }
+            for (reason, count) in listing.skipped { report.skipped[reason, default: 0] += count }
+            let real = FolderSelection.realPath(path)
+            for asset in listing.assets {
+                // Only the library's own files, each named for its asset (how a result finds it in Photos again).
+                guard FolderSelection.isInside(asset.path, real) || FolderSelection.isInside(asset.path, path),
+                      PhotosLibrary.asset(ofFile: asset.path)?.uuid == asset.uuid else {
+                    report.skipped["not a file of the library", default: 0] += 1
+                    continue
+                }
+                if options.excludedExtensions.contains((asset.path as NSString).pathExtension.lowercased()) {
+                    report.skipped["excluded type", default: 0] += 1
+                    continue
+                }
+                // Looked at now, not when it was listed: a picture edited in place since then is read again.
+                guard let info = FileSystem.info(of: asset.path), info.isRegular else {
+                    report.skipped["gone since Photos listed it", default: 0] += 1
+                    continue
+                }
+                if info.dataless {
+                    report.skipped["in the cloud, not downloaded", default: 0] += 1
+                    continue
+                }
+                guard foundPaths.insert(asset.path).inserted else { continue }
+                found.append(Candidate(path: asset.path, kind: asset.kind, size: info.size, mtime: info.mtime,
+                                       inode: info.inode, device: info.device))
+                report.photos[asset.path] = asset
+            }
+        }
+
         for root in roots.map({ $0.standardizedFileURL }) {
+            if !options.code, PhotosLibrary.isLibrary(root.path) {
+                readLibrary(root.path)
+                continue
+            }
             if options.code {
                 repos.enterRoot(root.path)
             } else if Rules.isProjectRoot(root.path) {
@@ -73,6 +131,16 @@ public enum Crawler {
                         repos.enter(url.path)
                     } else if Rules.isProjectRoot(url.path) {
                         projectRoots.insert(url.path)
+                    }
+                    return
+                }
+                // A Photos library is read through its catalog, unless it's skipped as a folder would be.
+                if isPackage, !options.code, PhotosLibrary.isLibrary(url.path) {
+                    walker.skipDescendants()
+                    if let reason = Rules.skipReason(forFolder: url, home: home, excluded: skips) {
+                        report.skippedFolders[reason, default: 0] += 1
+                    } else {
+                        readLibrary(url.path)
                     }
                     return
                 }
@@ -145,7 +213,8 @@ public enum Crawler {
         }
 
         if !options.includeDatasets, !options.code {
-            let datasets = Rules.datasetFolders(kept.map {
+            // A Photos library names its files after their assets' uuids, thousands to a folder: not a dataset.
+            let datasets = Rules.datasetFolders(kept.filter { report.photos[$0.path] == nil }.map {
                 (($0.path as NSString).deletingLastPathComponent,
                  (($0.path as NSString).lastPathComponent as NSString).deletingPathExtension, $0.kind)
             }, roots: rootPaths)

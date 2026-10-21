@@ -1,6 +1,7 @@
 import AppKit
 import DigUpKit
 import ServiceManagement
+import UniformTypeIdentifiers
 
 /// Owns the app's parts (engine, model download, hotkey, panel, windows, menu) and carries out what they ask for:
 /// new folders, a new hotkey, the login item, which window to show.
@@ -201,15 +202,23 @@ final class AppController {
         schedule.setHours(on ? hours : nil)
     }
 
-    /// Asks for folders with the standard open panel (as a sheet when there's a window).
-    func pickFolders(for window: NSWindow?, prompt: String = "Add", then done: @escaping ([URL]) -> Void) {
+    /// Asks for folders with the standard open panel (as a sheet when there's a window). `photos`: a Photos library can
+    /// be chosen too (to the panel it's a file, a package), when DigUp can read one (`PhotosLibrary.osxphotos`).
+    func pickFolders(for window: NSWindow?, prompt: String = "Add", photos: Bool = true,
+                     then done: @escaping ([URL]) -> Void) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
-        panel.canChooseFiles = false
+        let libraries = photos && PhotosLibrary.osxphotos != nil
+        if libraries, let library = UTType("com.apple.photos.library") {
+            panel.canChooseFiles = true
+            panel.allowedContentTypes = [library]
+        } else {
+            panel.canChooseFiles = false
+        }
         panel.allowsMultipleSelection = true
         panel.canCreateDirectories = false
         panel.prompt = prompt
-        panel.message = "Choose folders for DigUp to search."
+        panel.message = "Choose folders for DigUp to search." + (libraries ? " A Photos library can be chosen too." : "")
         let finish = { (response: NSApplication.ModalResponse) in
             done(response == .OK ? panel.urls.map { AppSettings.folderURL($0.path) } : [])
         }

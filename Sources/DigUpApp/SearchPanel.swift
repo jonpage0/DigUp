@@ -365,7 +365,7 @@ final class SearchPanelController {
 
     func revealSelected() {
         guard let row = selectedRow else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([row.url])
+        Opener.reveal(row.url)
         hide()
     }
 

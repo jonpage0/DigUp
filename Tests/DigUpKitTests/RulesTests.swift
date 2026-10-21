@@ -141,8 +141,8 @@ import Testing
 
     @Test func changesCountOnlyWhereTheCrawlGoes() {
         let home = "/Users/me"
-        func walked(_ path: String, root: String = home, skipping excluded: [String] = []) -> Bool {
-            Rules.isWalked(path, root: root, home: home, excluded: excluded)
+        func walked(_ path: String, root: String = home, skipping excluded: [String] = [], photos: Bool = false) -> Bool {
+            Rules.isWalked(path, root: root, home: home, excluded: excluded, readsPhotos: photos)
         }
         #expect(walked("/Users/me/Documents/trip.pdf"))
         #expect(walked("/Users/me"))
@@ -160,5 +160,16 @@ import Testing
         #expect(!walked("/Users/me/Documents/trip.pdf", root: drive))
         #expect(walked("/Users/me/Documentsx/a.pdf", root: "/Users/me/Documentsx"))
         #expect(!walked("/Users/me/Documentsx/a.pdf", root: "/Users/me/Documents"))
+        // A Photos library: only where its pictures land (Photos writes its database all the time), and only when
+        // libraries are read at all (else it's a bundle the crawl skips).
+        let library = "/Users/me/Pictures/Photos Library.photoslibrary"
+        #expect(walked(library + "/originals/F/FC37DBA6-CF22-4E3E-AB70-755587454608.heic", photos: true))
+        #expect(walked(library + "/resources/derivatives/F/FC37DBA6-CF22-4E3E-AB70-755587454608_1_105_c.jpeg",
+                       root: library, photos: true))
+        #expect(!walked(library + "/database/Photos.sqlite-wal", photos: true))
+        #expect(!walked(library + "/private/com.apple.photoanalysisd/caches/x", root: library, photos: true))
+        #expect(!walked(library + "/originals/F/FC37DBA6-CF22-4E3E-AB70-755587454608.heic"))
+        #expect(!walked(library + "/originals/F/FC37DBA6-CF22-4E3E-AB70-755587454608.heic", skipping: [library],
+                        photos: true))
     }
 }

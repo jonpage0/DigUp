@@ -125,15 +125,24 @@ public enum Rules {
     /// Whether a change the folder watcher reports at `path` is where the crawl of `root` goes: not inside a folder it
     /// skips (hidden, .noindex and developer folders, ~/Library, the skipped ones). A change anywhere else asks for a
     /// sync that finds nothing new. With the home folder chosen, that's DigUp's own writes too: its index and its log
-    /// live under ~/Library, and the log line about a change is a change again.
-    public static func isWalked(_ path: String, root: String, home: String, excluded: [String]) -> Bool {
+    /// live under ~/Library, and the log line about a change is a change again. Inside a Photos library it's only where
+    /// its pictures land (`PhotosLibrary.isPictureChange`), and only when libraries are read (`readsPhotos`): Photos
+    /// writes its database all the time.
+    public static func isWalked(_ path: String, root: String, home: String, excluded: [String],
+                                readsPhotos: Bool) -> Bool {
         guard path == root || FolderSelection.isInside(path, root) else { return false }
+        if PhotosLibrary.isLibrary(root) {
+            return readsPhotos && (path == root || PhotosLibrary.isPictureChange(path, in: root))
+        }
         var folder = root
         for part in path.dropFirst(root.count).split(separator: "/") {
             folder += "/" + part
             if part.hasPrefix(".")
                 || skipReason(forFolder: URL(fileURLWithPath: folder), home: home, excluded: excluded) != nil {
                 return false
+            }
+            if PhotosLibrary.isLibrary(folder) {
+                return readsPhotos && (path == folder || PhotosLibrary.isPictureChange(path, in: folder))
             }
         }
         return true

@@ -22,16 +22,25 @@ struct ResultRow: Identifiable, Equatable {
     let info: [String: String]
     /// The query's words (`Searcher.terms`): what the preview highlights on a page or in a passage.
     let terms: [String]
+    /// A picture or video of a Photos library: it opens in Photos (`Opener.showInPhotos`).
+    let photos: PhotosHit?
 
     init(_ hit: SearchHit, terms: [String] = []) {
         id = hit.path
         url = URL(fileURLWithPath: hit.path)
-        name = url.lastPathComponent
-        // Code says where it is in its repo: "billing/payments".
-        if hit.kind == .code, let repo = hit.info["repo"], hit.path.hasPrefix(repo + "/") {
+        photos = hit.photos
+        // A Photos library's file is named for its asset's uuid: it goes by its name in Photos, and lives "in" the
+        // library ("~/Pictures/Photos Library"), not in the library's own folders.
+        if let photos = hit.photos {
+            name = photos.title.isEmpty ? url.lastPathComponent : photos.title
+            folder = tildePath((photos.library as NSString).deletingPathExtension)
+        } else if hit.kind == .code, let repo = hit.info["repo"], hit.path.hasPrefix(repo + "/") {
+            // Code says where it is in its repo: "billing/payments".
+            name = url.lastPathComponent
             let parent = (repo as NSString).deletingLastPathComponent
             folder = String(url.deletingLastPathComponent().path.dropFirst(parent.count + 1))
         } else {
+            name = url.lastPathComponent
             folder = tildePath(url.deletingLastPathComponent().path)
         }
         kind = hit.kind
@@ -43,7 +52,8 @@ struct ResultRow: Identifiable, Equatable {
         excerpt = hit.excerpt.flatMap { $0.isEmpty ? nil : $0 }
         matchedMeaning = (hit.z ?? 0) >= 2
         matchedWords = hit.keywordRank != nil
-        modified = Date(timeIntervalSince1970: hit.modified)
+        // A Photos library's picture: the day it was taken (its file's date is the day it came into the library).
+        modified = Date(timeIntervalSince1970: hit.photos?.date ?? hit.modified)
         size = hit.size
         info = hit.info
         self.terms = terms
@@ -96,7 +106,11 @@ struct ResultRow: Identifiable, Equatable {
 
     /// Why it's here, in a few words: "Matches the picture", "Matches the frame at 0:06".
     var reason: String {
-        guard matchedMeaning else { return matchedWords ? "Has your words" : "Matches its name" }
+        guard matchedMeaning else {
+            // Photos' words: a person's name, a place, a keyword or an album.
+            if matchedWords, segment == .photosInfo { return "Has your words in Photos" }
+            return matchedWords ? "Has your words" : "Matches its name"
+        }
         let place = loc.map(Self.clock) ?? ""
         let page = loc.map { "page \(Int($0))" } ?? "a page"
         switch segment {
@@ -108,6 +122,7 @@ struct ResultRow: Identifiable, Equatable {
         case .pageImage: return "Matches \(page)"
         case .chunk: return "Matches its text"
         case .name: return "Matches its name"
+        case .photosInfo: return "Matches what Photos knows about it"
         case .lines, .cells: return "Matches \(span ?? "the code")"
         }
     }

@@ -19,6 +19,8 @@ public enum IndexerError: Error, CustomStringConvertible {
 public final class Indexer {
     public struct SyncSummary: Sendable {
         public var added = 0, changed = 0, moved = 0, removed = 0, unchanged = 0
+        /// Photos library files whose facts (what Photos says about them) were written or rewritten.
+        public var described = 0
         public var crawl: CrawlReport
         /// Files this sync queued for embedding (new or changed), so a watcher can index exactly those first.
         public var queued: [Int64] = []
@@ -86,7 +88,8 @@ public final class Indexer {
     // MARK: Sync
 
     /// Crawls `roots` and reconciles the index: new files are queued, changed ones re-queued, moved ones re-pathed
-    /// (no re-embedding), and files that are gone or newly excluded are removed.
+    /// (no re-embedding), and files that are gone or newly excluded are removed. What Photos says about a Photos
+    /// library's files is brought up to date too, without reading them again.
     public func sync(_ roots: [URL]) throws -> SyncSummary {
         let crawl = Crawler.crawl(roots, options: options)
         let existing = try store.files(under: roots.map { $0.standardizedFileURL.path })
@@ -98,10 +101,13 @@ public final class Indexer {
         }
         let seen = Set(crawl.candidates.map(\.path))
         var movedFrom = Set<String>()
+        var ids: [String: Int64] = [:]   // the Photos library files' rows, for their facts
         var summary = SyncSummary(crawl: crawl)
         try store.db.transaction {
             for file in crawl.candidates {
+                let id: Int64
                 if let row = byPath[file.path] {
+                    id = row.id
                     if row.size != file.size || abs(row.mtime - file.mtime) > 0.001 || row.kind != file.kind {
                         try store.requeue(row.id, as: file)
                         summary.changed += 1
@@ -111,22 +117,36 @@ public final class Indexer {
                     }
                 } else if let row = byInode["\(file.device):\(file.inode)"], !seen.contains(row.path),
                           !movedFrom.contains(row.path), row.size == file.size, abs(row.mtime - file.mtime) < 0.001 {
+                    id = row.id
                     try store.move(row.id, to: file.path)
                     movedFrom.insert(row.path)
                     summary.moved += 1
                 } else {
-                    summary.queued.append(try store.insert(file))
+                    id = try store.insert(file)
+                    summary.queued.append(id)
                     summary.added += 1
                 }
+                if crawl.photos[file.path] != nil { ids[file.path] = id }
             }
             // A root that went away while it was being walked (a drive ejected mid-crawl) looked emptier than it is:
-            // keep its rows rather than take that for "deleted".
+            // keep its rows rather than take that for "deleted". So does a Photos library that couldn't be read.
             let vanished = roots.map { $0.standardizedFileURL.path }
                 .filter { !FileManager.default.fileExists(atPath: $0) }.map { $0.hasSuffix("/") ? $0 : $0 + "/" }
             for row in existing where !seen.contains(row.path) && !movedFrom.contains(row.path)
-                && !vanished.contains(where: { row.path.hasPrefix($0) }) {
+                && !vanished.contains(where: { row.path.hasPrefix($0) })
+                && !crawl.unlisted.contains(where: { FolderSelection.isInside(row.path, $0) }) {
                 try store.delete(row.id)
                 summary.removed += 1
+            }
+            if !ids.isEmpty {
+                let stored = try store.photosFacts()
+                for (path, id) in ids {
+                    let facts = IndexStore.PhotosFacts(crawl.photos[path]!)
+                    if stored[id] != facts {
+                        try store.setPhotosFacts(facts, of: id)
+                        summary.described += 1
+                    }
+                }
             }
         }
         return summary

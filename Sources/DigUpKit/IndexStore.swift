@@ -260,7 +260,7 @@ public final class IndexStore {
 
     /// The file changed on disk: drop what was extracted from it and queue it again.
     public func requeue(_ id: Int64, as file: Candidate) throws {
-        try deleteSegments(of: id, keepingName: true)
+        try deleteSegments(of: id, keepingCrawled: true)
         try db.run("""
             UPDATE files SET kind = ?, size = ?, mtime = ?, inode = ?, device = ?, state = 'pending', detail = NULL,
                 info = NULL, indexed_at = NULL WHERE id = ?
@@ -270,7 +270,7 @@ public final class IndexStore {
 
     /// Extract and embed the file again, as it is (after a better way to read it arrived).
     func requeue(_ id: Int64) throws {
-        try deleteSegments(of: id, keepingName: true)
+        try deleteSegments(of: id, keepingCrawled: true)
         try db.run("UPDATE files SET state = 'pending', detail = NULL, info = NULL, indexed_at = NULL WHERE id = ?",
                    [.int(id)])
     }
@@ -309,8 +309,8 @@ public final class IndexStore {
     /// Queues every file again and forgets the fingerprint (after the model or settings changed).
     public func resetAll() throws {
         try db.transaction {
-            try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE kind != 'name')")
-            try db.run("DELETE FROM segments WHERE kind != 'name'")
+            try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE kind NOT IN \(Self.crawlKinds))")
+            try db.run("DELETE FROM segments WHERE kind NOT IN \(Self.crawlKinds)")
             try db.run("UPDATE files SET state = 'pending', detail = NULL, info = NULL, indexed_at = NULL")
             try setMeta("fingerprint", nil)
         }
@@ -450,23 +450,71 @@ public final class IndexStore {
                     .text(SearchText.normalized(Self.folderText(path)))])
     }
 
-    private func deleteSegments(of file: Int64, keepingName: Bool) throws {
-        let filter = keepingName ? "AND kind != 'name'" : ""
+    /// The segments the crawl writes: the name row, and what Photos says about a Photos library's picture. Reading
+    /// the file again (it changed, or the model did) keeps them.
+    static let crawlKinds = "('\(SegmentKind.name.rawValue)', '\(SegmentKind.photosInfo.rawValue)')"
+
+    private func deleteSegments(of file: Int64, keepingCrawled: Bool) throws {
+        let filter = keepingCrawled ? "AND kind NOT IN \(Self.crawlKinds)" : ""
         try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE file = ? \(filter))", [.int(file)])
         try db.run("DELETE FROM segments WHERE file = ? \(filter)", [.int(file)])
     }
 
-    /// "Screenshot 2026-10-01 at 9.41.07 PM.png" → searchable words.
+    /// "Screenshot 2026-10-01 at 9.41.07 PM.png" → searchable words. A Photos library's file is named for its asset's
+    /// uuid, which says nothing: its name in Photos is among what Photos says about it (`photosInfo`).
     static func nameText(_ path: String) -> String {
-        (path as NSString).lastPathComponent
+        PhotosLibrary.library(containing: path) == nil ? (path as NSString).lastPathComponent : ""
     }
 
-    /// The folders a file sits in, relative to the home folder ("Downloads Invoices"), as low-weight keywords.
+    /// The folders a file sits in, relative to the home folder ("Downloads Invoices"), as low-weight keywords. For a
+    /// Photos library's file, the folders down to the library and its name ("Pictures Photos Library"), not the
+    /// library's own folders (originals, resources, derivatives).
     static func folderText(_ path: String) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        var folder = (path as NSString).deletingLastPathComponent
+        var folder = PhotosLibrary.library(containing: path).map { ($0 as NSString).deletingPathExtension }
+            ?? (path as NSString).deletingLastPathComponent
         if folder.hasPrefix(home) { folder = String(folder.dropFirst(home.count)) }
         return folder.split(separator: "/").joined(separator: " ")
+    }
+
+    // MARK: Photos
+
+    /// What Photos says about a file from a Photos library, as its `photosInfo` segment keeps it.
+    public struct PhotosFacts: Equatable, Sendable {
+        public var title: String
+        public var date: Double
+        public var text: String
+
+        public init(_ asset: PhotosLibrary.Asset) {
+            (title, date, text) = (asset.title, asset.date, asset.text)
+        }
+
+        init(title: String, date: Double, text: String) {
+            (self.title, self.date, self.text) = (title, date, text)
+        }
+    }
+
+    /// Every file's Photos facts, by file id.
+    func photosFacts() throws -> [Int64: PhotosFacts] {
+        var facts: [Int64: PhotosFacts] = [:]
+        try db.query("""
+            SELECT s.file, s.excerpt, s.loc, coalesce(fts.original, fts.body) FROM segments s
+            LEFT JOIN fts ON fts.rowid = s.id WHERE s.kind = '\(SegmentKind.photosInfo.rawValue)'
+            """) { row in
+            facts[row.int(0)] = PhotosFacts(title: row.text(1) ?? "", date: row.double(2), text: row.text(3) ?? "")
+        }
+        return facts
+    }
+
+    /// Replaces a file's Photos facts: keyword search finds Photos' words in it from now on, and a result shows its title
+    /// and date. Nothing is embedded.
+    func setPhotosFacts(_ facts: PhotosFacts, of file: Int64) throws {
+        let kind = SegmentKind.photosInfo.rawValue
+        try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE file = ? AND kind = '\(kind)')",
+                   [.int(file)])
+        try db.run("DELETE FROM segments WHERE file = ? AND kind = '\(kind)'", [.int(file)])
+        try addSegment(file: file, kind: .photosInfo, modality: .none, loc: facts.date, excerpt: facts.title,
+                       text: facts.text)
     }
 
     // MARK: Stats
@@ -487,7 +535,8 @@ public final class IndexStore {
         }
         (counts.unfinished, counts.left) = try unfinishedCount()
         let inScope = scope == nil ? "" : " AND file IN (SELECT id FROM files WHERE 1\(scopeSQL))"
-        try db.query("SELECT COUNT(*), COUNT(vec) FROM segments WHERE kind != 'name'\(inScope)", scopeValues) {
+        try db.query("SELECT COUNT(*), COUNT(vec) FROM segments WHERE kind NOT IN \(Self.crawlKinds)\(inScope)",
+                     scopeValues) {
             counts.segments = Int($0.int(0))
             counts.vectors = Int($0.int(1))
         }

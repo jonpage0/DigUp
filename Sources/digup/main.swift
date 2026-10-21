@@ -48,6 +48,10 @@ let usage = """
       --shot-tokens N      vision tokens per screenshot (default 280; 560 was 2× slower, no better on real shots)
       --code-stretch N     characters a stretch of code holds at most (default 1800; 1200 and 3600 lost on the evals)
 
+    Photos libraries (a .photoslibrary, chosen or inside a chosen folder) are read through osxphotos when it's
+    installed (`uv tool install osxphotos`; $DIGUP_OSXPHOTOS names it, "" turns it off): see PhotosLibrary.swift.
+    Each library's listing is kept in the index folder (photos/).
+
     The model: EmbeddingGemma 2 on llama.cpp, from $DIGUP_MODELS (only there, when set), else
     ~/Library/Application Support/DigUp/Models or the Hugging Face cache. DIGUP_WORKER_DIR=worker uses the
     mlx-vlm reference worker instead (evals).
@@ -109,6 +113,8 @@ struct Arguments {
         options.includeDatasets = flags.contains("--include-datasets")
         options.excludedFolders = (lists["--exclude"] ?? []).map { Self.folderURL($0).path }
         options.excludedExtensions = IndexOptions.extensions((lists["--exclude-ext"] ?? []).joined(separator: ","))
+        // Photos libraries through osxphotos, if it's here (never for the code index: `Crawler`).
+        if !code { options.photos = PhotosLibrary.osxphotosReader(keepingListingsIn: indexFolder) }
         if let tokens = values["--shot-tokens"].flatMap(Int.init) { options.screenshotBudget = tokens }
         if let characters = values["--code-stretch"].flatMap(Int.init) { options.codeStretch = characters }
         return options
@@ -184,6 +190,7 @@ func location(_ hit: SearchHit) -> String {
     case .lines: hit.loc.map { "lines \(Int($0))–\(Int(hit.locEnd ?? $0))" + (hit.focus.map { ", opens at \(Int($0))" } ?? "") } ?? ""
     case .cells: hit.loc.map { $0 == hit.locEnd ? "cell \(Int($0))" : "cells \(Int($0))–\(Int(hit.locEnd ?? $0))" } ?? ""
     case .ocr: "text in image"
+    case .photosInfo: "Photos' words"
     default: ""
     }
 }
@@ -292,6 +299,7 @@ func estimate(_ args: Arguments) throws {
         }
         if !crawl.skipped.isEmpty { print("  skipped: " + skippedLine(crawl.skipped)) }
         if !crawl.skippedFolders.isEmpty { print("  folders not walked: " + skippedLine(crawl.skippedFolders)) }
+        for problem in crawl.problems { print("  couldn't read: \(problem)") }
         for (folder, count) in crawl.datasets.sorted(by: { $0.value > $1.value }) {
             print("  looks like a dataset (skipped): \(tilde(folder)) (\(number(count)) files)")
         }
@@ -313,8 +321,10 @@ func index(_ args: Arguments) throws {
     let folders = try args.folders()
     let sync = try indexer.sync(folders)
     print("index: \(tilde(store.file.path))")
-    print("sync: \(sync.added) new · \(sync.changed) changed · \(sync.moved) moved · \(sync.removed) removed · \(sync.unchanged) unchanged")
+    print("sync: \(sync.added) new · \(sync.changed) changed · \(sync.moved) moved · \(sync.removed) removed · \(sync.unchanged) unchanged"
+          + (sync.described > 0 ? " · \(sync.described) described by Photos" : ""))
     if !sync.crawl.skipped.isEmpty { print("skipped: " + skippedLine(sync.crawl.skipped)) }
+    for problem in sync.crawl.problems { print("couldn't read: \(problem)") }
     for (folder, count) in sync.crawl.datasets { print("looks like a dataset (skipped): \(tilde(folder)) (\(number(count)) files)") }
 
     let limit = args.values["--limit"].flatMap(Int.init)
@@ -387,9 +397,12 @@ func search(_ args: Arguments) throws {
         let why = [hit.z.map { String(format: "z %.1f", $0) }, hit.keywordRank.map { "words #\($0)" }]
             .compactMap { $0 }.joined(separator: ", ")
         let place = location(hit)
-        print("\(lpad("\(rank + 1)", 2)). \(pad(hit.kind.rawValue, 10)) \((hit.path as NSString).lastPathComponent)"
+        // A Photos library's picture: its name in Photos, and where it is in Photos.
+        let name = hit.photos.flatMap { $0.title.isEmpty ? nil : $0.title } ?? (hit.path as NSString).lastPathComponent
+        print("\(lpad("\(rank + 1)", 2)). \(pad(hit.kind.rawValue, 10)) \(name)"
               + (place.isEmpty ? "" : "  [\(place)]") + "   (\(why))")
-        print("      \(tilde((hit.path as NSString).deletingLastPathComponent))")
+        print("      " + (hit.photos.map { "\(tilde($0.library)) · \($0.uuid)" }
+                          ?? tilde((hit.path as NSString).deletingLastPathComponent)))
         if let excerpt = hit.excerpt, !excerpt.isEmpty { print("      “\(excerpt.prefix(160))”") }
     }
     print(String(format: "(%d vectors · query encoder %.2f s incl. start-up · search %.0f ms)", searcher.vectorCount,

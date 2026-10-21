@@ -487,7 +487,7 @@ final class FileDragView: NSView, NSDraggingSource {
         onClick()
         let menu = NSMenu()
         menu.addItem(ActionMenuItem(openTitle) { [onOpen] in onOpen() })
-        menu.addItem(ActionMenuItem("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) })
+        menu.addItem(ActionMenuItem(Opener.revealTitle(url)) { Opener.reveal(url) })
         menu.addItem(.separator())
         menu.addItem(ActionMenuItem("Copy") {
             NSPasteboard.general.clearContents()

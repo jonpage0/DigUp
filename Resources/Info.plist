@@ -31,13 +31,15 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>DigUp asks QuickTime Player to open a recording at the moment that matched your search.</string>
+	<string>DigUp asks QuickTime Player to open a recording at the moment that matched your search, and Photos to show a picture from your Photos library.</string>
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>DigUp indexes the folders you choose so you can search them by describing what's inside. Everything stays on this Mac.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
 	<string>DigUp indexes the folders you choose so you can search them by describing what's inside. Everything stays on this Mac.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>DigUp indexes the folders you choose so you can search them by describing what's inside. Everything stays on this Mac.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>DigUp reads your Photos library through osxphotos, so you can search its pictures and videos by what they show, who is in them and where they were taken. It never changes the library, and everything stays on this Mac.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSRemovableVolumesUsageDescription</key>

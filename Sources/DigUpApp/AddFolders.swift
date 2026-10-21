@@ -36,7 +36,7 @@ final class AddFoldersController {
         self.choices = choices
         // Snapshot runs never put an open panel on screen (-debugChoices picks folders instead).
         guard suggestions.isEmpty, !AppController.offscreen else { return present(choices, on: window) }
-        app.pickFolders(for: window) { [weak self] picked in
+        app.pickFolders(for: window, photos: !code) { [weak self] picked in
             guard let self else { return }
             guard !picked.isEmpty else {
                 self.choices = nil
@@ -63,7 +63,7 @@ final class AddFoldersController {
     }
 
     private func pick() {
-        app.pickFolders(for: sheet) { [weak self] picked in
+        app.pickFolders(for: sheet, photos: !code) { [weak self] picked in
             guard !picked.isEmpty else { return }
             self?.choices?.add(picked)
         }

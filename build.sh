@@ -62,12 +62,14 @@ PLIST="$APP/Contents/Info.plist"
 [[ -n "${SPARKLE_KEY:-}" ]] && { /usr/libexec/PlistBuddy -c "Delete :SUPublicEDKey" "$PLIST" 2>/dev/null || true
                                  /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $SPARKLE_KEY" "$PLIST"; }
 
-# Nested code first, then the bundle. The helper needs no entitlements: llama.cpp compiles its Metal shaders at run
-# time through Metal's own compiler service, which the hardened runtime allows (checked 2026-10-08). The app's one
-# entitlement lets it ask QuickTime Player to open a recording at a moment.
+# Nested code first, then the bundle. llama.cpp compiles its Metal shaders at run time through Metal's own compiler
+# service, which the hardened runtime allows (checked 2026-10-08). The helper's one entitlement lets it read a Photos
+# library's pictures; the app's let it ask QuickTime Player to open a recording at a moment and Photos to show a picture,
+# and draw a Photos library's pictures in previews.
 IDENTITY="${SIGN_ID:-$( [[ -f .sign-id ]] && head -1 .sign-id || echo - )}"
 TIMESTAMP=$([[ "${RELEASE:-}" == 1 ]] && echo --timestamp || echo --timestamp=none)
-codesign --force --sign "$IDENTITY" --options runtime $TIMESTAMP "$APP/Contents/Helpers/digup"
+codesign --force --sign "$IDENTITY" --options runtime $TIMESTAMP --entitlements Resources/Helper.entitlements \
+  "$APP/Contents/Helpers/digup"
 # Sparkle comes ad-hoc signed: its helpers, then the framework, with this identity (the app may only load code signed
 # by its own team).
 for code in "$FW/Versions/B/Autoupdate" "$FW/Versions/B/Updater.app" "$FW"; do
