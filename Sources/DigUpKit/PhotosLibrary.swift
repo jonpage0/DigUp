@@ -15,15 +15,17 @@ import Foundation
 ///   That's how a result finds its way back to Photos (`asset(ofFile:)`), and the crawl keeps only files named so.
 /// - what Photos knows goes to keyword search in a segment of its own (`SegmentKind.photosInfo`), which the crawl keeps
 ///   up to date without reading the picture again.
+/// - the words in a picture are the ones Photos read in it (`RecognizedText`): a screenshot isn't read again, and a
+///   photo is found by the words in it too (a sign, a label, a saved post).
 /// - a photo whose original is only in iCloud ("Optimize Mac Storage") is read from Photos' own preview: 1,024 pixels on
 ///   its long side, as many as `Indexer` gives the model for a photo, and an iPhone screenshot's 602 × 1304
 ///   (measured 2026-10-21). A video only in iCloud has no stand-in here and is left out. DigUp never downloads anything.
 /// - a library that can't be read (osxphotos failed, or macOS didn't allow it) keeps what's indexed from it
 ///   (`CrawlReport.unlisted`), as a drive that's unplugged does.
 ///
-/// DigUp only reads a library, through osxphotos and the files it names: no picture and nothing Photos knows is ever
-/// changed. (osxphotos opens Photos' databases read-only; SQLite still keeps the shared-memory file beside each one, as
-/// it does for any reader, Photos included.)
+/// DigUp only reads a library, through osxphotos, the files it names and the readings in the catalog: no picture and
+/// nothing Photos knows is ever changed. (osxphotos and `RecognizedText` open Photos' databases read-only; SQLite still
+/// keeps the shared-memory file beside each one, as it does for any reader, Photos included.)
 public enum PhotosLibrary {
     public static let fileExtension = "photoslibrary"
 
@@ -72,7 +74,8 @@ public enum PhotosLibrary {
         /// original is only in iCloud) Photos' largest still preview.
         public let path: String
         public let movie: Bool
-        /// Photos says it's a screenshot: read for its words too (`OCR`), as screenshots elsewhere are.
+        /// Photos says it's a screenshot: one has its words searched too, as screenshots elsewhere do. They're the ones
+        /// Photos read in it (`RecognizedText`), else DigUp's own reading (`OCR`).
         public let screenshot: Bool
         /// What a result calls it: its title in Photos, else the name of the file it came in as.
         public let title: String
@@ -81,8 +84,8 @@ public enum PhotosLibrary {
         /// What Photos knows about it, for keyword search: its title, caption and original name, keywords, the people
         /// and pets named in it, its albums, Photos' labels (what's in it, what's happening, holidays, landmarks, sounds)
         /// and its places (from the street to the country). Not dates, cameras, file types or the broad regions around
-        /// a place ("Sun Belt"), which would match thousands of pictures at once, nor the words Photos reads in
-        /// pictures (DigUp reads a screenshot's itself).
+        /// a place ("Sun Belt"), which would match thousands of pictures at once, nor the words Photos read in the
+        /// picture, which come with the picture when it's read (`RecognizedText`).
         public let words: [String]
 
         public init(uuid: String, path: String, movie: Bool, screenshot: Bool, title: String, date: Double,
@@ -163,6 +166,61 @@ public enum PhotosLibrary {
             return .missing
         }
         return (try? FileManager.default.contentsOfDirectory(atPath: library + "/originals")) == nil ? .denied : .allowed
+    }
+
+    // MARK: The words Photos read
+
+    /// The words Photos found in a library's pictures (Live Text: macOS and iOS read every picture; a picture whose
+    /// original is only in iCloud has its reading too). They're used instead of DigUp's own reading, which has only the
+    /// preview when the original is in iCloud. Photos keeps a picture's reading in its catalog (database/Photos.sqlite)
+    /// as Vision made it, an archived `VNDocumentObservation`, read out with `recognizedText(inArchive:)` (on the Mac).
+    ///
+    /// Measured on 60 iPhone screenshots of a real library (2026-10-21; previews of 602 × 1304, about half the
+    /// original): Photos' reading and DigUp's OCR of the preview found as many words (70 and 68 a screenshot, 65 of
+    /// them the same), and each found 91–94% of the other's exact-lookup strings (codes, URLs, prices). Each read words
+    /// the other got wrong, Photos more often right where the preview is small or a word is broken over two lines.
+    /// Photos' reading takes 3 ms to unpack; DigUp's OCR took 1.4 s a screenshot there (an M3 Max on battery). 17,009 of
+    /// the library's 18,276 screenshots had one, and 794 more were marked read with no words found (the OCR found none
+    /// in 15 of them either).
+    ///
+    /// One per library and thread: it keeps the catalog open (read-only) between pictures.
+    public final class RecognizedText {
+        private let library: String
+        private var catalog: Database?
+        private var unreadable = false
+
+        public init(library: String) {
+            self.library = library
+        }
+
+        /// The words Photos read in the asset's picture, in reading order; "" when Photos read it and found none; nil
+        /// when Photos hasn't read it (yet, or it couldn't: its reading version is then 32767, seen with words DigUp's
+        /// OCR did find), when the catalog has no readings (Photos before macOS 13) or can't be opened, and off the
+        /// Mac.
+        public func text(of uuid: String) -> String? {
+            guard PhotosLibrary.readsRecognizedText, !unreadable else { return nil }
+            do {
+                if catalog == nil { catalog = try Database(readingOnly: library + "/database/Photos.sqlite") }
+                var text: String?
+                try catalog?.query("""
+                    SELECT m.ZCHARACTERRECOGNITIONVERSION, c.ZCHARACTERRECOGNITIONDATA FROM ZASSET a
+                    JOIN ZMEDIAANALYSISASSETATTRIBUTES m ON m.ZASSET = a.Z_PK
+                    LEFT JOIN ZCHARACTERRECOGNITIONATTRIBUTES c ON c.Z_PK = m.ZCHARACTERRECOGNITIONATTRIBUTES
+                    WHERE a.ZUUID = ?
+                    """, [.text(uuid)]) { row in
+                    if let archive = row.blob(1) {
+                        text = PhotosLibrary.recognizedText(inArchive: archive)
+                    } else if (1..<32767).contains(row.int(0)) {
+                        text = ""
+                    }
+                }
+                return text
+            } catch {
+                // A catalog without these tables, or one that can't be opened: DigUp reads screenshots itself.
+                unreadable = true
+                return nil
+            }
+        }
     }
 
     /// What the last listing of a library found (kept in the index folder by `osxphotosReader`), or nil before one.

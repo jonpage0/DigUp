@@ -38,6 +38,19 @@ public final class Database {
         }
     }
 
+    /// Opens another program's database to read it (Photos' catalog): read-only, and nothing set on it, not even the
+    /// journal mode. A write briefly locking it out is waited for, up to two seconds.
+    public init(readingOnly path: String) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else {
+            let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "cannot open \(path)"
+            sqlite3_close(db)
+            throw Failure(message: message)
+        }
+        handle = db
+        sqlite3_busy_timeout(db, 2000)
+    }
+
     deinit { sqlite3_close_v2(handle) }
 
     public func execute(_ sql: String) throws {

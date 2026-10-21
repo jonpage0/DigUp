@@ -163,6 +163,8 @@ Its pictures are found by what they show, as everywhere else, and also by what P
 - "Grandma in Lisbon", "receipt": the people and pets you've named, places from the street to the country, titles,
   captions, keywords, albums, and the labels Photos' own analysis gave each picture (what's in it, activities,
   holidays, landmarks, documents)
+- "4417 receipt", "the sign that said closed for the season": the words in a picture, as Photos itself read them
+  (Live Text), in screenshots and photos alike
 
 A result opens in Photos (macOS asks once whether DigUp may control it), and Show in Photos (⌘↩) does the same. Photos
 can show a picture only from the library it has open: a result from another library brings Photos forward without it.
@@ -176,17 +178,22 @@ What it reads of a library, and what it leaves alone:
 
 - each picture as Photos shows it: the edited version, else the original. When the original is only in iCloud
   ("Optimize Mac Storage", which can be nearly every picture), it reads Photos' own preview instead: 1,024 pixels on its
-  long side for a photo, as many as DigUp gives the model anyway, and a screenshot's words are read from its preview
-  too. DigUp never downloads anything, so a video that's only in iCloud is left out until it's on this Mac.
+  long side for a photo, as many as DigUp gives the model anyway. DigUp never downloads anything, so a video that's only
+  in iCloud is left out until it's on this Mac.
+- the words in a picture are the ones Photos read in it, kept in its catalog, so DigUp doesn't read each screenshot
+  again (1.4 s each on an M3 Max on battery). On 60 iPhone screenshots read from their previews,
+  Photos' reading and DigUp's found as many words, and each found over 9 in 10 of the other's codes, URLs and prices;
+  each got some words the other missed, and Photos did better on the smallest previews. A screenshot Photos hasn't read
+  yet is read by DigUp. DigUp unpacks Photos' reading with a Vision class Apple doesn't document
+  (`VNDocumentObservation`); on a macOS without it, DigUp reads screenshots itself again.
 - not what's hidden or in Recently Deleted, the shots of a burst nobody picked, shared albums, or what's Shared with
   You and not saved to the library. Live Photos are read as their photo.
-- dates, cameras, file types and the broad regions Photos puts a place in ("Sun Belt") aren't among Photos' words here
-  (they'd match thousands of pictures at once), nor the text Photos reads in pictures: DigUp reads a screenshot's text
-  itself, as it does elsewhere.
-- it never changes your pictures or what Photos knows about them. osxphotos opens Photos' databases read-only; SQLite
-  still keeps its shared-memory file beside each one (the `-shm` file), as it does for Photos itself. osxphotos reads a
-  database Apple doesn't document, and follows each macOS release, so after a macOS update you may need
-  `uv tool upgrade osxphotos`.
+- dates, cameras, file types and the broad regions Photos puts a place in ("Sun Belt") aren't among Photos' words here:
+  they'd match thousands of pictures at once.
+- it never changes your pictures or what Photos knows about them. osxphotos, and DigUp for the words Photos read, open
+  Photos' databases read-only; SQLite still keeps its shared-memory file beside each one (the `-shm` file), as it does
+  for Photos itself. osxphotos reads a database Apple doesn't document, and follows each macOS release, so after a
+  macOS update you may need `uv tool upgrade osxphotos`.
 
 A big library takes osxphotos a while to read, so its listing is kept in the index folder (`photos/`) and read again
 when pictures arrive, change or download. A change that's only in Photos' database (a name given to a face, a keyword)

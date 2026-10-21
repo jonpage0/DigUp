@@ -17,7 +17,8 @@ public enum FileKind: String, CaseIterable, Sendable, Codable {
 public enum SegmentKind: String, Sendable {
     case name             // file name + folder names (keyword search only)
     case image            // the image itself
-    case ocr              // text Apple Vision read from a screenshot
+    case ocr              // the words in a picture: Apple Vision's reading of a screenshot, or what Photos read in one
+                          // of its pictures (`PhotosLibrary.RecognizedText`); keyword search only
     case page             // a PDF page's text
     case pageImage = "page_image"  // a PDF page rendered as an image (scans, slides)
     case chunk            // a piece of a document's text

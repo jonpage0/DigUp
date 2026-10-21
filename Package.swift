@@ -91,9 +91,10 @@ let package = Package(
         // Developer CLI: estimate / index / search / status / eval. Doubles as the eval harness, and the app runs it as
         // its indexing helper and its query encoder.
         .executableTarget(name: "digup", dependencies: ["DigUpKit", "LlamaRuntime"]),
-        // Pictures/ holds ImageTests' pictures (scripts/testbed/make_test_pictures.swift) and Videos/ VideoTests' video,
-        // read by path.
-        .testTarget(name: "DigUpKitTests", dependencies: ["DigUpKit"] + testDependencies, exclude: ["Pictures", "Videos"]),
+        // Pictures/ holds ImageTests' pictures (scripts/testbed/make_test_pictures.swift), Videos/ VideoTests' video,
+        // and Photos/ a reading Photos made of a picture (from osxphotos' test library), read by path.
+        .testTarget(name: "DigUpKitTests", dependencies: ["DigUpKit"] + testDependencies,
+                    exclude: ["Pictures", "Videos", "Photos"]),
         // Reference/ holds the fixed inputs and vectors of ReferenceVectorTests, read by path.
         .testTarget(name: "LlamaRuntimeTests", dependencies: ["LlamaRuntime"], exclude: ["Reference"]),
     ] + appTargets

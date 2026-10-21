@@ -178,4 +178,49 @@ import Testing
         #expect(after.pictures == before.pictures)
         #expect(after.database != before.database)
     }
+
+    #if canImport(Vision)
+    /// A reading Photos made of a picture (a can's label, in osxphotos' test library for macOS 27), as its catalog
+    /// keeps it.
+    static let reading = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .appendingPathComponent("Photos/reading.bplist")
+
+    @Test func photosReadingIsUsedAndOnlyAMissingOneLeavesItToDigUp() throws {
+        let library = folder.appendingPathComponent("L.photoslibrary")
+        try FileManager.default.createDirectory(at: library.appendingPathComponent("database"),
+                                                withIntermediateDirectories: true)
+        let catalog = try Database(path: library.appendingPathComponent("database/Photos.sqlite").path)
+        try catalog.execute("""
+            CREATE TABLE ZASSET (Z_PK INTEGER PRIMARY KEY, ZUUID VARCHAR);
+            CREATE TABLE ZMEDIAANALYSISASSETATTRIBUTES (Z_PK INTEGER PRIMARY KEY, ZASSET INTEGER,
+                ZCHARACTERRECOGNITIONATTRIBUTES INTEGER, ZCHARACTERRECOGNITIONVERSION INTEGER);
+            CREATE TABLE ZCHARACTERRECOGNITIONATTRIBUTES (Z_PK INTEGER PRIMARY KEY, ZCHARACTERRECOGNITIONDATA BLOB);
+            """)
+        let archive = try Data(contentsOf: Self.reading)
+        // Read with words; read and none found; Photos couldn't read it (32767); not read yet (0).
+        let assets: [(String, Int64, Data?)] = [("READ", 9, archive), ("EMPTY", 9, nil), ("FAILED", 32767, nil),
+                                                ("UNREAD", 0, nil)]
+        for (number, (uuid, version, data)) in assets.enumerated() {
+            let key = SQLValue.int(Int64(number + 1))
+            try catalog.run("INSERT INTO ZASSET VALUES (?, ?)", [key, .text(uuid)])
+            try catalog.run("INSERT INTO ZMEDIAANALYSISASSETATTRIBUTES VALUES (?, ?, ?, ?)",
+                            [key, key, key, .int(version)])
+            try catalog.run("INSERT INTO ZCHARACTERRECOGNITIONATTRIBUTES VALUES (?, ?)", [key, data.map { .blob($0) } ?? .null])
+        }
+        let readings = PhotosLibrary.RecognizedText(library: library.path)
+        #expect(readings.text(of: "READ") == "PROUTS\nMojito Mint")
+        #expect(readings.text(of: "EMPTY") == "")       // nothing for DigUp to read again
+        #expect(readings.text(of: "FAILED") == nil)     // DigUp reads it itself
+        #expect(readings.text(of: "UNREAD") == nil)
+        #expect(readings.text(of: "NOT-IN-THE-CATALOG") == nil)
+
+        // A catalog from before Photos kept readings (macOS 12): no readings, and nothing goes wrong.
+        let older = folder.appendingPathComponent("Older.photoslibrary")
+        try FileManager.default.createDirectory(at: older.appendingPathComponent("database"),
+                                                withIntermediateDirectories: true)
+        try Database(path: older.appendingPathComponent("database/Photos.sqlite").path)
+            .execute("CREATE TABLE ZASSET (Z_PK INTEGER PRIMARY KEY, ZUUID VARCHAR)")
+        #expect(PhotosLibrary.RecognizedText(library: older.path).text(of: "READ") == nil)
+    }
+    #endif
 }

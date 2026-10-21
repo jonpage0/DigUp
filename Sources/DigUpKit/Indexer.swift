@@ -374,6 +374,8 @@ public final class Indexer {
         let slot: Int
         let image: ImageExtractor.Prepared
         let ocr: String
+        /// `ocr` is what Photos read in the picture (`PhotosLibrary.RecognizedText`), not DigUp's OCR.
+        var fromPhotos = false
     }
 
     /// A batch being prepared on the preparation queue.
@@ -430,6 +432,7 @@ public final class Indexer {
             case .image, .screenshot:
                 let screenshot = batch[0].kind == .screenshot
                 var ready: [ReadyImage] = []
+                var readings: [String: PhotosLibrary.RecognizedText] = [:]   // by library
                 for (slot, file) in batch.enumerated() {
                     let url = URL(fileURLWithPath: file.path)
                     startReading(file.path)
@@ -437,8 +440,16 @@ public final class Indexer {
                         let image = try ImageExtractor.prepare(url, maxPixel: screenshot ? 1536 : 1024,
                                                                minSide: options.minImageSide, to: folder,
                                                                png: screenshot)
-                        let ocr = screenshot ? OCR.text(ofImageAt: url) : ""
-                        ready.append(ReadyImage(slot: slot, image: image, ocr: ocr))
+                        // A Photos library's picture has the words Photos read in it: a screenshot's are used instead
+                        // of reading it again, and a photo gets them too. A screenshot Photos hasn't read is read here.
+                        var read: String?
+                        if let asset = PhotosLibrary.asset(ofFile: file.path) {
+                            let reading = readings[asset.library] ?? PhotosLibrary.RecognizedText(library: asset.library)
+                            readings[asset.library] = reading
+                            read = reading.text(of: asset.uuid)
+                        }
+                        let ocr = read ?? (screenshot ? OCR.text(ofImageAt: url) : "")
+                        ready.append(ReadyImage(slot: slot, image: image, ocr: ocr, fromPhotos: read != nil))
                     } catch let error as ExtractError {
                         if case .tooSmall = error {
                             prepared.outcomes[slot] = Outcome(state: "skipped", detail: "\(error)")
@@ -572,8 +583,9 @@ public final class Indexer {
                     continue
                 }
                 try store.addSegment(file: file.id, kind: .image, modality: .image, vector: vector)
-                // The words on screen are for keyword search: codes, names and errors typed exactly. Meaning comes from
-                // the picture alone; a vector of the words made screenshots outrank better matches (2026-10-08).
+                // The words on screen, or the ones Photos read in a picture, are for keyword search: codes, names and
+                // errors typed exactly. Meaning comes from the picture alone; a vector of the words made screenshots
+                // outrank better matches (2026-10-08).
                 if !item.ocr.isEmpty {
                     try store.addSegment(file: file.id, kind: .ocr, modality: .text, excerpt: excerpt(item.ocr),
                                          text: item.ocr)
@@ -582,7 +594,9 @@ public final class Indexer {
                 if let taken = item.image.taken { info["taken"] = taken }
                 if screenshot { info["ocr_chars"] = "\(item.ocr.count)" }
                 try store.finish(file.id, state: "done", info: info)
-                results[item.slot] = ("done", screenshot ? "ocr \(item.ocr.count) chars" : nil)
+                let note = item.fromPhotos ? (screenshot || !item.ocr.isEmpty ? "Photos' text \(item.ocr.count) chars" : nil)
+                    : screenshot ? "ocr \(item.ocr.count) chars" : nil
+                results[item.slot] = ("done", note)
             }
         }
     }
