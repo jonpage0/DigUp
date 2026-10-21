@@ -192,8 +192,9 @@ when pictures arrive, change or download. A change that's only in Photos' databa
 reaches keyword search with the next look at your folders, five minutes after the last listing at the earliest. A
 library that can't be read for a while keeps what's indexed from it.
 
-This fork's Mac app still checks upstream's update feed: turn off update checks in Settings, or an update will
-replace it with upstream's release, which doesn't read Photos libraries.
+This fork's Mac app doesn't check for updates by itself: its feed is upstream's, and an update from it would replace
+the fork with upstream's release, which doesn't read Photos libraries. Check for Updates… in the menu still reads that
+feed, so leave it alone unless you mean to go back to upstream.
 
 ## How it works
 
