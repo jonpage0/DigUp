@@ -105,7 +105,17 @@ public enum Rules {
     }
 
     /// MPEG-TS packets start with 0x47 every 188 bytes (or every 192 with a 4-byte timecode, as in .m2ts / AVCHD .mts).
+    /// Never asked of a placeholder whose contents are in the cloud: reading one downloads it, and waits for that (an
+    /// iCloud Documents folder full of TypeScript held a crawl for over half an hour, 2026-10-21). A real transport
+    /// stream there is taken for TypeScript until it's downloaded, which skips it either way.
     static func isMPEGTransportStream(_ url: URL) -> Bool {
+        guard let info = FileSystem.info(of: url.path), info.isRegular, !info.dataless else { return false }
+        #if canImport(Darwin)   // iCloud's own say; there's no iCloud elsewhere
+        if FileSystem.isInCloud(try? url.resourceValues(forKeys: [.isUbiquitousItemKey,
+                                                                   .ubiquitousItemDownloadingStatusKey])) {
+            return false
+        }
+        #endif
         guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
         defer { try? handle.close() }
         guard let data = try? handle.read(upToCount: 600), data.count >= 400 else { return false }
