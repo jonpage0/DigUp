@@ -13,7 +13,8 @@ Search the files on your computer by what's in them, with Google DeepMind's
 
 > **This fork** of [ARahim3/DigUp](https://github.com/ARahim3/DigUp) adds Apple Photos libraries, read through
 > [osxphotos](https://github.com/RhetTbull/osxphotos): see [Apple Photos](#apple-photos). The downloads above are
-> upstream's and don't have it; build from source (below) for this fork.
+> upstream's and don't have it. To build this fork, clone `https://github.com/jonpage0/DigUp` (branch `apple-photos`)
+> and follow "Build from source" below.
 
 <p align="center"><img src="docs/demo.gif" width="800" alt="DigUp's search panel on a Mac, on Windows and on Linux: a zebra in a video, a podcast minute, a clause in a lease, a dog on the beach in English, Bengali and Arabic, and code that opens in Zed."></p>
 
@@ -162,7 +163,8 @@ else, and also by what Photos knows that no picture shows:
   captions, keywords, albums, and the labels Photos' own analysis gave each picture (what's in it, activities,
   holidays, landmarks, documents)
 
-A result opens in Photos (macOS asks once whether DigUp may control it), and Show in Photos (⌘↩) does the same.
+A result opens in Photos (macOS asks once whether DigUp may control it), and Show in Photos (⌘↩) does the same. Photos
+can show a picture only from the library it has open: a result from another library brings Photos forward without it.
 
 DigUp reads the library through [osxphotos](https://github.com/RhetTbull/osxphotos), which needs installing once:
 `uv tool install osxphotos` (or `pipx install osxphotos`). DigUp looks for it in `~/.local/bin`, Homebrew's and
@@ -172,14 +174,18 @@ library is skipped like any other bundle. macOS asks once whether DigUp may see 
 What it reads of a library, and what it leaves alone:
 
 - each picture as Photos shows it: the edited version, else the original. When the original is only in iCloud
-  ("Optimize Mac Storage"), it reads Photos' own preview instead, about 1,100 pixels across, more than the model looks
-  at. DigUp never downloads anything, so a video that's only in iCloud is left out until it's on this Mac.
+  ("Optimize Mac Storage", which can be nearly every picture), it reads Photos' own preview instead: 1,024 pixels on its
+  long side for a photo, as many as DigUp gives the model anyway, and a screenshot's words are read from its preview
+  too. DigUp never downloads anything, so a video that's only in iCloud is left out until it's on this Mac.
 - not what's hidden or in Recently Deleted, the shots of a burst nobody picked, shared albums, or what's Shared with
   You and not saved to the library. Live Photos are read as their photo.
-- dates, cameras and file types aren't among Photos' words here (they'd match thousands of pictures at once), nor the
-  text Photos reads in pictures: DigUp reads a screenshot's text itself, as it does elsewhere.
-- it never changes the library. osxphotos reads Photos' database, which Apple doesn't document; osxphotos follows each
-  macOS release, so after a macOS update you may need `uv tool upgrade osxphotos`.
+- dates, cameras, file types and the broad regions Photos puts a place in ("Sun Belt") aren't among Photos' words here
+  (they'd match thousands of pictures at once), nor the text Photos reads in pictures: DigUp reads a screenshot's text
+  itself, as it does elsewhere.
+- it never changes your pictures or what Photos knows about them. osxphotos opens Photos' databases read-only; SQLite
+  still keeps its shared-memory file beside each one (the `-shm` file), as it does for Photos itself. osxphotos reads a
+  database Apple doesn't document, and follows each macOS release, so after a macOS update you may need
+  `uv tool upgrade osxphotos`.
 
 A big library takes osxphotos a while to read, so its listing is kept in the index folder (`photos/`) and read again
 when pictures arrive, change or download. A change that's only in Photos' database (a name given to a face, a keyword)

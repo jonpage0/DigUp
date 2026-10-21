@@ -89,8 +89,13 @@ public enum Crawler {
         }
 
         for root in roots.map({ $0.standardizedFileURL }) {
-            if !options.code, PhotosLibrary.isLibrary(root.path) {
-                readLibrary(root.path)
+            // A library chosen on its own: through its catalog, and never for code (nor walked, as it would be).
+            if PhotosLibrary.isLibrary(root.path) {
+                if options.code {
+                    report.skippedFolders["Photos library", default: 0] += 1
+                } else {
+                    readLibrary(root.path)
+                }
                 continue
             }
             if options.code {

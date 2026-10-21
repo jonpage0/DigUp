@@ -15,13 +15,15 @@ import Foundation
 ///   That's how a result finds its way back to Photos (`asset(ofFile:)`), and the crawl keeps only files named so.
 /// - what Photos knows goes to keyword search in a segment of its own (`SegmentKind.photosInfo`), which the crawl keeps
 ///   up to date without reading the picture again.
-/// - a photo whose original is only in iCloud ("Optimize Mac Storage") is read from Photos' own preview, about 1,100
-///   pixels across (more than the model looks at); a video only in iCloud has no stand-in here and is left out. DigUp
-///   never downloads anything.
+/// - a photo whose original is only in iCloud ("Optimize Mac Storage") is read from Photos' own preview: 1,024 pixels on
+///   its long side, as many as `Indexer` gives the model for a photo, and an iPhone screenshot's 602 × 1304
+///   (measured 2026-10-21). A video only in iCloud has no stand-in here and is left out. DigUp never downloads anything.
 /// - a library that can't be read (osxphotos failed, or macOS didn't allow it) keeps what's indexed from it
 ///   (`CrawlReport.unlisted`), as a drive that's unplugged does.
 ///
-/// DigUp only reads a library, and only through osxphotos and the files it names: nothing in it is ever changed.
+/// DigUp only reads a library, through osxphotos and the files it names: no picture and nothing Photos knows is ever
+/// changed. (osxphotos opens Photos' databases read-only; SQLite still keeps the shared-memory file beside each one, as
+/// it does for any reader, Photos included.)
 public enum PhotosLibrary {
     public static let fileExtension = "photoslibrary"
 
@@ -78,8 +80,9 @@ public enum PhotosLibrary {
         public let date: Double
         /// What Photos knows about it, for keyword search: its title, caption and original name, keywords, the people
         /// and pets named in it, its albums, Photos' labels (what's in it, what's happening, holidays, landmarks, sounds)
-        /// and its places (from the street to the country). Not dates, cameras or file types, which would match
-        /// thousands of pictures at once, nor the words Photos reads in pictures (DigUp reads a screenshot's itself).
+        /// and its places (from the street to the country). Not dates, cameras, file types or the broad regions around
+        /// a place ("Sun Belt"), which would match thousands of pictures at once, nor the words Photos reads in
+        /// pictures (DigUp reads a screenshot's itself).
         public let words: [String]
 
         public init(uuid: String, path: String, movie: Bool, screenshot: Bool, title: String, date: Double,
@@ -171,7 +174,9 @@ public enum PhotosLibrary {
     }
 
     /// What a kept listing is checked against: the folders where pictures land (a new, edited or downloaded picture
-    /// changes one of them, one level down) and the database.
+    /// changes one of them, one level down) and the databases osxphotos reads: the catalog, and the search database
+    /// that holds Photos' labels and places (search/psi.sqlite in libraries from macOS 13 to 26, search/leo.sqlite in
+    /// macOS 27's, as seen 2026-10-21).
     struct State: Codable, Equatable {
         var pictures: String
         var database: String
@@ -192,8 +197,8 @@ public enum PhotosLibrary {
                 }
             }
             self.pictures = pictures.joined(separator: "\n")
-            database = ["Photos.sqlite", "Photos.sqlite-wal"].map { Self.stamp(library + "/database/" + $0) }
-                .joined(separator: " ")
+            database = ["Photos.sqlite", "search/psi.sqlite", "search/leo.sqlite"]
+                .flatMap { [$0, $0 + "-wal"] }.map { Self.stamp(library + "/database/" + $0) }.joined(separator: " ")
         }
 
         private static func stamp(_ path: String) -> String {
@@ -206,24 +211,33 @@ public enum PhotosLibrary {
     struct Kept: Codable {
         static let currentVersion = 1
         var version = Kept.currentVersion
+        /// The script that listed it (`script`, hashed): a listing made another way is made again.
+        var reader = PhotosLibrary.hash(PhotosLibrary.script)
         var library: String
         var listedAt: Double
         var state: State
         var listing: Listing
 
-        /// The pictures are as they were, and so is the database, or the listing is younger than `listingLifetime`.
+        /// Made by this script, the pictures are as they were, and so are the databases, or the listing is younger
+        /// than `listingLifetime`.
         func isCurrent(library: String, state: State, now: Double) -> Bool {
             let age = now - listedAt
-            return version == Self.currentVersion && self.library == library && self.state.pictures == state.pictures
+            return version == Self.currentVersion && reader == PhotosLibrary.hash(PhotosLibrary.script)
+                && self.library == library && self.state.pictures == state.pictures
                 && (self.state.database == state.database || (0..<PhotosLibrary.listingLifetime).contains(age))
         }
     }
 
-    /// The kept listing's file name: the library's path, hashed (FNV-1a).
+    /// The kept listing's file name: the library's path, hashed.
     static func keptName(of library: String) -> String {
+        hash(library) + ".json"
+    }
+
+    /// FNV-1a, as 16 hex digits: a name for a path, a check of a script.
+    static func hash(_ text: String) -> String {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in library.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100_0000_01b3 }
-        return String(format: "%016llx.json", hash)
+        for byte in text.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100_0000_01b3 }
+        return String(format: "%016llx", hash)
     }
 
     /// Runs osxphotos on the library (`script`), for up to `timeout` seconds: macOS may first ask whether DigUp can see
@@ -249,7 +263,9 @@ public enum PhotosLibrary {
         try process.run()
         if ended.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
-            _ = ended.wait(timeout: .now() + 5)
+            #if !os(Windows)
+            if ended.wait(timeout: .now() + 5) == .timedOut { kill(process.processIdentifier, SIGKILL) }
+            #endif
             throw Failure(description: "osxphotos took more than \(Int(timeout / 60)) minutes to read \(library)")
         }
         guard process.terminationStatus == 0, let data = try? Data(contentsOf: output) else {
@@ -271,11 +287,12 @@ public enum PhotosLibrary {
         import osxphotos
 
         STILLS = (".jpeg", ".jpg", ".heic", ".png", ".tif", ".tiff")
-        # SearchInfo's lists that say what a picture shows, where it was taken, and who and what is in it.
+        # SearchInfo's lists that say what a picture shows, where it was taken, and who and what is in it. Not its
+        # "locality names": the broad regions around a place ("Sun Belt", "Gulf South", "Continental United States"),
+        # shared by every picture taken within hundreds of miles, so a word of them matches all of those at once.
         SEARCH_INFO = ("pets", "labels", "activities", "human_actions", "holidays", "events", "event_performers",
                        "event_types", "landmarks", "sounds", "document_types", "place_names", "streets", "neighborhoods",
-                       "locality_names", "bodies_of_water", "venues", "venue_types", "areas_of_interest", "city",
-                       "state", "country")
+                       "bodies_of_water", "venues", "venue_types", "areas_of_interest", "city", "state", "country")
 
 
         def quietly(read):

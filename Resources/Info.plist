@@ -39,7 +39,7 @@
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>DigUp indexes the folders you choose so you can search them by describing what's inside. Everything stays on this Mac.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>DigUp reads your Photos library through osxphotos, so you can search its pictures and videos by what they show, who is in them and where they were taken. It never changes the library, and everything stays on this Mac.</string>
+	<string>DigUp reads your Photos library through osxphotos, so you can search its pictures and videos by what they show, who is in them and where they were taken. It never changes your pictures or what Photos knows about them, and everything stays on this Mac.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSRemovableVolumesUsageDescription</key>

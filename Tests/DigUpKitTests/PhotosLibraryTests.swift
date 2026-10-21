@@ -126,6 +126,13 @@ import Testing
         let unread = Crawler.crawl([pictures], options: IndexOptions())
         #expect(unread.candidates.isEmpty)
         #expect(unread.skippedFolders["Photos library (osxphotos isn't installed)"] == 1)
+        // Chosen as a code folder: neither read nor walked (its files would be walked like any folder's).
+        try Data("print('not code to read')".utf8).write(to: library.appendingPathComponent("database/stray.py"))
+        var code = IndexOptions()
+        code.code = true
+        let codeCrawl = Crawler.crawl([library], options: code)
+        #expect(codeCrawl.candidates.isEmpty)
+        #expect(codeCrawl.skippedFolders["Photos library"] == 1)
     }
 
     @Test func aFileOfALibraryNamesItsAsset() {
@@ -153,5 +160,22 @@ import Testing
         #expect(kept.isCurrent(library: "/L.photoslibrary", state: written, now: 1000 + 60))
         #expect(!kept.isCurrent(library: "/L.photoslibrary", state: written, now: 1000 + 600))
         #expect(!kept.isCurrent(library: "/Other.photoslibrary", state: state, now: 1001))
+        // Made by another version of the script: made again.
+        var older = kept
+        older.reader = "0000000000000000"
+        #expect(!older.isCurrent(library: "/L.photoslibrary", state: state, now: 1001))
+    }
+
+    @Test func photosSearchDatabaseCountsAsTheDatabase() throws {
+        // Photos' labels and places live in its search database, not the catalog: a change there alone is a change.
+        let (library, _) = try library(1, in: folder)
+        let search = library.appendingPathComponent("database/search")
+        try FileManager.default.createDirectory(at: search, withIntermediateDirectories: true)
+        try Data("labels".utf8).write(to: search.appendingPathComponent("leo.sqlite"))
+        let before = PhotosLibrary.State(of: library.path)
+        try Data("labels, and a new one".utf8).write(to: search.appendingPathComponent("leo.sqlite"))
+        let after = PhotosLibrary.State(of: library.path)
+        #expect(after.pictures == before.pictures)
+        #expect(after.database != before.database)
     }
 }
