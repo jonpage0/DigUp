@@ -175,6 +175,11 @@ The search window's map (its map button) shows where results were taken: Photos'
 photo's GPS tags and a video's location for other files. Search This Area keeps the results to what's in view, and
 with nothing typed it lists everything taken there, newest first. The map is Apple Maps, so it's online (see Private).
 
+Beside the kinds, the search window has People, Albums and Favorites: results are kept to pictures with everyone you
+pick in them, in any album you pick, or marked ♥ in Photos. Each filter that's on is a token in the search field (its ×
+takes it off, as ⌫ does in an empty field), and typing a person's or an album's name offers it as a filter (Tab takes
+it). With nothing typed, the window lists everything the filters keep, newest first.
+
 DigUp reads the library through [osxphotos](https://github.com/RhetTbull/osxphotos), which needs installing once:
 `uv tool install osxphotos` (or `pipx install osxphotos`). DigUp looks for it in `~/.local/bin`, Homebrew's and
 MacPorts' folders and on PATH; `DIGUP_OSXPHOTOS` names another, and an empty one turns libraries off. Without it, a
