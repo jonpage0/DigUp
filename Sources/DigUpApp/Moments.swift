@@ -81,6 +81,58 @@ enum QuickLookMoment {
     }
 }
 
+/// One thing Quick Look (Space) shows, under the name the result goes by: a Photos library's file is named after its
+/// asset's uuid, so Quick Look's title would be "1EB2B765-….jpeg" without it.
+final class QuickLookItem: NSObject, QLPreviewItem {
+    let previewItemURL: URL?
+    let previewItemTitle: String?
+
+    init(url: URL, title: String) {
+        previewItemURL = url
+        previewItemTitle = title
+    }
+}
+
+extension ResultRow {
+    /// What Space shows, and which of it first. A video in iCloud read from Photos' filmstrip: every still of it, from
+    /// the one that matched (Quick Look's arrows and its index sheet go through them; they're all this Mac has of the
+    /// video), and a poster video its poster. Anything else: the file.
+    var quickLook: (items: [QuickLookItem], start: Int) {
+        if kind == .video, let photos, let still = photos.still {
+            let stills = photos.reading == .stills ? PhotosLibrary.filmstrip(startingAt: url.path) : []
+            if stills.count > 1 {
+                let items = stills.enumerated().map { index, path in
+                    QuickLookItem(url: URL(fileURLWithPath: path),
+                                  title: "\(name) · still \(index + 1) of \(stills.count) (the video is in iCloud)")
+                }
+                return (items, stills.firstIndex(of: still) ?? 0)
+            }
+            return ([QuickLookItem(url: URL(fileURLWithPath: still), title: "\(name) (the video is in iCloud)")], 0)
+        }
+        return ([QuickLookItem(url: url, title: name)], 0)
+    }
+}
+
+/// The window or panel that hands Quick Look the selected result (`QLPreviewPanelDataSource`): what it shows now.
+protocol QuickLookSource: AnyObject {
+    var previewItems: [QuickLookItem] { get set }
+}
+
+extension QuickLookSource {
+    /// Quick Look shows `row` (or nothing), from its first item to show, at its page or moment.
+    func showInQuickLook(_ row: ResultRow?) {
+        let panel = QLPreviewPanel.shared()!
+        let (items, start) = row?.quickLook ?? ([], 0)
+        let same = items.map(\.previewItemURL) == previewItems.map(\.previewItemURL)
+        previewItems = items
+        // The same file again (a key that didn't move the selection): reloading it would restart a movie.
+        guard !same || !panel.isVisible else { return }
+        panel.reloadData()
+        if start > 0 { panel.currentPreviewItemIndex = start }
+        QuickLookMoment.show(row, in: panel)
+    }
+}
+
 extension Engine {
     /// Opens `row` in its app: a PDF with words from its page to search for, a recording at its moment when the app
     /// can be told it (see `Opener`).

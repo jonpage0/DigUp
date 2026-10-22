@@ -18,6 +18,8 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
     init(app: AppController) {
         self.app = app
         search = SearchModel(engine: app.engine, favorites: app.favorites, model: app.model)
+        super.init()
+        search.selected = { [weak self] in self?.selectionChanged() }
     }
 
     var isVisible: Bool { window?.isVisible == true }
@@ -129,7 +131,10 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             } else {
                 return false
             }
-        case 49 where modifiers.isEmpty && (search.navigated || previewing) && search.selectedRow != nil:   // Space
+        // Space previews once you've arrowed or clicked to a result, or with nothing typed (a space would start
+        // nothing); while you're typing words it's a space.
+        case 49 where modifiers.isEmpty && (search.navigated || previewing || search.query.isEmpty)
+            && search.selectedRow != nil:
             toggleQuickLook()
         case 16 where modifiers == .command:   // ⌘Y
             toggleQuickLook()
@@ -174,15 +179,18 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
 
     /// Quick Look shows the selected result at its page or moment.
     private func updateQuickLook() {
-        window?.previewURL = search.selectedRow?.url
-        QLPreviewPanel.shared().reloadData()
-        QuickLookMoment.show(search.selectedRow, in: QLPreviewPanel.shared())
+        window?.showInQuickLook(search.selectedRow)
+    }
+
+    /// A result was clicked: Quick Look, when it's open, follows.
+    private func selectionChanged() {
+        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible { updateQuickLook() }
     }
 }
 
-/// A window that hands Quick Look the selected file (Space / ⌘Y).
-final class QuickLookWindow: NSWindow, QLPreviewPanelDataSource {
-    var previewURL: URL?
+/// A window that hands Quick Look the selected result (Space / ⌘Y).
+final class QuickLookWindow: NSWindow, QLPreviewPanelDataSource, QuickLookSource {
+    var previewItems: [QuickLookItem] = []
 
     nonisolated override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
 
@@ -195,11 +203,11 @@ final class QuickLookWindow: NSWindow, QLPreviewPanelDataSource {
     }
 
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
-        previewURL == nil ? 0 : 1
+        previewItems.count
     }
 
     func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
-        previewURL as NSURL?
+        previewItems.indices.contains(index) ? previewItems[index] : nil
     }
 }
 
@@ -253,6 +261,8 @@ final class SearchModel {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var shownGeneration = 0
     @ObservationIgnored private var task: Task<Void, Never>?
+    /// A result was clicked (Quick Look, when it's open, follows).
+    @ObservationIgnored var selected: () -> Void = {}
 
     init(engine: Engine, favorites: Favorites, model: AppModel) {
         self.engine = engine
@@ -314,6 +324,7 @@ final class SearchModel {
     func select(_ row: ResultRow) {
         selection = row.id
         navigated = true
+        selected()
     }
 
     /// A click in the search field: keys are the text's again.

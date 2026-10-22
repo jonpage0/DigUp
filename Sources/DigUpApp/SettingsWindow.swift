@@ -4,11 +4,12 @@ import Observation
 import SwiftUI
 
 enum SettingsTab: String, CaseIterable {
-    case general, folders, photos, code, storage
+    case general, shortcuts, folders, photos, code, storage
 
     var title: String {
         switch self {
         case .general: "General"
+        case .shortcuts: "Shortcuts"
         case .folders: "Folders"
         case .photos: "Photos"
         case .code: "Code"
@@ -19,6 +20,7 @@ enum SettingsTab: String, CaseIterable {
     var symbol: String {
         switch self {
         case .general: "gearshape"
+        case .shortcuts: "command"
         case .folders: "folder"
         case .photos: "photo.on.rectangle.angled"
         case .code: "chevron.left.forwardslash.chevron.right"
@@ -269,6 +271,7 @@ private struct SettingsPane: View {
             Group {
                 switch tab {
                 case .general: GeneralSettings(state: state)
+                case .shortcuts: ShortcutsSettings(state: state)
                 case .folders: FolderSettings(state: state)
                 case .photos: PhotosSettings(state: state)
                 case .code: CodeSettings(state: state)
@@ -294,19 +297,6 @@ private struct GeneralSettings: View {
 
     var body: some View {
         Form {
-            Section {
-                LabeledContent {
-                    ShortcutRecorder(combo: state.model.hotkey, apply: { state.app.setHotkey($0) },
-                                     listening: { state.app.hotkeyRecording($0) }, capSize: 13)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Search shortcut")
-                        Text("Opens the search panel from any app.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
             Section {
                 Toggle(isOn: Binding(get: { state.launchAtLogin }, set: { on in
                     state.loginProblem = state.app.setLaunchAtLogin(on)
@@ -344,6 +334,89 @@ private struct GeneralSettings: View {
         }
         .formStyle(.grouped)
         .scrollDisabled(true)
+    }
+}
+
+/// Shortcuts: the one that opens DigUp from any app, and the keys for what you do with a result, in the panel and the
+/// window (`SearchPanelController.handle`, `SearchWindowController.handle`, the preview's buttons).
+private struct ShortcutsSettings: View {
+    @Bindable var state: SettingsState
+
+    /// What a key does, and where (both, or only the panel or the window).
+    private struct Key: Identifiable {
+        let caps: [String]
+        /// Said aloud for the caps ("Command Return").
+        let spoken: String
+        let action: String
+        var id: String { spoken }
+    }
+
+    private static let results: [Key] = [
+        Key(caps: ["↩"], spoken: "Return", action: "Open it (a Photos picture opens in Photos)"),
+        Key(caps: ["⌘", "↩"], spoken: "Command Return", action: "Show it in Finder, or in Photos"),
+        Key(caps: ["Space"], spoken: "Space", action: "Quick Look, at the page or moment that matched; Space again closes it "
+            + "(once you've arrowed or clicked to a result, or with nothing typed)"),
+        Key(caps: ["⌘", "Y"], spoken: "Command Y", action: "Quick Look, while you're still typing"),
+        Key(caps: ["↑", "↓"], spoken: "Up and Down arrows", action: "Move through the results (Quick Look follows)"),
+        Key(caps: ["⌘", "C"], spoken: "Command C", action: "Copy the file, to paste into a folder, a chat or a mail"),
+        Key(caps: ["⌘", "D"], spoken: "Command D", action: "Add it to DigUp's Favorites, or take it off"),
+        Key(caps: ["Esc"], spoken: "Escape", action: "Close Quick Look; then clear the search (the window) or close the panel"),
+    ]
+
+    private static let window: [Key] = [
+        Key(caps: ["←", "→"], spoken: "Left and Right arrows", action: "The result beside it, once you've arrowed or clicked"),
+        Key(caps: ["⌘", "1"], spoken: "Command 1", action: "All kinds"),
+        Key(caps: ["⌘", "2…6"], spoken: "Command 2 to 6",
+            action: "Only screenshots, images, documents, video or audio"),
+        Key(caps: ["⌘", "7"], spoken: "Command 7", action: "Code (when code search is on)"),
+        Key(caps: ["Tab"], spoken: "Tab", action: "Take the suggested filter (a person, an album) for the words you typed"),
+        Key(caps: ["⌫"], spoken: "Delete", action: "With nothing typed, take the last filter off"),
+        Key(caps: ["⌘", ","], spoken: "Command comma", action: "Settings"),
+    ]
+
+    private static let panel: [Key] = [
+        Key(caps: ["⌘", "O"], spoken: "Command O", action: "The same search in the search window, for a bigger look"),
+    ]
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent {
+                    ShortcutRecorder(combo: state.model.hotkey, apply: { state.app.setHotkey($0) },
+                                     listening: { state.app.hotkeyRecording($0) }, capSize: 13)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Search shortcut")
+                        Text("Opens the search panel from any app.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            keys(Self.results, header: "With a result selected, in the panel and the window")
+            keys(Self.window, header: "In the search window")
+            keys(Self.panel, header: "In the panel")
+        }
+        .formStyle(.grouped)
+        .scrollDisabled(true)
+    }
+
+    private func keys(_ keys: [Key], header: String) -> some View {
+        Section {
+            ForEach(keys) { key in
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Keycaps(caps: key.caps, size: 11)
+                        .frame(width: 96, alignment: .leading)
+                    Text(key.action)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(key.spoken): \(key.action)")
+            }
+        } header: {
+            Text(header)
+        }
     }
 }
 

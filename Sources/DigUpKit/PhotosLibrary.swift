@@ -210,7 +210,7 @@ public enum PhotosLibrary {
     /// The stills of Photos' filmstrip of a video, in order, from the first (`Reading.stills`): the files of its folder
     /// (resources/derivatives/cvt/F/<uuid>/) named <uuid>_cvt_tNNNN.jpeg, NNNN from 0000 up. Photos keeps them for a
     /// video whose original is only in iCloud: 6.4 a video on average in a real library, 360 × 640, with no times.
-    static func filmstrip(startingAt first: String) -> [String] {
+    public static func filmstrip(startingAt first: String) -> [String] {
         let folder = (first as NSString).deletingLastPathComponent
         guard let uuid = asset(ofFile: first)?.uuid,
               let names = try? FileManager.default.contentsOfDirectory(atPath: folder) else { return [] }

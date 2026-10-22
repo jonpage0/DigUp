@@ -323,7 +323,7 @@ final class SearchPanelController {
                 return false
             }
             return true
-        case 49 where modifiers.isEmpty && (navigated || previewing) && selection != nil:  // Space
+        case 49 where modifiers.isEmpty && (navigated || previewing || query.isEmpty) && selection != nil:  // Space
             if selection == Self.weakerToggle { toggleWeaker() } else { toggleQuickLook() }
             return true
         case 16 where modifiers == .command:  // ⌘Y
@@ -355,6 +355,7 @@ final class SearchPanelController {
     func select(_ row: ResultRow) {
         selection = row.id
         navigated = true
+        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible { updateQuickLook() }
     }
 
     // MARK: Actions
@@ -436,9 +437,7 @@ final class SearchPanelController {
 
     /// Quick Look shows the selected result at its page or moment.
     private func updateQuickLook() {
-        window?.previewURL = selectedRow?.url
-        QLPreviewPanel.shared().reloadData()
-        QuickLookMoment.show(selectedRow, in: QLPreviewPanel.shared())
+        window?.showInQuickLook(selectedRow)
     }
 
     // MARK: Window
@@ -515,9 +514,9 @@ final class SearchPanelController {
 }
 
 /// The floating panel. Unlike most floating panels it becomes key, because you type into it.
-final class SearchPanelWindow: NSPanel, QLPreviewPanelDataSource {
+final class SearchPanelWindow: NSPanel, QLPreviewPanelDataSource, QuickLookSource {
     /// What Space / ⌘Y previews.
-    var previewURL: URL?
+    var previewItems: [QuickLookItem] = []
 
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: SearchPanelController.width,
@@ -556,10 +555,10 @@ final class SearchPanelWindow: NSPanel, QLPreviewPanelDataSource {
     }
 
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
-        previewURL == nil ? 0 : 1
+        previewItems.count
     }
 
     func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
-        previewURL as NSURL?
+        previewItems.indices.contains(index) ? previewItems[index] : nil
     }
 }
