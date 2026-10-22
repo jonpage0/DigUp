@@ -45,7 +45,8 @@ so a search gets both the meaning and the exact string. On a Mac that includes t
 Nothing you index leaves your computer. DigUp goes online only to download the model once and to check for updates
 once a day. The update check sends nothing about your files, and you can turn it off. No account, no telemetry. The
 search window's map is Apple Maps: while it's showing, Apple is sent the area in view to draw it, nothing about your
-files, and it never shows unless you open it.
+files, and it never shows unless you open it. Download Original, on a Photos result, has Photos fetch that original
+from your iCloud, as Photos does when you open it.
 
 ## Install
 
@@ -175,10 +176,16 @@ The search window's map (its map button) shows where results were taken: Photos'
 photo's GPS tags and a video's location for other files. Search This Area keeps the results to what's in view, and
 with nothing typed it lists everything taken there, newest first. The map is Apple Maps, so it's online (see Private).
 
-Beside the kinds, the search window has People, Albums and Favorites: results are kept to pictures with everyone you
-pick in them, in any album you pick, or marked ♥ in Photos. Each filter that's on is a token in the search field (its ×
-takes it off, as ⌫ does in an empty field), and typing a person's or an album's name offers it as a filter (Tab takes
-it). With nothing typed, the window lists everything the filters keep, newest first.
+Beside the kinds, the search window has People, Albums, Favorites and From: results are kept to pictures with everyone
+you pick in them, in any album you pick, marked ♥ in Photos, or, from From, shot on your own devices (what a device's
+camera saved to Photos, and older items taken with one of those devices), saved from other apps (Messages, AirDrop,
+Safari…), or imported into Photos. Each filter that's on is a token in the search field (its × takes it off, as ⌫ does
+in an empty field), and typing a person's or an album's name offers it as a filter (Tab takes it). With nothing typed,
+the window lists everything the filters keep, newest first.
+
+A result whose original is only in iCloud has Download Original under its preview: Photos gets the original from your
+iCloud and keeps it in the library, as when you open it in Photos, and DigUp then reads the original under the same
+result (a video by its frames and sound). DigUp downloads nothing by itself.
 
 DigUp reads the library through [osxphotos](https://github.com/RhetTbull/osxphotos), which needs installing once:
 `uv tool install osxphotos` (or `pipx install osxphotos`). DigUp looks for it in `~/.local/bin`, Homebrew's and
@@ -191,9 +198,9 @@ What it reads of a library, and what it leaves alone:
   ("Optimize Mac Storage", which can be nearly every picture), it reads Photos' own preview instead: 1,024 pixels on its
   long side for a photo, as many as DigUp gives the model anyway. A video that's only in iCloud is read from what Photos
   keeps of it on this Mac: the stills of Photos' filmstrip of it (six or so, each found like a frame of the video,
-  though they carry no time), else one still of it; a video Photos keeps nothing of is left out until it's on this Mac.
-  DigUp never downloads anything. A picture whose file changes (downloaded, edited) stays one result, with all Photos
-  says about it, and is read again.
+  though they carry no time; the preview shows the one that matched), else one still of it; a video Photos keeps
+  nothing of is left out until it's on this Mac. A picture whose file changes (downloaded, edited) stays one result,
+  with all Photos says about it, and is read again.
 - the words in a picture are the ones Photos read in it, kept in its catalog, so DigUp doesn't read each screenshot
   again (1.4 s each on an M3 Max on battery). On 60 iPhone screenshots read from their previews,
   Photos' reading and DigUp's found as many words, and each found over 9 in 10 of the other's codes, URLs and prices;
@@ -201,8 +208,8 @@ What it reads of a library, and what it leaves alone:
   yet is read by DigUp. DigUp unpacks Photos' reading with a Vision class Apple doesn't document
   (`VNDocumentObservation`); on a macOS without it, DigUp reads screenshots itself again.
 - not what's in Recently Deleted, the shots of a burst nobody picked, shared albums, or what's Shared with You and not
-  saved to the library, nor what's hidden unless DigUp is asked to read Photos' Hidden album too
-  (`--include-hidden-photos` for `digup`). Live Photos are read as their photo.
+  saved to the library, nor what's hidden unless Settings → Photos says to include it (`--include-hidden-photos` for
+  `digup`). Live Photos are read as their photo.
 - dates, cameras, file types and the broad regions Photos puts a place in ("Sun Belt") aren't among Photos' words here:
   they'd match thousands of pictures at once.
 - it never changes your pictures or what Photos knows about them. osxphotos, and DigUp for the words Photos read, open
