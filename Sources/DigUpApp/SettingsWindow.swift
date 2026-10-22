@@ -195,6 +195,22 @@ final class SettingsState {
     private(set) var photosLoaded = false
     /// The devices the indexed libraries' pictures were taken with (the "My devices" list).
     private(set) var cameras: [IndexStore.PhotosCamera] = []
+
+    /// "Shot on my devices", as the From menu uses it.
+    var myDevices: [String] {
+        PhotosChoices(people: [], albums: [], cameras: cameras)
+            .devices(added: model.settings.myDevicesAdded, removed: model.settings.myDevicesRemoved)
+    }
+
+    /// The devices My devices → Edit… offers.
+    var deviceChoices: [IndexStore.PhotosCamera] {
+        PhotosChoices(people: [], albums: [], cameras: cameras)
+            .deviceChoices(added: model.settings.myDevicesAdded, removed: model.settings.myDevicesRemoved)
+    }
+
+    func isMine(_ camera: IndexStore.PhotosCamera) -> Bool {
+        PhotosChoices.isMine(camera, added: model.settings.myDevicesAdded, removed: model.settings.myDevicesRemoved)
+    }
     @ObservationIgnored private var estimating: [Process] = []
 
     /// The Photos tab, when it shows: osxphotos looked for again, each library's counts and last listing, whether macOS
@@ -676,6 +692,7 @@ private struct StorageSettings: View {
 /// out and why), osxphotos, which reads them, and what comes along from Photos.
 private struct PhotosSettings: View {
     @Bindable var state: SettingsState
+    @State private var editingDevices = false
 
     var body: some View {
         Form {
@@ -756,30 +773,24 @@ private struct PhotosSettings: View {
             }
             if !state.cameras.isEmpty {
                 Section {
-                    ForEach(state.cameras) { camera in
-                        let settings = state.model.settings
-                        let mine = (camera.fromCamera > 0 || settings.myDevicesAdded.contains(camera.model))
-                            && !settings.myDevicesRemoved.contains(camera.model)
-                        Toggle(isOn: Binding(get: { mine }, set: {
-                            state.app.setMyDevice(camera.model, mine: $0, fromCamera: camera.fromCamera > 0)
-                        })) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(camera.model)
-                                Text(camera.fromCamera > 0
-                                     ? "\(camera.fromCamera.formatted()) shot with its camera · \(camera.files.formatted()) in all"
-                                     : "\(camera.files.formatted()) saved from elsewhere, none shot into Photos")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                            }
+                    let mine = state.myDevices
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("My devices")
+                            Text(mine.isEmpty ? "None" : mine.formatted(.list(type: .and)))
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
+                        Spacer()
+                        Button("Edit…") { editingDevices = true }
                     }
-                } header: {
-                    Text("My devices")
                 } footer: {
-                    Text("The search window's From → Shot on my devices keeps what these took: what their camera saved "
-                         + "to Photos, and older pictures taken with one of them. A device whose camera saved something "
-                         + "is on by itself, so a new phone joins without asking.")
+                    Text("From → Shot on my devices, in the search window, keeps what these took: what their camera "
+                         + "saved to Photos, and older pictures taken with one of them. A device whose camera saved "
+                         + "something is on by itself, so a new phone joins without asking.")
                         .font(.system(size: 11))
+                        .multilineTextAlignment(.leading)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -788,8 +799,58 @@ private struct PhotosSettings: View {
         }
         .formStyle(.grouped)
         .scrollDisabled(true)
+        .sheet(isPresented: $editingDevices) { MyDevicesSheet(state: state) }
         .task { await state.refreshPhotos() }
         .onChange(of: state.model.status) { state.statusChanged() }
+    }
+}
+
+/// Settings → Photos → My devices → Edit…: a switch per device whose pictures "Shot on my devices" can keep (one whose
+/// camera saved something to Photos, or that took older pictures with nothing recorded of how they came in).
+private struct MyDevicesSheet: View {
+    @Bindable var state: SettingsState
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("My devices").font(.headline)
+            Text("Pictures taken with these count as shot on your devices. One whose camera saved something to Photos "
+                 + "is on by itself; turn on one that only took older pictures (from before Photos recorded where a "
+                 + "picture came from) if it was yours.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            List(state.deviceChoices) { camera in
+                let settings = state.model.settings
+                Toggle(isOn: Binding(get: { state.isMine(camera) }, set: {
+                    state.app.setMyDevice(camera.model, mine: $0, fromCamera: camera.fromCamera > 0)
+                })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(camera.model)
+                        Text(MyDevicesSheet.counts(of: camera, added: settings.myDevicesAdded.contains(camera.model)))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+            .frame(minHeight: 260, idealHeight: 360, maxHeight: 420)
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    static func counts(of camera: IndexStore.PhotosCamera, added: Bool) -> String {
+        var parts: [String] = []
+        if camera.fromCamera > 0 { parts.append("\(camera.fromCamera.formatted()) shot with its camera") }
+        if camera.unknownOrigin > 0 { parts.append("\(camera.unknownOrigin.formatted()) older, origin not recorded") }
+        if parts.isEmpty { parts.append(added ? "added by you; nothing it took counts yet" : "nothing it took counts") }
+        return parts.joined(separator: " · ")
     }
 }
 

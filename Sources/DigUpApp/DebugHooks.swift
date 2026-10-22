@@ -56,8 +56,8 @@ import SwiftUI
 ///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot
 ///     -debugMap YES           with -debugWindow search: the map shows above the results
 ///     -debugArea "lat1,lon1,lat2,lon2"   with -debugWindow search: results kept to that box of the map
-///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites"   with -debugWindow search: these filters on (a
-///                             Photos library's people and albums, by name; Photos' favorites)
+///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup"   with -debugWindow search: these filters on
+///                             (a Photos library's people and albums, by name; Photos' favorites; DigUp's own)
 ///     -debugUpdateCheck YES   check for updates in the background a second after launch, as the daily check does
 ///     -debugUseModelFiles a:b take these files as the model, as Use Files… does, a second after launch
 ///     -debugHelperArgs "…"    more arguments for the indexing helper, in dev runs ("--time-limit 0")

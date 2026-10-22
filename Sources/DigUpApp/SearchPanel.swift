@@ -101,6 +101,7 @@ final class SearchPanelController {
         let started = Date()
         shownAt = started
         engine.prewarm()
+        app.favorites.followMoves()   // a file marked ♥ that moved shows its heart where it is now
         let window = self.window ?? makeWindow()
         placeWindow(window)
         if AppController.offscreen { return }

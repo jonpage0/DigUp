@@ -9,10 +9,29 @@ struct PhotosChoices: Sendable, Equatable {
     var cameras: [IndexStore.PhotosCamera] = []
 
     /// "Shot on my devices": every device a camera saved something from into a library, plus the ones the user added,
-    /// minus the ones they took off (`AppSettings.myDevicesAdded`, `myDevicesRemoved`), most files first.
+    /// minus the ones they took off (`AppSettings.myDevicesAdded`, `myDevicesRemoved`), most files first; an added one
+    /// no indexed picture names (yet, or any more) is on it too, last.
     func devices(added: [String], removed: [String]) -> [String] {
-        let mine = cameras.filter { ($0.fromCamera > 0 || added.contains($0.model)) && !removed.contains($0.model) }
-        return mine.map(\.model)
+        let known = cameras.filter { Self.isMine($0, added: added, removed: removed) }.map(\.model)
+        return known + added.filter { name in !removed.contains(name) && !cameras.contains { $0.model == name } }
+    }
+
+    /// The rule behind the list (approved 2026-10-22): a device whose camera saved something is the user's unless
+    /// they took it off; any other is theirs only if they added it.
+    static func isMine(_ camera: IndexStore.PhotosCamera, added: [String], removed: [String]) -> Bool {
+        (camera.fromCamera > 0 || added.contains(camera.model)) && !removed.contains(camera.model)
+    }
+
+    /// The devices worth a switch in Settings: one whose camera saved something, or that took older pictures with
+    /// nothing recorded (the two kinds "Shot on my devices" reads), and any the user changed, including an added one no
+    /// indexed picture names now (so it can be taken off). A device that only took pictures saved from elsewhere or
+    /// imported has nothing the filter would keep.
+    func deviceChoices(added: [String], removed: [String]) -> [IndexStore.PhotosCamera] {
+        let listed = cameras.filter {
+            $0.fromCamera > 0 || $0.unknownOrigin > 0 || added.contains($0.model) || removed.contains($0.model)
+        }
+        let absent = added.filter { name in !cameras.contains { $0.model == name } }
+        return listed + absent.map { IndexStore.PhotosCamera(model: $0, files: 0, fromCamera: 0, unknownOrigin: 0) }
     }
 
     /// One name: Photos can keep two people of one name (two libraries, or a name given twice), and a picture of
@@ -114,8 +133,9 @@ enum FilterToken: Equatable, Identifiable {
     case photosFavorites
     /// Marked ♥ in DigUp (`Favorites`), any file.
     case digupFavorites
-    /// Shot on one of these devices (`SearchFilter.shotOn`). One "From" choice at a time, as `origin` is.
-    case shotOn(Set<String>)
+    /// Shot on one of my devices (`SearchModel.myDevices`, read each time the search runs, so a change in Settings
+    /// applies; `SearchFilter.shotOn`). One "From" choice at a time, as `origin` is.
+    case shotOnMyDevices
     /// Came into the library this way (`PhotosLibrary.Origin`): saved from another app, or imported through Photos.
     case origin(PhotosLibrary.Origin)
     /// Taken in the map's area ("Search This Area"; `SearchModel.area` holds the box).
@@ -127,7 +147,7 @@ enum FilterToken: Equatable, Identifiable {
         case .album(let ids, _): "album:\(ids.sorted())"
         case .photosFavorites: "photos-favorites"
         case .digupFavorites: "digup-favorites"
-        case .shotOn: "from:mine"
+        case .shotOnMyDevices: "from:mine"
         case .origin(let origin): "from:\(origin.rawValue)"
         case .area: "area"
         }
@@ -143,7 +163,7 @@ enum FilterToken: Equatable, Identifiable {
         case .album(_, let title): title
         case .photosFavorites: "Photos Favorites"
         case .digupFavorites: "Favorites"
-        case .shotOn: "Shot on my devices"
+        case .shotOnMyDevices: "Shot on my devices"
         case .origin(let origin): origin == .imported ? "Imported into Photos" : "Saved from other apps"
         case .area: "In the map's area"
         }
@@ -155,7 +175,7 @@ enum FilterToken: Equatable, Identifiable {
         case .album: "rectangle.stack"
         case .photosFavorites: "heart.fill"
         case .digupFavorites: "heart.fill"
-        case .shotOn: "iphone"
+        case .shotOnMyDevices: "iphone"
         case .origin(let origin): origin == .imported ? "square.and.arrow.down" : "arrow.down.app"
         case .area: "map"
         }
@@ -167,8 +187,8 @@ enum FilterToken: Equatable, Identifiable {
         case .album(_, let title): "Only what's in the album “\(title)”"
         case .photosFavorites: "Only what you've marked ♥ in Photos"
         case .digupFavorites: "Only what you've marked ♥ in DigUp"
-        case .shotOn(let devices):
-            "Only what you shot: what the camera saved to Photos on \(devices.sorted().formatted(.list(type: .or))), "
+        case .shotOnMyDevices:
+            "Only what you shot: what the camera saved to Photos on your devices (Settings → Photos → My devices), "
                 + "and older items taken with one of them"
         case .origin(let origin):
             origin == .imported ? "Only what was imported into Photos (from a folder on a Mac, or a camera's card)"
@@ -254,8 +274,6 @@ struct FilterSuggestionsBar: View {
 /// too. Everyone picked must be in a picture; it may be in any album picked.
 struct PhotosFilterMenus: View {
     let search: SearchModel
-    /// "Shot on my devices" (`PhotosChoices.devices(added:removed:)`, as Settings → Photos edits them).
-    let devices: [String]
 
     var body: some View {
         HStack(spacing: 6) {
@@ -298,8 +316,9 @@ struct PhotosFilterMenus: View {
             .help("Photos Favorites: only what you've marked ♥ in Photos")
             .accessibilityAddTraits(search.has(.photosFavorites) ? .isSelected : [])
             Menu {
-                PhotosFilterToggle(title: "Shot on my devices", token: .shotOn(Set(devices)), search: search)
-                    .disabled(devices.isEmpty)
+                let devices = search.myDevices
+                PhotosFilterToggle(title: "Shot on my devices", token: .shotOnMyDevices, search: search)
+                    .disabled(devices.isEmpty && !search.has(.shotOnMyDevices))
                 if !devices.isEmpty {
                     Text(devices.formatted(.list(type: .and)))
                 }

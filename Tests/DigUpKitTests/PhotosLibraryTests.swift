@@ -279,9 +279,10 @@ import Testing
                       asset(listed[4], importedBy: 1)]   // a camera's, with no device in its EXIF
         let store = try IndexStore(directory: folder.appendingPathComponent("index"))
         _ = try indexer(store) { _ in PhotosLibrary.Listing(assets: assets) }.sync([library])
-        #expect(try store.photosCameras() == [IndexStore.PhotosCamera(model: "iPhone 15 Pro", files: 2, fromCamera: 1),
-                                              IndexStore.PhotosCamera(model: "iPhone 12", files: 1, fromCamera: 0),
-                                              IndexStore.PhotosCamera(model: "iPhone Air", files: 1, fromCamera: 1)])
+        #expect(try store.photosCameras() == [
+            IndexStore.PhotosCamera(model: "iPhone 15 Pro", files: 2, fromCamera: 1, unknownOrigin: 1),
+            IndexStore.PhotosCamera(model: "iPhone 12", files: 1, fromCamera: 0, unknownOrigin: 0),
+            IndexStore.PhotosCamera(model: "iPhone Air", files: 1, fromCamera: 1, unknownOrigin: 0)])
         let searcher = try Searcher(store: store, loadVectors: false)
         func kept(_ filter: SearchFilter) throws -> [String] {
             try searcher.search("", queryVector: nil, filter: filter).map(\.path)

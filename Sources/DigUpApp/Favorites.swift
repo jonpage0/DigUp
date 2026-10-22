@@ -56,6 +56,8 @@ final class Favorites {
 
     var count: Int { entries.count }
 
+    /// Marked ♥, as last looked up: a file moved since then is found again at the next `followMoves` (each search,
+    /// each change of a mark).
     func contains(_ row: ResultRow) -> Bool {
         if let photos = row.photos { return entries.contains { $0.photos?.asset == photos.uuid } }
         return entries.contains { $0.file?.path == row.url.path }
@@ -64,6 +66,7 @@ final class Favorites {
     /// Marks it, or takes the mark off. Nothing changes while the file can't be read.
     func toggle(_ row: ResultRow) {
         guard !unreadable else { return }
+        followMoves()
         if contains(row) {
             entries.removeAll { entry in
                 if let photos = row.photos { return entry.photos?.asset == photos.uuid }
@@ -81,8 +84,15 @@ final class Favorites {
         save()
     }
 
+    /// Each file favorite looked up by its bookmark again, so one moved or renamed while DigUp runs is found where it
+    /// is now (and saved so); a search does it before showing its results.
+    func followMoves() {
+        if followMovedFiles() { save() }
+    }
+
     /// The files the ♥ DigUp filter keeps: each file favorite where it is now, and each Photos favorite's indexed file.
     func paths(using engine: Engine) async -> Set<String> {
+        followMoves()
         let files = entries.compactMap(\.file?.path)
         let assets = Set(entries.compactMap(\.photos?.asset))
         return Set(files).union(await engine.paths(ofAssets: assets).values)
@@ -112,8 +122,16 @@ final class Favorites {
                 log("favorites: \(url.lastPathComponent) is version \(stored.version); this DigUp reads 1, so it's left alone")
                 return
             }
+            // Each entry is a Photos item or a file, never both or neither; one that isn't means the file isn't this
+            // shape, and it's left as it is.
+            guard stored.favorites.allSatisfy({ ($0.photos == nil) != ($0.file == nil) }) else {
+                unreadable = true
+                log("favorites: \(url.lastPathComponent) has an entry that's neither one Photos item nor one file; "
+                    + "it's left as it is")
+                return
+            }
             entries = stored.favorites
-            if followMovedFiles() { save() }
+            followMoves()
             log("favorites: \(entries.count)")
         } catch {
             unreadable = true

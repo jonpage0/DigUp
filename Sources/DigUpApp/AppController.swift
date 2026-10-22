@@ -243,6 +243,7 @@ final class AppController {
         model.settings.myDevicesAdded = added
         model.settings.myDevicesRemoved = removed
         log("photos: \(added.count) devices added to mine, \(removed.count) taken off")
+        searchWindow.search.myDevicesChanged()
     }
 
     /// "Index only at set hours": on or off, and the hours (kept while it's off).

@@ -893,23 +893,35 @@ public final class IndexStore {
     }
 
     /// A device that took pictures and videos of the indexed libraries (`photos_assets.camera`, as Photos kept its
-    /// EXIF: "iPhone 15 Pro"), how many indexed files it took, and how many of those its camera saved there (origin
-    /// `camera`). The app's list of the user's own devices starts as the ones with any of those.
+    /// EXIF: "iPhone 15 Pro"), how many indexed files it took, how many of those its camera saved there (origin
+    /// `camera`), and how many came in with nothing recorded (origin `unknown`: older items). The app's list of the
+    /// user's own devices starts as the ones with any camera-saved item; one with only older items can be added, which
+    /// is what "Shot on my devices" reads them by (`SearchFilter.shotOn`).
     public struct PhotosCamera: Sendable, Equatable, Identifiable {
         public var id: String { model }
         public let model: String
         public let files: Int
         public let fromCamera: Int
+        public let unknownOrigin: Int
+
+        public init(model: String, files: Int, fromCamera: Int, unknownOrigin: Int) {
+            self.model = model
+            self.files = files
+            self.fromCamera = fromCamera
+            self.unknownOrigin = unknownOrigin
+        }
     }
 
     /// The devices that took the indexed libraries' pictures and videos, the one with most files first.
     public func photosCameras() throws -> [PhotosCamera] {
         var cameras: [PhotosCamera] = []
         try db.query("""
-            SELECT camera, COUNT(*), SUM(origin = '\(PhotosLibrary.Origin.camera.rawValue)') FROM photos_assets
+            SELECT camera, COUNT(*), SUM(origin = '\(PhotosLibrary.Origin.camera.rawValue)'),
+                   SUM(origin = '\(PhotosLibrary.Origin.unknown.rawValue)') FROM photos_assets
             WHERE camera IS NOT NULL GROUP BY camera ORDER BY COUNT(*) DESC, camera
             """) {
-            cameras.append(PhotosCamera(model: $0.text(0) ?? "", files: Int($0.int(1)), fromCamera: Int($0.int(2))))
+            cameras.append(PhotosCamera(model: $0.text(0) ?? "", files: Int($0.int(1)), fromCamera: Int($0.int(2)),
+                                        unknownOrigin: Int($0.int(3))))
         }
         return cameras
     }

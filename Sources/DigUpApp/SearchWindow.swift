@@ -17,7 +17,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
 
     init(app: AppController) {
         self.app = app
-        search = SearchModel(engine: app.engine, favorites: app.favorites)
+        search = SearchModel(engine: app.engine, favorites: app.favorites, model: app.model)
     }
 
     var isVisible: Bool { window?.isVisible == true }
@@ -248,13 +248,27 @@ final class SearchModel {
     @ObservationIgnored private let engine: Engine
     /// What's marked ♥ in DigUp: the heart in the preview, and the Favorites filter.
     @ObservationIgnored let favorites: Favorites
+    /// The settings (My devices).
+    @ObservationIgnored private let model: AppModel
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var shownGeneration = 0
     @ObservationIgnored private var task: Task<Void, Never>?
 
-    init(engine: Engine, favorites: Favorites) {
+    init(engine: Engine, favorites: Favorites, model: AppModel) {
         self.engine = engine
         self.favorites = favorites
+        self.model = model
+    }
+
+    /// "Shot on my devices" now: the libraries' devices with Settings → Photos → My devices' changes. The filter reads
+    /// it each time it runs, so a change in Settings applies to a search that has it on.
+    var myDevices: [String] {
+        choices.devices(added: model.settings.myDevicesAdded, removed: model.settings.myDevicesRemoved)
+    }
+
+    /// My devices changed in Settings: a search with "Shot on my devices" on runs again.
+    func myDevicesChanged() {
+        if has(.shotOnMyDevices) { run() }
     }
 
     /// Every result shown, in order (strong ones, then the weaker ones once they're unfolded).
@@ -270,7 +284,7 @@ final class SearchModel {
             case .album(let ids, _): filter.albums.formUnion(ids)
             case .photosFavorites: filter.favorites = true
             case .digupFavorites: filter.paths = []
-            case .shotOn(let devices): filter.shotOn = devices
+            case .shotOnMyDevices: filter.shotOn = Set(myDevices)
             case .origin(let origin): filter.origins = [origin.rawValue]
             case .area: break
             }
@@ -347,7 +361,13 @@ final class SearchModel {
     func readChoices(force: Bool = false) {
         if !force, let read = choicesRead, Date().timeIntervalSince(read) < 30 { return }
         choicesRead = Date()
-        Task { choices = await engine.photosChoices() }
+        Task {
+            let read = await engine.photosChoices()
+            guard read != choices else { return }
+            choices = read
+            // The devices came with them: a search with "Shot on my devices" on reads the list again.
+            if has(.shotOnMyDevices) { run() }
+        }
     }
 
     /// The file in its app, at the page or moment that matched when the app can be told where.
@@ -414,8 +434,13 @@ final class SearchModel {
         }
         task = Task {
             var searchFilter = searchFilter
-            // DigUp's favorites: the files they are now (a Photos favorite's file changes when it's downloaded).
-            if searchFilter.paths != nil { searchFilter.paths = await favorites.paths(using: engine) }
+            // DigUp's favorites: the files they are now (a Photos favorite's file changes when it's downloaded, and a
+            // file marked ♥ may have moved, which the hearts on the results follow too).
+            if searchFilter.paths != nil {
+                searchFilter.paths = await favorites.paths(using: engine)
+            } else {
+                favorites.followMoves()
+            }
             let vector = text.isEmpty ? nil : await engine.embedQuery(text)
             guard !Task.isCancelled, current == generation else { return }
             let all = await engine.search(text, vector: vector, prefixLast: false, filter: searchFilter, limit: 120)
@@ -579,9 +604,7 @@ struct SearchWindowView: View {
                     }
                     if search.searchesPhotos, !search.isCode {
                         Divider().frame(height: 16).padding(.horizontal, 2)
-                        PhotosFilterMenus(search: search,
-                                          devices: search.choices.devices(added: model.settings.myDevicesAdded,
-                                                                          removed: model.settings.myDevicesRemoved))
+                        PhotosFilterMenus(search: search)
                     }
                 }
             }
