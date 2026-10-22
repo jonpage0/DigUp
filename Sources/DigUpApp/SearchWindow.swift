@@ -28,6 +28,8 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             search.filter = kind
             search.query = query
         }
+        search.searchesPhotos = app.photosLibraries.contains(where: app.searches)
+        search.readChoices(force: true)
         app.present(window)
         if !AppController.offscreen { window.makeFirstResponder(search.field) }
         installKeyMonitor()
@@ -103,7 +105,8 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
     }
 
     /// Arrows move through the grid (← → only once you've arrowed, so they still move the cursor while you type),
-    /// ↩ opens, ⌘↩ reveals, Space previews, ⌘C copies, Esc closes the preview or clears the search.
+    /// ↩ opens, ⌘↩ reveals, Space previews, ⌘C copies, Esc closes the preview or clears the search, Tab turns the
+    /// suggested filter on, ⌫ in an empty field takes the last filter off.
     private func handle(_ event: NSEvent) -> Bool {
         // An input method is composing (Japanese, Chinese…): ↩, the arrows and Esc are its keys until it's done.
         if (search.field?.currentEditor() as? NSTextView)?.hasMarkedText() == true { return false }
@@ -140,6 +143,10 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             guard let row = search.selectedRow else { return false }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.writeObjects([row.url as NSURL])
+        case 48 where modifiers.isEmpty && !search.suggestions.isEmpty:   // Tab: the first suggestion becomes a filter
+            search.accept(search.suggestions[0])
+        case 51 where modifiers.isEmpty && search.query.isEmpty && !search.shownTokens.isEmpty:   // ⌫, nothing typed
+            search.removeLastToken()
         case 53:   // Esc
             if previewing {
                 QLPreviewPanel.shared().orderOut(nil)
@@ -221,6 +228,16 @@ final class SearchModel {
     var area: SearchFilter.Area? {
         didSet { if area != oldValue { run() } }
     }
+    /// The filters on besides the kind and the map's area, in the order they were put on: Photos' people (each one in
+    /// the picture), albums (in any of them) and favorites.
+    var tokens: [FilterToken] = [] {
+        didSet { if tokens != oldValue { run() } }
+    }
+    /// The people and albums the indexed Photos libraries name (the filter menus and suggestions).
+    private(set) var choices = PhotosChoices()
+    /// A Photos library is searched, so its filters show.
+    var searchesPhotos = false
+    @ObservationIgnored private var choicesRead: Date?
     /// Where the results were taken, by path (the map's pins).
     private(set) var locations: [String: Location] = [:]
     /// You moved the selection with the arrow keys since the last edit: Space and ← → act on results then.
@@ -230,6 +247,7 @@ final class SearchModel {
     @ObservationIgnored weak var field: NSTextField?
     @ObservationIgnored private let engine: Engine
     @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var shownGeneration = 0
     @ObservationIgnored private var task: Task<Void, Never>?
 
     init(engine: Engine) {
@@ -240,7 +258,24 @@ final class SearchModel {
     var rows: [ResultRow] { results.ranked + (showWeaker ? results.weaker : []) }
 
     /// What the results are kept to besides their kind.
-    var searchFilter: SearchFilter { SearchFilter(area: area) }
+    var searchFilter: SearchFilter {
+        var filter = SearchFilter(area: area)
+        for token in tokens {
+            switch token {
+            case .person(_, let ids): filter.people.append(ids)
+            case .album(let ids, _): filter.albums.formUnion(ids)
+            case .photosFavorites: filter.favorites = true
+            case .area: break
+            }
+        }
+        return filter
+    }
+    /// The filters in the search field, in order: the tokens, then the map's area.
+    var shownTokens: [FilterToken] { tokens + (area == nil ? [] : [.area]) }
+    /// Filters the words being typed could name (Tab takes the first).
+    var suggestions: [FilterSuggestion] {
+        isCode ? [] : choices.suggestions(for: query, photos: searchesPhotos, except: shownTokens)
+    }
     /// There's something to show: words typed, or a filter that lists files by itself.
     var isSearching: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !searchFilter.isEmpty }
 
@@ -265,6 +300,41 @@ final class SearchModel {
         field.window?.makeFirstResponder(field)
     }
 
+    func has(_ token: FilterToken) -> Bool { shownTokens.contains { $0.id == token.id } }
+
+    func set(_ token: FilterToken, on: Bool) {
+        if token == .area {
+            if !on { area = nil }
+        } else if on {
+            if !has(token) { tokens.append(token) }
+        } else {
+            tokens.removeAll { $0.id == token.id }
+        }
+    }
+
+    func toggle(_ token: FilterToken) { set(token, on: !has(token)) }
+
+    /// ⌫ in an empty field: the last filter goes.
+    func removeLastToken() {
+        if let last = shownTokens.last { set(last, on: false) }
+    }
+
+    /// A suggestion taken: its words leave the query, and it's on.
+    func accept(_ suggestion: FilterSuggestion) {
+        if query.hasSuffix(suggestion.replacing) {
+            query = String(query.dropLast(suggestion.replacing.count)).trimmingCharacters(in: .whitespaces)
+        }
+        set(suggestion.token, on: true)
+    }
+
+    /// Reads the libraries' people and albums, again once what it has is half a minute old (an index fills in while
+    /// the window is open).
+    func readChoices(force: Bool = false) {
+        if !force, let read = choicesRead, Date().timeIntervalSince(read) < 30 { return }
+        choicesRead = Date()
+        Task { choices = await engine.photosChoices() }
+    }
+
     /// The file in its app, at the page or moment that matched when the app can be told where.
     func open(_ row: ResultRow) {
         engine.open(row)
@@ -279,6 +349,7 @@ final class SearchModel {
     }
 
     private func run() {
+        readChoices()
         generation += 1
         let current = generation
         task?.cancel()
@@ -292,6 +363,7 @@ final class SearchModel {
             counts = [:]
             hasResults = false
             locations = [:]
+            shownGeneration = current
             return
         }
         if code, !engine.hasCode || text.isEmpty {
@@ -299,6 +371,7 @@ final class SearchModel {
             counts = [:]
             hasResults = false
             codePhase = engine.hasCode ? .codeHint : .codeOff
+            shownGeneration = current
             return
         }
         let filter = self.filter, searchFilter = self.searchFilter
@@ -319,7 +392,8 @@ final class SearchModel {
                 showWeaker = false
                 if !rows.contains(where: { $0.id == selection }) { selection = rows.first?.id }
                 hasResults = true
-                log("window: code \"\(text)\": \(results.ranked.count) results + \(results.weaker.count) weaker")
+                shownGeneration = current
+                log("window: code \(searchWords(text)): \(results.ranked.count) results + \(results.weaker.count) weaker")
             }
             return
         }
@@ -341,10 +415,15 @@ final class SearchModel {
             showWeaker = false
             if !rows.contains(where: { $0.id == selection }) { selection = rows.first?.id }
             hasResults = true
-            log("window: \"\(text)\"\(filter.map { " in \($0.title)" } ?? "")\(area == nil ? "" : " in a map area"): "
+            shownGeneration = current
+            log("window: \(searchWords(text))\(filter.map { " in \($0.title)" } ?? "")\(area == nil ? "" : " in a map area")"
+                + "\(tokens.isEmpty ? "" : " with \(tokens.count) filters"): "
                 + "\(results.ranked.count) results + \(results.weaker.count) weaker, \(located.count) with a place")
         }
     }
+
+    /// The last search's results are showing (none is still on its way).
+    var isSettled: Bool { shownGeneration == generation }
 }
 
 // MARK: Views
@@ -357,7 +436,7 @@ struct SearchWindowView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            header.zIndex(1)   // the filter suggestions hang below it, over what's under it
             Divider()
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
@@ -399,8 +478,12 @@ struct SearchWindowView: View {
                         .font(.system(size: search.isCode ? 15 : 17, weight: .semibold))
                         .foregroundStyle(Brand.gradient)
                         .frame(width: 22)
+                    ForEach(search.shownTokens) { token in
+                        FilterTokenView(token: token) { search.set(token, on: false) }
+                    }
                     SearchField(text: $search.query, fontSize: 18, placeholder: placeholder,
                                 onMake: { search.field = $0 }, onFocus: { fieldFocused = $0 })
+                        .frame(minWidth: 140)
                     if !search.query.isEmpty {
                         Button {
                             search.query = ""
@@ -418,6 +501,14 @@ struct SearchWindowView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(Color.accentColor.opacity(fieldFocused ? 0.6 : 0), lineWidth: 2))
                 .animation(.easeOut(duration: 0.15), value: fieldFocused)
+                .overlay(alignment: .topLeading) {
+                    let suggestions = search.suggestions
+                    if !suggestions.isEmpty {
+                        FilterSuggestionsBar(suggestions: suggestions) { search.accept($0) }
+                            .fixedSize()
+                            .offset(x: 30, y: 44)   // just under the field, below the magnifier
+                    }
+                }
                 Button {
                     search.showsMap.toggle()
                 } label: {
@@ -449,26 +540,12 @@ struct SearchWindowView: View {
             }
             .padding(.leading, 78)   // beside the window buttons
             .frame(height: 52)
+            .zIndex(1)   // over the chips below it, for the suggestions
             HStack(spacing: 10) {
                 KindFilters(search: search, showsCode: model.hasCode)
-                if search.area != nil {
-                    Button {
-                        search.area = nil
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "map").font(.system(size: 10.5))
-                            Text("In the map's area")
-                            Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).opacity(0.7)
-                        }
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(Color.accentColor))
-                        .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Only results taken in the area you searched on the map; click to search everywhere")
+                if search.searchesPhotos, !search.isCode {
+                    Divider().frame(height: 16).padding(.horizontal, 2)
+                    PhotosFilterMenus(search: search)
                 }
             }
         }
@@ -500,11 +577,14 @@ struct SearchWindowView: View {
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if search.results.isEmpty {
             let words = search.query.trimmingCharacters(in: .whitespaces)
+            let onlyArea = search.tokens.isEmpty
             EmptyState(symbol: search.isCode ? FileKind.code.symbol : "magnifyingglass",
-                       title: words.isEmpty ? "Nothing taken in this area" : "No good matches for “\(words)”",
+                       title: !words.isEmpty ? "No good matches for “\(words)”"
+                           : onlyArea ? "Nothing taken in this area" : "Nothing fits these filters",
                        message: search.isCode ? "Try saying what the code does, or a name that's in it."
-                           : words.isEmpty ? "Move the map and search that area, or type what you're looking for."
-                           : "Try describing what's in it: what you'd see or hear, or words you remember.")
+                           : !words.isEmpty ? "Try describing what's in it: what you'd see or hear, or words you remember."
+                           : onlyArea ? "Move the map and search that area, or type what you're looking for."
+                           : "Take a filter off (its × in the search field), or type what you're looking for.")
         } else if search.isCode {
             CodeResultsList(search: search)
         } else {
@@ -546,6 +626,7 @@ struct SearchWindowView: View {
     /// Examples of what to type: code's with the Code chip on, and one of them with code search on (as the panel's).
     private var placeholder: String {
         if search.filter == .code { return "Describe the code: “retry a request with backoff”, a name in it…" }
+        if !search.shownTokens.isEmpty { return "Add words…" }
         return model.hasCode ? "Describe it: “zebra in a video”, “code: retry with backoff”…"
             : "Describe it: “receipt from the hardware store”, “zebra in a video”…"
     }

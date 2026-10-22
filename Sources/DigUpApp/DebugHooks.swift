@@ -56,6 +56,8 @@ import SwiftUI
 ///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot
 ///     -debugMap YES           with -debugWindow search: the map shows above the results
 ///     -debugArea "lat1,lon1,lat2,lon2"   with -debugWindow search: results kept to that box of the map
+///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites"   with -debugWindow search: these filters on (a
+///                             Photos library's people and albums, by name; Photos' favorites)
 ///     -debugUpdateCheck YES   check for updates in the background a second after launch, as the daily check does
 ///     -debugUseModelFiles a:b take these files as the model, as Use Files… does, a second after launch
 ///     -debugHelperArgs "…"    more arguments for the indexing helper, in dev runs ("--time-limit 0")
@@ -361,7 +363,29 @@ enum DebugHooks {
                     search.area = SearchFilter.Area(latitudes: min(box[0], box[2])...max(box[0], box[2]),
                                                     longitudes: min(box[1], box[3])...max(box[1], box[3]))
                 }
-                loaded = { !search.isSearching || search.hasResults }
+                // -debugFilters: the filters on before the snapshot, once the libraries' people and albums are read.
+                let filtering = DebugProgress()
+                if let spec = defaults.string(forKey: "debugFilters") {
+                    Task {
+                        let choices = await app.engine.photosChoices()
+                        for part in spec.split(separator: "|").map(String.init) {
+                            let (kind, name) = (part.prefix { $0 != ":" }, part.drop { $0 != ":" }.dropFirst())
+                            if kind == "person", let person = choices.people.first(where: { $0.name == name }) {
+                                search.set(.person(name: person.name, ids: person.ids), on: true)
+                            } else if kind == "album", let album = choices.albums.first(where: { $0.title == name }) {
+                                search.set(.album(ids: album.ids, title: album.title), on: true)
+                            } else if kind == "favorites" {
+                                search.set(.photosFavorites, on: true)
+                            } else {
+                                log("debug: no filter \"\(part)\"")
+                            }
+                        }
+                        filtering.done = true
+                    }
+                } else {
+                    filtering.done = true
+                }
+                loaded = { filtering.done && search.isSettled && (!search.isSearching || search.hasResults) }
                 draw = { try app.searchWindow.snapshot(to: $0) }
                 close = { app.searchWindow.close() }
             }
@@ -714,4 +738,9 @@ enum DebugHooks {
         try? rep.representation(using: .png, properties: [:])?.write(to: url)
         log("icon: \(url.path)")
     }
+}
+
+/// Whether a debug step started on another task is done (the snapshot waits for it).
+private final class DebugProgress {
+    var done = false
 }

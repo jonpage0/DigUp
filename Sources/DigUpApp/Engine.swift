@@ -853,6 +853,16 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
+    /// The people and albums named in the indexed Photos libraries (the search window's filters).
+    func photosChoices() async -> PhotosChoices {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: PhotosChoices(people: (try? searchStore?.photosPeople()) ?? [],
+                                                             albums: (try? searchStore?.photosAlbums()) ?? []))
+            }
+        }
+    }
+
     private func searchCode(_ text: String, vector: QueryVector?, prefixLast: Bool, limit: Int) async -> [SearchHit] {
         await withCheckedContinuation { continuation in
             searchQueue.async { [self] in

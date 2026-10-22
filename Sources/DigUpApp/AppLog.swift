@@ -39,6 +39,15 @@ nonisolated func log(_ message: String) {
     AppLog.shared.write(message)
 }
 
+/// A search, as a log line names it. The installed app never writes what someone searched for, only its length: the
+/// log sits in the index folder in plain text, and what people look for is theirs. A dev run (its own -defaultsSuite)
+/// writes the words, which are test queries there and what its checks read.
+nonisolated func searchWords(_ text: String) -> String {
+    devRun ? "\"\(text)\"" : "(\(text.count) characters)"
+}
+
+private nonisolated let devRun = UserDefaults.standard.string(forKey: "defaultsSuite") != nil
+
 /// Milliseconds from `start` to `end` (default: now), for log lines.
 nonisolated func ms(since start: Date, until end: Date = Date()) -> String {
     String(format: "%.0f ms", end.timeIntervalSince(start) * 1000)

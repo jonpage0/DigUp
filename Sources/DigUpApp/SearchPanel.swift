@@ -190,7 +190,7 @@ final class SearchPanelController {
             let hits = await engine.search(text, vector: nil, prefixLast: true, code: code)
             guard current == generation, finalGeneration != current else { return }
             show(hits, query: text, phase: .words)
-            log("search \"\(typed)\": words \(hits.count) hits in \(ms(since: started))")
+            log("search \(searchWords(typed)): words \(hits.count) hits in \(ms(since: started))")
         }
         // Meaning results show once typing pauses, but they're computed now (embedding, then search), so they're
         // ready by then: the pause is the whole wait.
@@ -208,13 +208,13 @@ final class SearchPanelController {
             finalGeneration = current
             show(hits, query: text, phase: vector == nil ? .wordsOnly : .meaning)
             let shown = Date(), keystroke = typedAt
-            log("search \"\(typed)\": \(vector == nil ? "words only" : "meaning") \(hits.count) hits "
+            log("search \(searchWords(typed)): \(vector == nil ? "words only" : "meaning") \(hits.count) hits "
                 + "(\(results.strongRows.count) strong) · embed \(ms(since: embedStarted, until: searchStarted)) · "
                 + "search \(ms(since: searchStarted, until: searched)) · shown \(ms(since: keystroke, until: shown)) after "
                 + "the last keystroke")
             DispatchQueue.main.async {
                 // The next turn of the main loop: the list and the preview pane have been laid out and drawn.
-                log("search \"\(typed)\": drawn by \(ms(since: keystroke)) after the last keystroke")
+                log("search \(searchWords(typed)): drawn by \(ms(since: keystroke)) after the last keystroke")
             }
             onFinalResults?()
         }

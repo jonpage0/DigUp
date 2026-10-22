@@ -188,7 +188,7 @@ enum Opener {
             return
         }
         if let words {
-            log("open: \(row.name) in \(appName), searching “\(words)”")
+            log("open: \(row.name) in \(appName), searching \(searchWords(words))")
             // The event alone, as the app's first event: given the file as well, NSWorkspace sends its own event,
             // without the search.
             let configuration = NSWorkspace.OpenConfiguration()
