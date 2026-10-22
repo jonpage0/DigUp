@@ -914,6 +914,20 @@ public final class IndexStore {
         return cameras
     }
 
+    /// The indexed file of each of these Photos assets (by uuid), wherever the crawl found it now (an asset's file
+    /// changes when it's downloaded or edited, `Indexer.sync`): the app's own favorites keep an asset, not a file. An
+    /// asset that isn't indexed has no entry.
+    public func paths(ofAssets uuids: Set<String>) throws -> [String: String] {
+        var paths: [String: String] = [:]
+        guard !uuids.isEmpty else { return paths }
+        try db.query("SELECT f.path FROM photos_assets a JOIN files f ON f.id = a.file") { row in
+            guard let path = row.text(0), let asset = PhotosLibrary.asset(ofFile: path), uuids.contains(asset.uuid)
+            else { return }
+            paths[asset.uuid] = path
+        }
+        return paths
+    }
+
     /// The library videos read from what Photos keeps of them while their originals are in iCloud, with what that is
     /// (`PhotosLibrary.Reading.isStandIn`), by file id: `Indexer` reads them as pictures.
     func photosStandIns() throws -> [Int64: PhotosLibrary.Reading] {

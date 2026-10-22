@@ -62,6 +62,9 @@ public struct SearchFilter: Sendable, Equatable {
     /// it, which is the user's: 234 of 21,165 in a real library had no device name); or an older item, which Photos
     /// says nothing about (origin unknown), whose device is one of them.
     public var shotOn: Set<String>
+    /// Only these files, by path (the app's own favorites, `IndexStore.paths(ofAssets:)` for a Photos item's current
+    /// file). Nil keeps every file; an empty set keeps none.
+    public var paths: Set<String>?
     /// Only files taken inside this box (`IndexStore.locations`).
     public var area: Area?
 
@@ -76,14 +79,14 @@ public struct SearchFilter: Sendable, Equatable {
     }
 
     public init(people: [Set<Int64>] = [], albums: Set<Int64> = [], favorites: Bool = false, origins: Set<String> = [],
-                cameras: Set<String> = [], shotOn: Set<String> = [], area: Area? = nil) {
+                cameras: Set<String> = [], shotOn: Set<String> = [], paths: Set<String>? = nil, area: Area? = nil) {
         (self.people, self.albums, self.favorites, self.area) = (people, albums, favorites, area)
-        (self.origins, self.cameras, self.shotOn) = (origins, cameras, shotOn)
+        (self.origins, self.cameras, self.shotOn, self.paths) = (origins, cameras, shotOn, paths)
     }
 
     public var isEmpty: Bool {
         people.isEmpty && albums.isEmpty && !favorites && origins.isEmpty && cameras.isEmpty && shotOn.isEmpty
-            && area == nil
+            && paths == nil && area == nil
     }
 
     /// The files it keeps, as a query of their ids and the values it takes; nil when it keeps every file.
@@ -111,6 +114,11 @@ public struct SearchFilter: Sendable, Equatable {
                     OR (origin = 'unknown' AND camera IN (\(devices)))
                 """)
             values += shotOn.map { .text($0) } + shotOn.map { .text($0) }
+        }
+        if let paths {
+            parts.append(paths.isEmpty ? "SELECT id FROM files WHERE 0"
+                                       : "SELECT id FROM files WHERE path IN (\(placeholders(paths)))")
+            values += paths.map { .text($0) }
         }
         if let area {
             parts.append("SELECT file FROM locations WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")

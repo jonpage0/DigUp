@@ -311,6 +311,24 @@ import Testing
         #expect(Set(found.map(\.path)) == [listed[0].path, listed[1].path, listed[3].path])
     }
 
+    @Test func theAppsOwnFavoritesAreFoundByAssetAndKeptByPath() throws {
+        let (library, listed) = try library(3, in: folder)   // taken in this order, a second apart
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        _ = try indexer(store) { _ in PhotosLibrary.Listing(assets: listed) }.sync([library])
+        // An asset's indexed file, wherever it is now; one that isn't indexed has none.
+        #expect(try store.paths(ofAssets: [listed[0].uuid, listed[2].uuid, "00000000-0000-0000-0000-000000000000"])
+            == [listed[0].uuid: listed[0].path, listed[2].uuid: listed[2].path])
+        let searcher = try Searcher(store: store, loadVectors: false)
+        func kept(_ filter: SearchFilter) throws -> [String] {
+            try searcher.search("", queryVector: nil, filter: filter).map(\.path)
+        }
+        #expect(try kept(SearchFilter(paths: [listed[0].path, listed[2].path])) == [listed[2].path, listed[0].path])
+        // No favorites keeps nothing, and the part combines with the others.
+        #expect(try kept(SearchFilter(paths: [])).isEmpty)
+        #expect(!SearchFilter(paths: []).isEmpty)
+        #expect(try kept(SearchFilter(origins: ["saved"], paths: [listed[0].path])).isEmpty)
+    }
+
     @Test func anAssetStaysOneRowWhileItsFileChanges() throws {
         let (library, listed) = try library(1, in: folder)
         // Its original in iCloud at first: Photos' preview of it is read.
