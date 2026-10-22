@@ -22,13 +22,7 @@ extension ImageExtractor {
         let width = properties[kCGImagePropertyPixelWidth] as? Int ?? 0
         let height = properties[kCGImagePropertyPixelHeight] as? Int ?? 0
         guard max(width, height) >= minSide else { throw ExtractError.tooSmall(width, height) }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceShouldCacheImmediately: true,
-        ]
-        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions(maxPixel))
         else { throw ExtractError.unreadable("can't decode image") }
         let out = folder.appendingPathComponent(UUID().uuidString + (png ? ".png" : ".jpg"))
         try write(thumbnail, to: out, png: png)
@@ -36,6 +30,16 @@ extension ImageExtractor {
         return Prepared(path: out.path, width: width, height: height,
                         taken: exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
                         location: location(in: properties))
+    }
+
+    /// ImageIO decodes straight to the size the model needs, turned the way the camera held it.
+    private static func thumbnailOptions(_ maxPixel: Int) -> CFDictionary {
+        [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+        ] as CFDictionary
     }
 
     /// A picture's GPS tags are read here (ImageIO).
@@ -58,6 +62,33 @@ extension ImageExtractor {
         let south = (gps[kCGImagePropertyGPSLatitudeRef] as? String)?.uppercased() == "S"
         let west = (gps[kCGImagePropertyGPSLongitudeRef] as? String)?.uppercased() == "W"
         return Location(latitude: south ? -latitude : latitude, longitude: west ? -longitude : longitude, source: .exif)
+    }
+
+    /// An animated GIF's frames read besides its first (`framesRead(ofAnimation:)`), each as a JPEG of `maxPixel` on its
+    /// long side, from the moment it's shown to the moment the next one is: its start is the delays of the frames
+    /// before it, as Apple's players and browsers play them (ImageIO's DelayTime, where a delay of 0 or 0.01 s is 0.1
+    /// s; UnclampedDelayTime is the file's own number). None for any other picture, or a frame that can't be decoded.
+    static func animationFrames(of url: URL, maxPixel: Int, to folder: URL) -> [MediaPiece] {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetType(source) as String? == UTType.gif.identifier else { return [] }
+        let count = CGImageSourceGetCount(source)
+        let picked = framesRead(ofAnimation: count)
+        guard !picked.isEmpty else { return [] }
+        var starts: [Double] = [], time = 0.0   // each frame's start; then the animation's length
+        for index in 0..<count {
+            starts.append(time)
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
+            let gif = properties?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
+            time += (gif?[kCGImagePropertyGIFDelayTime] ?? gif?[kCGImagePropertyGIFUnclampedDelayTime]) as? Double ?? 0
+        }
+        return picked.compactMap { index in
+            guard let frame = CGImageSourceCreateThumbnailAtIndex(source, index, thumbnailOptions(maxPixel)) else {
+                return nil
+            }
+            let out = folder.appendingPathComponent(UUID().uuidString + ".jpg")
+            guard (try? write(frame, to: out, png: false)) != nil else { return nil }
+            return MediaPiece(path: out.path, start: starts[index], end: index + 1 < count ? starts[index + 1] : time)
+        }
     }
 
     /// A picture ImageIO can't read, like an SVG: AppKit draws it, straight at the size the model needs (a vector

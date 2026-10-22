@@ -36,7 +36,7 @@ import Testing
     func indexer(_ store: IndexStore, reading listing: @escaping @Sendable (String) throws -> PhotosLibrary.Listing)
         throws -> Indexer {
         var options = IndexOptions()
-        options.photos = PhotosLibrary.Reader(list: listing)
+        options.photos = PhotosLibrary.Reader { library, _ in try listing(library) }
         return try Indexer(store: store, options: options,
                            makeEmbedder: { throw WorkerError.notFound("no model needed to sync") })
     }
@@ -63,6 +63,14 @@ import Testing
                             screenshot: asset.screenshot, title: asset.title, date: asset.date, words: asset.words,
                             favorite: asset.favorite, latitude: asset.latitude, longitude: asset.longitude,
                             place: asset.place, people: asset.people, albums: asset.albums)
+    }
+
+    /// The same asset as Photos records how it came in (its ZIMPORTEDBY number and app), and the device that took it.
+    func asset(_ asset: PhotosLibrary.Asset, importedBy number: Int?, app: String? = nil, camera: String? = nil)
+        -> PhotosLibrary.Asset {
+        PhotosLibrary.Asset(uuid: asset.uuid, path: asset.path, movie: asset.movie, screenshot: asset.screenshot,
+                            title: asset.title, date: asset.date, words: asset.words, favorite: asset.favorite,
+                            reading: asset.reading, importedBy: number, originApp: app, camera: camera)
     }
 
     /// Rows this index's connection has written since it opened.
@@ -229,6 +237,203 @@ import Testing
                 == [assets[0].path])
     }
 
+    @Test func howAnAssetCameIntoTheLibraryIsReadFromWhatPhotosRecorded() throws {
+        let cases: [(screenshot: Bool, number: Int?, app: String?, origin: PhotosLibrary.Origin)] = [
+            (true, 8, "com.apple.springboard", .screenshot),           // a screenshot, whoever saved it
+            (true, 1, nil, .screenshot),
+            (false, 1, nil, .camera),                                   // the back camera
+            (false, 2, nil, .camera),                                   // the front one
+            (false, 1, "com.apple.Photos", .camera),                    // the camera's number before Photos as the app
+            (false, 8, "com.apple.camera.CameraMessagesApp", .camera),  // Messages' camera
+            (false, 0, "com.apple.camera", .camera),
+            (false, nil, "com.apple.camera", .camera),
+            (false, 5, nil, .imported),
+            (false, 0, "com.apple.Photos", .imported),
+            (false, 3, "com.atebits.Tweetie2", .saved),
+            (false, 13, "com.apple.sharingd", .saved),                 // AirDrop, by its app
+            (false, 3, nil, .saved), (false, 6, nil, .saved), (false, 7, nil, .saved), (false, 8, nil, .saved),
+            (false, 9, nil, .saved), (false, 12, nil, .saved),
+            (false, 0, nil, .unknown), (false, nil, nil, .unknown), (false, 13, nil, .unknown),
+        ]
+        for item in cases {
+            #expect(PhotosLibrary.Origin(screenshot: item.screenshot, importedBy: item.number, app: item.app)
+                    == item.origin, "\(item)")
+        }
+        // As the listing writes it.
+        let listed = try JSONDecoder().decode(PhotosLibrary.Asset.self, from: Data("""
+            {"uuid": "FC37DBA6-CF22-4E3E-AB70-755587454608", "path": "/L.photoslibrary/x", "reading": "stills",
+             "movie": true, "screenshot": false, "title": "IMG_1.MOV", "date": 1, "words": [], "favorite": false,
+             "latitude": null, "longitude": null, "place": null, "people": [], "albums": [], "importedBy": 1,
+             "originApp": "com.apple.camera", "camera": "iPhone 15 Pro"}
+            """.utf8))
+        #expect(listed.reading == .stills && listed.kind == .video)
+        #expect(listed.origin == .camera && listed.originApp == "com.apple.camera" && listed.camera == "iPhone 15 Pro")
+    }
+
+    @Test func filtersKeepHowItCameInAndTheDeviceAmongMoreWordMatchesThanSearchLooksAt() throws {
+        let (library, listed) = try library(4, in: folder)   // taken in this order, a second apart
+        let assets = [asset(listed[0], importedBy: 1, app: "com.apple.camera", camera: "iPhone 15 Pro"),
+                      asset(listed[1], importedBy: 0, camera: "iPhone 15 Pro"),   // nothing recorded: an older one
+                      asset(listed[2], importedBy: 3, app: "com.apple.MobileSMS", camera: "iPhone 12"),   // sent
+                      asset(listed[3], importedBy: 2, camera: "iPhone Air")]
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        _ = try indexer(store) { _ in PhotosLibrary.Listing(assets: assets) }.sync([library])
+        #expect(try store.photosCameras() == [IndexStore.PhotosCamera(model: "iPhone 15 Pro", files: 2, fromCamera: 1),
+                                              IndexStore.PhotosCamera(model: "iPhone 12", files: 1, fromCamera: 0),
+                                              IndexStore.PhotosCamera(model: "iPhone Air", files: 1, fromCamera: 1)])
+        let searcher = try Searcher(store: store, loadVectors: false)
+        func kept(_ filter: SearchFilter) throws -> [String] {
+            try searcher.search("", queryVector: nil, filter: filter).map(\.path)
+        }
+        // "Shot on my devices": what a camera saved, or nothing recorded, and taken with one of mine.
+        let mine = SearchFilter(origins: ["camera", "unknown"], cameras: ["iPhone 15 Pro", "iPhone Air"])
+        #expect(try kept(mine) == [listed[3].path, listed[1].path, listed[0].path])
+        #expect(try kept(SearchFilter(origins: ["saved"])) == [listed[2].path])
+        #expect(try kept(SearchFilter(cameras: ["iPhone 12"])) == [listed[2].path])
+        #expect(try kept(SearchFilter(origins: ["camera"], cameras: ["iPhone 12"])).isEmpty)
+
+        // With words: the filter narrows the matches before they're cut to the best 1,000 (more notes than that say
+        // "beach", each more than Photos' words do).
+        try store.db.transaction {
+            for number in 0..<1_100 {
+                let id = try store.insert(Candidate(path: "/notes/beach \(number).txt", kind: .doc, size: 1, mtime: 1,
+                                                    inode: UInt64(1_000 + number), device: 1))
+                try store.addSegment(file: id, kind: .chunk, modality: .text, text: "beach beach")
+            }
+        }
+        let found = try Searcher(store: store, loadVectors: false).search("beach", queryVector: nil, filter: mine)
+        #expect(Set(found.map(\.path)) == [listed[0].path, listed[1].path, listed[3].path])
+    }
+
+    @Test func anAssetStaysOneRowWhileItsFileChanges() throws {
+        let (library, listed) = try library(1, in: folder)
+        // Its original in iCloud at first: Photos' preview of it is read.
+        let uuid = listed[0].uuid
+        let previews = library.appendingPathComponent("resources/derivatives/\(uuid.prefix(1))")
+        try FileManager.default.createDirectory(at: previews, withIntermediateDirectories: true)
+        let preview = previews.appendingPathComponent(uuid + "_1_105_c.jpeg")
+        try Data("preview".utf8).write(to: preview)
+        let katie = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katie")
+        let trip = PhotosLibrary.Album(uuid: "A-TRIP", title: "Trip")
+        @Sendable func listing(_ path: String, _ reading: PhotosLibrary.Reading) -> PhotosLibrary.Listing {
+            let asset = PhotosLibrary.Asset(uuid: uuid, path: path, movie: false, screenshot: false, title: "IMG_1",
+                                            date: 1_700_000_000, words: ["Beach"], favorite: true, latitude: 51.5,
+                                            longitude: -0.13, people: [katie.uuid], albums: [trip.uuid],
+                                            reading: reading)
+            return PhotosLibrary.Listing(assets: [asset], people: [katie], albums: [trip])
+        }
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        #expect(try indexer(store) { _ in listing(preview.path, .preview) }.sync([library]).added == 1)
+        let row = try #require(try store.files(under: [library.path]).first)
+        /// As if it had been read: a picture's vector.
+        func read() throws {
+            try store.addSegment(file: row.id, kind: .image, modality: .image, vector: FakeEmbedder.vector(for: "x"))
+            try store.finish(row.id, state: "done")
+        }
+        /// The same row at `path`, waiting to be read again (what was read of it gone), and all Photos said kept.
+        func stillOneRow(at path: String, reading: PhotosLibrary.Reading) throws {
+            let rows = try store.files(under: [library.path])
+            #expect(rows.map(\.id) == [row.id] && rows.map(\.path) == [path] && rows.map(\.state) == ["pending"])
+            var images = 0, readings: [String] = []
+            try store.db.query("SELECT COUNT(*) FROM segments WHERE kind = 'image'") { images = Int($0.int(0)) }
+            #expect(images == 0)
+            #expect(try store.photosPeople().map(\.files) == [1] && store.photosAlbums().map(\.files) == [1])
+            #expect(try store.locations(of: [path]).count == 1)
+            try store.db.query("SELECT reading FROM photos_assets WHERE file = ? AND favorite = 1", [.int(row.id)]) {
+                readings.append($0.text(0) ?? "")
+            }
+            #expect(readings == [reading.rawValue])
+        }
+        try read()
+
+        // Downloaded: its original is read now, as the same row, with its people, album, favorite and place.
+        let downloaded = try indexer(store) { _ in listing(listed[0].path, .original) }.sync([library])
+        #expect(downloaded.changed == 1 && downloaded.added == 0 && downloaded.removed == 0)
+        #expect(downloaded.queued == [row.id] && downloaded.described == 1)
+        try stillOneRow(at: listed[0].path, reading: .original)
+        try read()
+        // And back to Photos' preview when the original goes to iCloud again.
+        let removed = try indexer(store) { _ in listing(preview.path, .preview) }.sync([library])
+        #expect(removed.changed == 1 && removed.added == 0 && removed.removed == 0 && removed.queued == [row.id])
+        try stillOneRow(at: preview.path, reading: .preview)
+    }
+
+    @Test func anIndexFromBeforeTheReadingAndOriginsGetsThemAtTheNextSync() throws {
+        let (library, listed) = try library(2, in: folder)
+        let assets = [asset(listed[0], importedBy: 1, app: "com.apple.camera", camera: "iPhone 15 Pro"), listed[1]]
+        let index = folder.appendingPathComponent("index")
+        let first = try IndexStore(directory: index)
+        _ = try indexer(first) { _ in PhotosLibrary.Listing(assets: assets) }.sync([library])
+        // As the fork's first step left an index: one row a library file, with its favorite alone.
+        try first.db.execute("""
+            DROP TABLE photos_assets;
+            CREATE TABLE photos_assets(
+                file INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                favorite INTEGER NOT NULL CHECK (favorite IN (0, 1))
+            );
+            INSERT INTO photos_assets(file, favorite) SELECT id, 0 FROM files;
+            UPDATE meta SET value = '1' WHERE key = 'fork_photos_facts';
+            """)
+        // Step 2 makes the table again, empty: every row is the sync's.
+        let store = try IndexStore(directory: index)
+        var columns: [String] = [], rows = 0, version: Int64 = 0
+        try store.db.query("SELECT name FROM pragma_table_info('photos_assets')") { columns.append($0.text(0) ?? "") }
+        try store.db.query("SELECT COUNT(*) FROM photos_assets") { rows = Int($0.int(0)) }
+        try store.db.query("PRAGMA user_version") { version = $0.int(0) }
+        #expect(columns == ["file", "favorite", "reading", "origin", "origin_app", "camera"] && rows == 0)
+        #expect(try store.meta("fork_photos_facts") == "2" && version == 5)
+
+        // The next sync writes them, and reads no file again.
+        let sync = try indexer(store) { _ in PhotosLibrary.Listing(assets: assets) }.sync([library])
+        #expect(sync.described == 2 && sync.queued.isEmpty && sync.unchanged == 2)
+        var written: [String] = []
+        try store.db.query("""
+            SELECT favorite, reading, origin, coalesce(origin_app, '-'), coalesce(camera, '-') FROM photos_assets
+            ORDER BY file
+            """) { row in written.append((0..<5).map { row.text(Int32($0)) ?? "" }.joined(separator: " ")) }
+        #expect(written == ["0 original camera com.apple.camera iPhone 15 Pro", "0 original unknown - -"])
+        let before = try writes(store)
+        #expect(try indexer(store) { _ in PhotosLibrary.Listing(assets: assets) }.sync([library]).described == 0)
+        #expect(try writes(store) == before)
+    }
+
+    #if !os(Windows)
+    @Test func whatsHiddenInPhotosIsListedOnlyWhenAskedAndItsListingKeptApart() throws {
+        let (library, listed) = try library(1, in: folder)
+        // The crawl asks for what the options say.
+        var options = IndexOptions()
+        options.photos = PhotosLibrary.Reader { _, hidden in
+            hidden ? PhotosLibrary.Listing(assets: listed)
+                : PhotosLibrary.Listing(assets: [], skipped: ["hidden in Photos": 1])
+        }
+        #expect(Crawler.crawl([library], options: options).skipped["hidden in Photos"] == 1)
+        options.includeHiddenPhotos = true
+        #expect(Crawler.crawl([library], options: options).candidates.map(\.path) == [listed[0].path])
+
+        // osxphotos (a stand-in that lists nothing, and notes each run) is asked for one or the other, and a listing
+        // kept from one isn't used for the other.
+        let program = folder.appendingPathComponent("osxphotos"), runs = folder.appendingPathComponent("runs.txt")
+        try """
+            #!/bin/sh
+            # osxphotos run <script> <library> <output> include-hidden|skip-hidden
+            echo "$5" >> '\(runs.path)'
+            if [ "$5" = include-hidden ]; then skipped='{}'; else skipped='{"hidden in Photos": 1}'; fi
+            printf '{"assets": [], "skipped": %s, "people": [], "albums": []}' "$skipped" > "$4"
+            """.write(to: program, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: program.path)
+        let kept = folder.appendingPathComponent("index/photos")
+        func listing(hidden: Bool) throws -> PhotosLibrary.Listing {
+            try PhotosLibrary.listing(of: library.path, hidden: hidden, program: program.path, keptIn: kept)
+        }
+        #expect(try listing(hidden: false).skipped == ["hidden in Photos": 1])
+        #expect(try listing(hidden: false).skipped == ["hidden in Photos": 1])   // kept
+        #expect(try listing(hidden: true).skipped.isEmpty)
+        #expect(try listing(hidden: true).skipped.isEmpty)                        // kept
+        #expect(try listing(hidden: false).skipped == ["hidden in Photos": 1])
+        #expect(try String(contentsOf: runs, encoding: .utf8) == "skip-hidden\ninclude-hidden\nskip-hidden\n")
+    }
+    #endif
+
     #if canImport(ImageIO)
     @Test func aLibrarysPictureHasPhotosLocationNeverItsOwn() throws {
         // Both pictures' files carry GPS tags (Miami). Photos says the first was taken in Adelaide (as a location typed
@@ -238,7 +443,7 @@ import Testing
         let assets = [asset(listed[0], at: (-34.9, 138.6)), listed[1]]
         let store = try IndexStore(directory: folder.appendingPathComponent("index"))
         var options = IndexOptions()
-        options.photos = PhotosLibrary.Reader { _ in PhotosLibrary.Listing(assets: assets) }
+        options.photos = PhotosLibrary.Reader { _, _ in PhotosLibrary.Listing(assets: assets) }
         let indexer = try Indexer(store: store, options: options, makeEmbedder: { FakeEmbedder() })
         _ = try indexer.sync([library])
         #expect(try indexer.run()["done"] == 2)   // both read: their tags were there to take
@@ -246,6 +451,49 @@ import Testing
         #expect(locations.count == 1)
         let adelaide = try #require(locations[listed[0].path])
         #expect(adelaide.source == .photos && adelaide.latitude == -34.9)
+    }
+
+    @Test func aVideoInICloudIsReadFromWhatPhotosKeepsOfIt() throws {
+        let (library, listed) = try library(2, in: folder)
+        // The first: Photos' filmstrip of it, three stills (written out of order), beside a file that isn't one.
+        let first = listed[0].uuid, second = listed[1].uuid
+        let strip = library.appendingPathComponent("resources/derivatives/cvt/\(first.prefix(1))/\(first)")
+        try FileManager.default.createDirectory(at: strip, withIntermediateDirectories: true)
+        let stills = (0..<3).map { strip.appendingPathComponent("\(first)_cvt_t000\($0).jpeg") }
+        for still in stills.reversed() { try ImageTests.writeJPEG(still) }
+        try Data("not a still".utf8).write(to: strip.appendingPathComponent("\(first)_cvt.plist"))
+        #expect(PhotosLibrary.filmstrip(startingAt: stills[0].path) == stills.map(\.path))
+        // The second: one poster still.
+        let previews = library.appendingPathComponent("resources/derivatives/\(second.prefix(1))")
+        try FileManager.default.createDirectory(at: previews, withIntermediateDirectories: true)
+        let poster = previews.appendingPathComponent(second + "_1_105_c.jpeg")
+        try ImageTests.writeJPEG(poster)
+        let assets = [(listed[0], stills[0], PhotosLibrary.Reading.stills), (listed[1], poster, .poster)].map {
+            PhotosLibrary.Asset(uuid: $0.0.uuid, path: $0.1.path, movie: true, screenshot: false, title: $0.0.title,
+                                date: $0.0.date, words: $0.0.words, reading: $0.2)
+        }
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        var options = IndexOptions()
+        options.photos = PhotosLibrary.Reader { _, _ in PhotosLibrary.Listing(assets: assets) }
+        let indexer = try Indexer(store: store, options: options, makeEmbedder: { FakeEmbedder() })
+        _ = try indexer.sync([library])
+        #expect(try indexer.run()["done"] == 2)
+
+        // Videos still, each still a frame with its own vector and no time.
+        let files = Dictionary(uniqueKeysWithValues: try store.files(under: [library.path]).map { ($0.path, $0) })
+        #expect(files.values.map(\.kind) == [.video, .video])
+        var frames: [String: [String]] = [:]
+        try store.db.query("""
+            SELECT f.path, s.kind, s.loc IS NULL, s.vec IS NOT NULL FROM segments s JOIN files f ON f.id = s.file
+            WHERE s.kind NOT IN \(IndexStore.crawlKinds) ORDER BY s.id
+            """) { row in
+            frames[row.text(0) ?? "", default: []].append("\(row.text(1) ?? "") \(row.int(2)) \(row.int(3))")
+        }
+        #expect(frames == [stills[0].path: Array(repeating: "frame 1 1", count: 3), poster.path: ["frame 1 1"]])
+        #expect(try store.info(of: try #require(files[stills[0].path]).id)["frames"] == "3")
+        // A result says it's a video in iCloud, read from Photos' stills of it.
+        let hits = try Searcher(store: store).search("", queryVector: nil, filter: SearchFilter(origins: ["unknown"]))
+        #expect(Set(hits.map { $0.photos?.reading }) == [.stills, .poster])
     }
     #endif
 
@@ -273,7 +521,7 @@ import Testing
         #expect(hits.first?.path == assets[7].path)
         #expect(hits.first?.segment == .photosInfo)
         #expect(hits.first?.photos == PhotosHit(library: library.path, uuid: assets[7].uuid, title: "Beach day",
-                                                date: 1_700_000_007))
+                                                date: 1_700_000_007, reading: .original))
         #expect(hits.first?.loc == nil)   // a Photos fact's loc is its date, not a place in the file
 
         // Unchanged: nothing is queued or described again.
@@ -318,7 +566,7 @@ import Testing
         let (library, assets) = try library(1, in: pictures)
         // Skipped inside a chosen folder, as a folder would be: not read at all.
         var options = IndexOptions()
-        options.photos = PhotosLibrary.Reader { _ in
+        options.photos = PhotosLibrary.Reader { _, _ in
             Issue.record("a skipped library was read")
             return PhotosLibrary.Listing(assets: assets)
         }
@@ -351,21 +599,21 @@ import Testing
 
     @Test func aKeptListingIsUsedUntilThePicturesChangeOrItsOld() {
         let state = PhotosLibrary.State(pictures: "originals/F 10:1", database: "Photos.sqlite 5:1")
-        let kept = PhotosLibrary.Kept(library: "/L.photoslibrary", listedAt: 1000, state: state,
+        let kept = PhotosLibrary.Kept(library: "/L.photoslibrary", hidden: false, listedAt: 1000, state: state,
                                       listing: PhotosLibrary.Listing(assets: []))
-        #expect(kept.isCurrent(library: "/L.photoslibrary", state: state, now: 99_999))
+        #expect(kept.isCurrent(library: "/L.photoslibrary", hidden: false, state: state, now: 99_999))
         // A new, edited or downloaded picture: listed again at once.
         let newPicture = PhotosLibrary.State(pictures: "originals/F 11:2", database: state.database)
-        #expect(!kept.isCurrent(library: "/L.photoslibrary", state: newPicture, now: 1001))
+        #expect(!kept.isCurrent(library: "/L.photoslibrary", hidden: false, state: newPicture, now: 1001))
         // Only the database (Photos writes it all the time): the listing holds for a while.
         let written = PhotosLibrary.State(pictures: state.pictures, database: "Photos.sqlite 6:2")
-        #expect(kept.isCurrent(library: "/L.photoslibrary", state: written, now: 1000 + 60))
-        #expect(!kept.isCurrent(library: "/L.photoslibrary", state: written, now: 1000 + 600))
-        #expect(!kept.isCurrent(library: "/Other.photoslibrary", state: state, now: 1001))
+        #expect(kept.isCurrent(library: "/L.photoslibrary", hidden: false, state: written, now: 1000 + 60))
+        #expect(!kept.isCurrent(library: "/L.photoslibrary", hidden: false, state: written, now: 1000 + 600))
+        #expect(!kept.isCurrent(library: "/Other.photoslibrary", hidden: false, state: state, now: 1001))
         // Made by another version of the script: made again.
         var older = kept
         older.reader = "0000000000000000"
-        #expect(!older.isCurrent(library: "/L.photoslibrary", state: state, now: 1001))
+        #expect(!older.isCurrent(library: "/L.photoslibrary", hidden: false, state: state, now: 1001))
     }
 
     @Test func photosSearchDatabaseCountsAsTheDatabase() throws {

@@ -217,7 +217,7 @@ public final class IndexStore {
     /// DigUp still opens the index; it doesn't read Photos libraries, so it removes their files, and the foreign keys
     /// take their facts with them. An index a later fork stepped further (a column added) is left as it is.
     static let forkFactsKey = "fork_photos_facts"
-    static let forkFactsVersion = 1
+    static let forkFactsVersion = 2
 
     /// An index already at upstream's current schema that hasn't had the fork's steps (made by upstream's DigUp, or by
     /// the fork before these tables): `migrate` gives an older one theirs, before upstream's own steps.
@@ -236,6 +236,7 @@ public final class IndexStore {
         let from = try forkFactsStepped()
         guard from < Self.forkFactsVersion else { return }
         if from < 1 { try createForkFacts() }
+        if from < 2 { try recreatePhotosAssets() }
         try setMeta(Self.forkFactsKey, "\(Self.forkFactsVersion)")
     }
 
@@ -247,7 +248,7 @@ public final class IndexStore {
     /// - `photos_people`, `photos_albums`: a library's named people and pets and its albums, each under Photos' uuid
     ///   (a rename in Photos changes the row, not its id), with their files (`photos_person_files`,
     ///   `photos_album_files`). One no file is linked to is deleted at the end of a sync.
-    /// - `photos_assets`: Photos' flags of a library's file; one row each.
+    /// - `photos_assets`: Photos' flags of a library's file; one row each (its columns since step 2).
     private func createForkFacts() throws {
         try db.execute("""
             CREATE TABLE IF NOT EXISTS locations(
@@ -287,6 +288,29 @@ public final class IndexStore {
             CREATE TABLE IF NOT EXISTS photos_assets(
                 file INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
                 favorite INTEGER NOT NULL CHECK (favorite IN (0, 1))
+            );
+            """)
+    }
+
+    /// Fork step 2: `photos_assets` says what DigUp read of each asset, how it came into its library and the device
+    /// that took it. Every row is the sync's, made from the listing, so the table is made again rather than given
+    /// columns with a default that would be a made-up fact: the first sync after this writes each library file's row
+    /// again (`photosFacts` counts a file without one as having no facts).
+    /// - `reading` (`PhotosLibrary.Reading`): the file read, as the listing chose it. A video in iCloud is read from
+    ///   Photos' stills of it, or a poster still, and stays a video (`files.kind`).
+    /// - `origin` (`PhotosLibrary.Origin`), from what Photos' catalog records; `origin_app` the app that put it in the
+    ///   library, by its bundle id, NULL when Photos recorded none.
+    /// - `camera`: the device that took it, from the EXIF Photos kept ("iPhone 15 Pro"), NULL when there's none.
+    private func recreatePhotosAssets() throws {
+        try db.execute("""
+            DROP TABLE IF EXISTS photos_assets;
+            CREATE TABLE photos_assets(
+                file INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                favorite INTEGER NOT NULL CHECK (favorite IN (0, 1)),
+                reading TEXT NOT NULL CHECK (reading IN ('original', 'edited', 'preview', 'stills', 'poster')),
+                origin TEXT NOT NULL CHECK (origin IN ('camera', 'screenshot', 'saved', 'imported', 'unknown')),
+                origin_app TEXT,   -- the app that put it in the library, as Photos recorded it (bundle id); NULL when it didn't
+                camera TEXT        -- the device that took it, from the EXIF Photos kept ("iPhone 15 Pro"); NULL when none
             );
             """)
     }
@@ -632,15 +656,20 @@ public final class IndexStore {
     // MARK: Photos
 
     /// What Photos says about a file from a Photos library: its words, title and date (its `photosInfo` segment),
-    /// whether it's a favorite (`photos_assets`), where it was taken (its `photos` location), and who is in it and
-    /// the albums it's in, as their rows of the file's library (`photos_people`, `photos_albums`). Rows, not Photos'
-    /// uuids: a library renamed or moved is a new library to the index (its people and albums are spelled with its
-    /// path), so its files are linked to its own rows again, and the old library's go.
+    /// whether it's a favorite, what DigUp read of it, how it came into the library and the device that took it
+    /// (`photos_assets`), where it was taken (its `photos` location), and who is in it and the albums it's in, as their
+    /// rows of the file's library (`photos_people`, `photos_albums`). Rows, not Photos' uuids: a library renamed or
+    /// moved is a new library to the index (its people and albums are spelled with its path), so its files are linked
+    /// to its own rows again, and the old library's go.
     public struct PhotosFacts: Equatable, Sendable {
         public var title: String
         public var date: Double
         public var text: String
         public var favorite: Bool
+        public var reading: PhotosLibrary.Reading
+        public var origin: PhotosLibrary.Origin
+        public var originApp: String?
+        public var camera: String?
         public var location: Location?
         public var people: Set<Int64>
         public var albums: Set<Int64>
@@ -649,30 +678,44 @@ public final class IndexStore {
         /// `setPhotosAlbums`, by uuid): one the library's listing doesn't name has none, and isn't linked.
         public init(_ asset: PhotosLibrary.Asset, people: [String: Int64], albums: [String: Int64]) {
             (title, date, text) = (asset.title, asset.date, asset.text)
-            (favorite, location) = (asset.favorite, asset.location)
+            (favorite, reading, origin, originApp, camera) = (asset.favorite, asset.reading, asset.origin,
+                                                              asset.originApp, asset.camera)
+            location = asset.location
             self.people = Set(asset.people.compactMap { people[$0] })
             self.albums = Set(asset.albums.compactMap { albums[$0] })
         }
 
-        init(title: String, date: Double, text: String, favorite: Bool, location: Location? = nil,
+        init(title: String, date: Double, text: String, favorite: Bool, reading: PhotosLibrary.Reading,
+             origin: PhotosLibrary.Origin, originApp: String?, camera: String?, location: Location? = nil,
              people: Set<Int64> = [], albums: Set<Int64> = []) {
             (self.title, self.date, self.text, self.favorite) = (title, date, text, favorite)
+            (self.reading, self.origin, self.originApp, self.camera) = (reading, origin, originApp, camera)
             (self.location, self.people, self.albums) = (location, people, albums)
+        }
+
+        /// What its `photos_assets` row holds.
+        var assetRow: (Bool, PhotosLibrary.Reading, PhotosLibrary.Origin, String?, String?) {
+            (favorite, reading, origin, originApp, camera)
         }
     }
 
     /// Every library file's Photos facts, by file id. A file has them once its segment and its `photos_assets` row
-    /// are both written: an index from before the fork kept the rest has the segment alone, and the next sync writes
-    /// them all.
+    /// are both written: an index from before the fork kept the rest has the segment alone, and one from before fork
+    /// step 2 no `photos_assets` rows; the next sync writes them all.
     func photosFacts() throws -> [Int64: PhotosFacts] {
         var facts: [Int64: PhotosFacts] = [:]
         try db.query("""
-            SELECT s.file, s.excerpt, s.loc, coalesce(fts.original, fts.body), a.favorite FROM segments s
-            JOIN photos_assets a ON a.file = s.file LEFT JOIN fts ON fts.rowid = s.id
+            SELECT s.file, s.excerpt, s.loc, coalesce(fts.original, fts.body), a.favorite, a.reading, a.origin,
+                a.origin_app, a.camera
+            FROM segments s JOIN photos_assets a ON a.file = s.file LEFT JOIN fts ON fts.rowid = s.id
             WHERE s.kind = '\(SegmentKind.photosInfo.rawValue)'
             """) { row in
+            // A value of a later fork's that this one doesn't know: no facts, and the sync writes its own.
+            guard let reading = PhotosLibrary.Reading(rawValue: row.text(5) ?? ""),
+                  let origin = PhotosLibrary.Origin(rawValue: row.text(6) ?? "") else { return }
             facts[row.int(0)] = PhotosFacts(title: row.text(1) ?? "", date: row.double(2), text: row.text(3) ?? "",
-                                            favorite: row.int(4) == 1)
+                                            favorite: row.int(4) == 1, reading: reading, origin: origin,
+                                            originApp: row.text(7), camera: row.text(8))
         }
         try db.query("SELECT file, latitude, longitude, source, place FROM locations WHERE \(Self.crawlLocation)") {
             facts[$0.int(0)]?.location = Self.location($0, from: 1)
@@ -683,8 +726,8 @@ public final class IndexStore {
     }
 
     /// Writes what differs between a library file's facts and the ones `stored` (nil: none written yet): keyword
-    /// search finds Photos' words in it, a result shows its title and date, and the filters see its favorite, place,
-    /// people and albums. Nothing is embedded.
+    /// search finds Photos' words in it, a result shows its title and date, and the filters see its favorite, origin,
+    /// camera, place, people and albums. Nothing is embedded.
     func setPhotosFacts(_ facts: PhotosFacts, replacing stored: PhotosFacts?, of file: Int64) throws {
         if stored.map({ ($0.title, $0.date, $0.text) != (facts.title, facts.date, facts.text) }) ?? true {
             let kind = SegmentKind.photosInfo.rawValue
@@ -694,11 +737,13 @@ public final class IndexStore {
             try addSegment(file: file, kind: .photosInfo, modality: .none, loc: facts.date, excerpt: facts.title,
                            text: facts.text)
         }
-        if stored?.favorite != facts.favorite {
+        if stored.map({ $0.assetRow != facts.assetRow }) ?? true {
             try db.run("""
-                INSERT INTO photos_assets(file, favorite) VALUES(?, ?)
-                ON CONFLICT(file) DO UPDATE SET favorite = excluded.favorite
-                """, [.int(file), .int(facts.favorite ? 1 : 0)])
+                INSERT INTO photos_assets(file, favorite, reading, origin, origin_app, camera) VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(file) DO UPDATE SET favorite = excluded.favorite, reading = excluded.reading,
+                    origin = excluded.origin, origin_app = excluded.origin_app, camera = excluded.camera
+                """, [.int(file), .int(facts.favorite ? 1 : 0), .text(facts.reading.rawValue),
+                      .text(facts.origin.rawValue), .optional(facts.originApp), .optional(facts.camera)])
         }
         if stored?.location != facts.location {
             if let location = facts.location {
@@ -836,6 +881,40 @@ public final class IndexStore {
             $0.folders != $1.folders ? $0.folders.lexicographicallyPrecedes($1.folders)
                 : $0.title.localizedStandardCompare($1.title) == .orderedAscending
         }
+    }
+
+    /// A device that took pictures and videos of the indexed libraries (`photos_assets.camera`, as Photos kept its
+    /// EXIF: "iPhone 15 Pro"), how many indexed files it took, and how many of those its camera saved there (origin
+    /// `camera`). The app's list of the user's own devices starts as the ones with any of those.
+    public struct PhotosCamera: Sendable, Equatable, Identifiable {
+        public var id: String { model }
+        public let model: String
+        public let files: Int
+        public let fromCamera: Int
+    }
+
+    /// The devices that took the indexed libraries' pictures and videos, the one with most files first.
+    public func photosCameras() throws -> [PhotosCamera] {
+        var cameras: [PhotosCamera] = []
+        try db.query("""
+            SELECT camera, COUNT(*), SUM(origin = '\(PhotosLibrary.Origin.camera.rawValue)') FROM photos_assets
+            WHERE camera IS NOT NULL GROUP BY camera ORDER BY COUNT(*) DESC, camera
+            """) {
+            cameras.append(PhotosCamera(model: $0.text(0) ?? "", files: Int($0.int(1)), fromCamera: Int($0.int(2))))
+        }
+        return cameras
+    }
+
+    /// The library videos read from what Photos keeps of them while their originals are in iCloud, with what that is
+    /// (`PhotosLibrary.Reading.isStandIn`), by file id: `Indexer` reads them as pictures.
+    func photosStandIns() throws -> [Int64: PhotosLibrary.Reading] {
+        var readings: [Int64: PhotosLibrary.Reading] = [:]
+        let standIns = PhotosLibrary.Reading.allCases.filter(\.isStandIn).map { "'\($0.rawValue)'" }
+            .joined(separator: ",")
+        try db.query("SELECT file, reading FROM photos_assets WHERE reading IN (\(standIns))") {
+            readings[$0.int(0)] = PhotosLibrary.Reading(rawValue: $0.text(1) ?? "")
+        }
+        return readings
     }
 
     // MARK: Locations

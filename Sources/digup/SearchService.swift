@@ -358,6 +358,7 @@ func hitFields(_ hit: SearchHit) -> [String: Any] {
     if let photos = hit.photos {
         var asset: [String: Any] = ["library": photos.library, "uuid": photos.uuid, "title": photos.title]
         if let date = photos.date { asset["date"] = date }
+        if let reading = photos.reading { asset["reading"] = reading.rawValue }
         row["photos"] = asset
     }
     return row

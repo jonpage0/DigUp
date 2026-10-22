@@ -88,17 +88,22 @@ public final class Indexer {
     // MARK: Sync
 
     /// Crawls `roots` and reconciles the index: new files are queued, changed ones re-queued, moved ones re-pathed
-    /// (no re-embedding), and files that are gone or newly excluded are removed. What Photos says about a Photos
-    /// library's files (its words, favorites, places, people and albums) is brought up to date too, without reading
-    /// them again, and a person or album no file is linked to any more is deleted.
+    /// (no re-embedding), and files that are gone or newly excluded are removed. A Photos library's asset stays one row
+    /// while its file changes (downloaded, edited, re-rendered, back to Photos' stills): a file of a library at a new
+    /// path is the row of the same library and asset uuid, if there's one, re-pathed and read again, keeping its id and
+    /// with it its people, albums, favorite and place. What Photos says about a Photos library's files (its words,
+    /// favorites, places, people and albums) is brought up to date too, without reading them again, and a person or
+    /// album no file is linked to any more is deleted.
     public func sync(_ roots: [URL]) throws -> SyncSummary {
         let crawl = Crawler.crawl(roots, options: options)
         let existing = try store.files(under: roots.map { $0.standardizedFileURL.path })
         var byPath: [String: FileRecord] = [:]
         var byInode: [String: FileRecord] = [:]
+        var byAsset: [String: FileRecord] = [:]   // a Photos library's files, by `assetKey`
         for file in existing {
             byPath[file.path] = file
             byInode["\(file.device):\(file.inode)"] = file
+            if let key = Self.assetKey(file.path) { byAsset[key] = file }
         }
         let seen = Set(crawl.candidates.map(\.path))
         var movedFrom = Set<String>()
@@ -116,6 +121,15 @@ public final class Indexer {
                     } else {
                         summary.unchanged += 1
                     }
+                } else if crawl.photos[file.path] != nil, let row = Self.assetKey(file.path).flatMap({ byAsset[$0] }),
+                          !seen.contains(row.path), !movedFrom.contains(row.path) {
+                    // Another file of an asset the index has: the asset's row, read again from its new file.
+                    id = row.id
+                    try store.move(row.id, to: file.path)
+                    try store.requeue(row.id, as: file)
+                    movedFrom.insert(row.path)
+                    summary.changed += 1
+                    summary.queued.append(row.id)
                 } else if let row = byInode["\(file.device):\(file.inode)"], !seen.contains(row.path),
                           !movedFrom.contains(row.path), row.size == file.size, abs(row.mtime - file.mtime) < 0.001 {
                     id = row.id
@@ -143,6 +157,12 @@ public final class Indexer {
             try store.deleteUnlinkedPeopleAndAlbums()
         }
         return summary
+    }
+
+    /// A Photos library's file as its asset: the library, as the path spells it, and the asset's uuid. Nil for any other
+    /// file.
+    private static func assetKey(_ path: String) -> String? {
+        PhotosLibrary.asset(ofFile: path).map { $0.library + "/" + $0.uuid }
     }
 
     /// Writes what Photos says about the library files a sync found (`ids`, by path) where it differs from what's
@@ -187,9 +207,12 @@ public final class Indexer {
     public func run(limit: Int? = nil, only ids: Set<Int64>? = nil, shouldStop: () -> Bool = { false },
                     onEvent: (Event) -> Void = { _ in }) throws -> [String: Int] {
         let queue = try store.pending(limit: limit, only: ids)
+        // A library's video in iCloud is read from what Photos keeps of it (`PhotosLibrary.Reading`).
+        let standIns = queue.contains { $0.kind == .video } ? try store.photosStandIns() : [:]
         var states: [String: Int] = [:]
         var done = 0
-        try process(Self.batches(queue).map { Job(files: $0) }, shouldStop: shouldStop) { _, job, results, seconds in
+        let jobs = Self.batches(queue).map { Job(files: $0, reading: standIns[$0[0].id]) }
+        try process(jobs, shouldStop: shouldStop) { _, job, results, seconds in
             for (offset, file) in job.files.enumerated() {
                 let (state, note) = results[offset]
                 states[state, default: 0] += 1
@@ -305,15 +328,18 @@ public final class Indexer {
         case .audio(_, let duration): measured.add("audioSecond", units: duration, seconds: seconds)
         case .video(_, _, let duration, _): measured.add("videoSecond", units: duration, seconds: seconds)
         case .code(let file): measured.add("codeStretch", units: Double(file.pieces.count), seconds: seconds)
-        case .nothing: break
+        // A video in iCloud's stills are pictures, not seconds of video, which is what the estimate counts of one.
+        case .nothing, .stills: break
         }
     }
 
     /// Files read and embedded together (images 8 at a time, other files one by one), or one step of a long file
     /// (`step`: the pages of a PDF or the chunks of a document to read, from 0). The first step comes with the file.
+    /// `reading`: a library's video in iCloud, read from what Photos keeps of it (`PhotosLibrary.Reading.isStandIn`).
     struct Job: Sendable {
         let files: [FileRecord]
         var step: Range<Int>?
+        var reading: PhotosLibrary.Reading?
     }
 
     /// Images and screenshots go to the model 8 at a time; other files one by one.
@@ -392,12 +418,17 @@ public final class Indexer {
         case audio(pieces: [MediaPiece], duration: Double)
         /// `location`: where it was taken, from its own metadata (none read for a Photos library's video).
         case video(frames: [MediaPiece], sound: [MediaPiece], duration: Double, location: Location?)
+        /// A library's video in iCloud: Photos' stills of it, or its poster (`PhotosLibrary.Reading.isStandIn`), as
+        /// pictures for the model.
+        case stills([String])
         case code(CodeExtractor.File)
     }
 
     struct ReadyImage: Sendable {
         let slot: Int
         let image: ImageExtractor.Prepared
+        /// An animated GIF's frames besides its first (`ImageExtractor.animationFrames`), each at its moment.
+        let frames: [MediaPiece]
         let ocr: String
         /// `ocr` is what Photos read in the picture (`PhotosLibrary.RecognizedText`), not DigUp's OCR.
         var fromPhotos = false
@@ -462,9 +493,11 @@ public final class Indexer {
                     let url = URL(fileURLWithPath: file.path)
                     startReading(file.path)
                     do {
-                        let image = try ImageExtractor.prepare(url, maxPixel: screenshot ? 1536 : 1024,
-                                                               minSide: options.minImageSide, to: folder,
-                                                               png: screenshot)
+                        let maxPixel = screenshot ? 1536 : 1024
+                        let image = try ImageExtractor.prepare(url, maxPixel: maxPixel, minSide: options.minImageSide,
+                                                               to: folder, png: screenshot)
+                        // An animated GIF: a few of its later frames too, each at the moment it's shown.
+                        let frames = ImageExtractor.animationFrames(of: url, maxPixel: maxPixel, to: folder)
                         // A Photos library's picture has the words Photos read in it: a screenshot's are used instead
                         // of reading it again, and a photo gets them too. A screenshot Photos hasn't read is read here.
                         var read: String?
@@ -474,7 +507,8 @@ public final class Indexer {
                             read = reading.text(of: asset.uuid)
                         }
                         let ocr = read ?? (screenshot ? OCR.text(ofImageAt: url) : "")
-                        ready.append(ReadyImage(slot: slot, image: image, ocr: ocr, fromPhotos: read != nil))
+                        ready.append(ReadyImage(slot: slot, image: image, frames: frames, ocr: ocr,
+                                                fromPhotos: read != nil))
                     } catch let error as ExtractError {
                         if case .tooSmall = error {
                             prepared.outcomes[slot] = Outcome(state: "skipped", detail: "\(error)")
@@ -506,6 +540,15 @@ public final class Indexer {
                     try await AudioExtractor.windows(of: url, window: window, hop: hop, to: folder)
                 }
                 prepared.payload = .audio(pieces: pieces, duration: duration)
+            case .video where job.reading?.isStandIn == true:
+                // A library's video in iCloud: the stills of Photos' filmstrip of it, or its poster, each read whatever
+                // its size (it's all this Mac has of the video).
+                let stills = job.reading == .stills ? PhotosLibrary.filmstrip(startingAt: url.path) : [url.path]
+                guard !stills.isEmpty else { throw ExtractError.unreadable("Photos' stills of it are gone") }
+                prepared.payload = .stills(try stills.map {
+                    try ImageExtractor.prepare(URL(fileURLWithPath: $0), maxPixel: 1024, minSide: 0, to: folder,
+                                               png: false).path
+                })
             case .video:
                 let (interval, window, hop) = (options.frameInterval, options.audioWindow, options.audioHop)
                 let (frames, duration, hasAudio) = try runBlocking {
@@ -568,6 +611,8 @@ public final class Indexer {
                 results[0] = try audio(batch[0], pieces: pieces, duration: duration)
             case .video(let frames, let sound, let duration, let location):
                 results[0] = try video(batch[0], frames: frames, sound: sound, duration: duration, location: location)
+            case .stills(let stills):
+                results[0] = try self.stills(batch[0], stills)
             case .code(let code):
                 results[0] = try self.code(batch[0], code)
             }
@@ -602,15 +647,25 @@ public final class Indexer {
         let worker = try fullWorker()
         let vectors = try worker.embedImages(ready.map(\.image.path),
                                              budget: screenshot ? options.screenshotBudget : options.photoBudget)
+        // An animated GIF's later frames are frames, as a video's are: each its own vector, at its moment.
+        let frames = ready.flatMap(\.frames)
+        var frameVectors = frames.isEmpty ? []
+            : try worker.embedImages(frames.map(\.path), budget: options.frameBudget)[...]
         try store.db.transaction {
             for (position, item) in ready.enumerated() {
                 let file = batch[item.slot]
+                let itsFrames = zip(item.frames, frameVectors.prefix(item.frames.count))
+                frameVectors = frameVectors.dropFirst(item.frames.count)
                 guard let vector = vectors[position].vector else {
                     try store.finish(file.id, state: "failed", detail: vectors[position].error)
                     results[item.slot] = ("failed", vectors[position].error)
                     continue
                 }
                 try store.addSegment(file: file.id, kind: .image, modality: .image, vector: vector)
+                for (frame, embedding) in itsFrames {
+                    try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
+                                         locEnd: frame.end, vector: embedding.vector)
+                }
                 // The words on screen, or the ones Photos read in a picture, are for keyword search: codes, names and
                 // errors typed exactly. Meaning comes from the picture alone; a vector of the words made screenshots
                 // outrank better matches (2026-10-08).
@@ -793,5 +848,19 @@ public final class Indexer {
             if let location { try store.setLocation(location, of: file.id) }
         }
         return ("done", "\(frames.count) frames, \(sound.count) sound windows, \(Int(duration)) s")
+    }
+
+    /// A library's video in iCloud, from what Photos keeps of it (`PhotosLibrary.Reading.isStandIn`): each still a frame
+    /// with its own vector and no time, which the stills don't carry (a guessed one would be a made-up fact). Its place
+    /// is Photos' (the sync's).
+    private func stills(_ file: FileRecord, _ stills: [String]) throws -> (String, String?) {
+        let vectors = try fullWorker().embedImages(stills, budget: options.frameBudget)
+        try store.db.transaction {
+            for embedding in vectors {
+                try store.addSegment(file: file.id, kind: .frame, modality: .image, vector: embedding.vector)
+            }
+            try store.finish(file.id, state: "done", info: ["frames": "\(stills.count)"])
+        }
+        return ("done", "\(stills.count) of Photos' stills (the video is in iCloud)")
     }
 }

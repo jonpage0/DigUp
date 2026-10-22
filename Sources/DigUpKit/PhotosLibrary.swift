@@ -2,25 +2,30 @@ import Foundation
 
 /// An Apple Photos library (a `.photoslibrary` package): a folder DigUp reads through the library's own catalog instead
 /// of a walk. The catalog says which pictures and videos are the library's (not those in the trash, a burst's shots
-/// nobody picked, or what's hidden), which file shows each one as Photos does (the edited version, else the original),
-/// and what Photos knows about it that no picture shows: who is in it, where it was taken, its title, caption, keywords
-/// and albums, and the labels Photos' own analysis gave it. osxphotos (https://github.com/RhetTbull/osxphotos) reads the
-/// catalog, run as a program of its own (`osxphotosReader`), so it has to be installed (`uv tool install osxphotos`);
-/// without it a library is skipped like any other bundle (`IndexOptions.photos`).
+/// nobody picked, or what's hidden, unless `IndexOptions.includeHiddenPhotos`), which file shows each one as Photos does
+/// (the edited version, else the original), and what Photos knows about it that no picture shows: who is in it, where it
+/// was taken, its title, caption, keywords and albums, the labels Photos' own analysis gave it, how it came into the
+/// library and the device that took it. osxphotos (https://github.com/RhetTbull/osxphotos) reads the catalog, run as a
+/// program of its own (`osxphotosReader`), so it has to be installed (`uv tool install osxphotos`); without it a library
+/// is skipped like any other bundle (`IndexOptions.photos`).
 ///
 /// To the rest of DigUp a library is a folder like any other: chosen on its own or inside a chosen folder (Pictures),
 /// skipped like a folder, its files under its path in the index. What differs:
 /// - every file read from a library is named after its asset's uuid: an original (originals/F/<uuid>.heic), an edited
-///   version (resources/renders/F/<uuid>_1_201_a.heic) or a preview (resources/derivatives/F/<uuid>_1_105_c.jpeg).
-///   That's how a result finds its way back to Photos (`asset(ofFile:)`), and the crawl keeps only files named so.
+///   version (resources/renders/F/<uuid>_1_201_a.heic), a preview (resources/derivatives/F/<uuid>_1_105_c.jpeg) or a
+///   video's filmstrip still (resources/derivatives/cvt/F/<uuid>/<uuid>_cvt_t0000.jpeg). That's how a result finds its
+///   way back to Photos (`asset(ofFile:)`), and the crawl keeps only files named so. It's also how an asset stays one
+///   row of the index while its file changes (downloaded, edited, back to Photos' stills): `Indexer.sync`.
 /// - what Photos knows goes to keyword search in a segment of its own (`SegmentKind.photosInfo`), and what can be
-///   filtered on (who is in it, its albums, favorites, where it was taken) to tables of its own
-///   (`IndexStore.PhotosFacts`). The crawl keeps both up to date without reading the picture again.
+///   filtered on (who is in it, its albums, favorites, where it was taken, how it came in, the device that took it) to
+///   tables of its own (`IndexStore.PhotosFacts`). The crawl keeps both up to date without reading the picture again.
 /// - the words in a picture are the ones Photos read in it (`RecognizedText`): a screenshot isn't read again, and a
 ///   photo is found by the words in it too (a sign, a label, a saved post).
-/// - a photo whose original is only in iCloud ("Optimize Mac Storage") is read from Photos' own preview: 1,024 pixels on
-///   its long side, as many as `Indexer` gives the model for a photo, and an iPhone screenshot's 602 × 1304
-///   (measured 2026-10-21). A video only in iCloud has no stand-in here and is left out. DigUp never downloads anything.
+/// - an asset whose original is only in iCloud ("Optimize Mac Storage") is read from what Photos keeps of it here, and
+///   the listing says which (`Reading`): a photo from Photos' own preview, 1,024 pixels on its long side, as many as
+///   `Indexer` gives the model for a photo, and an iPhone screenshot's 602 × 1304 (measured 2026-10-21); a video from
+///   the stills of Photos' filmstrip of it, else one poster still. A video with neither is left out. DigUp never
+///   downloads anything.
 /// - a library that can't be read (osxphotos failed, or macOS didn't allow it) keeps what's indexed from it
 ///   (`CrawlReport.unlisted`), as a drive that's unplugged does.
 ///
@@ -68,12 +73,82 @@ public enum PhotosLibrary {
 
     // MARK: Listing
 
+    /// What DigUp read of an asset (`Asset.reading`, kept as `photos_assets.reading`). The listing says which file it
+    /// chose, rather than DigUp guessing later from how a path is spelled: Photos' folder layout is private, and can
+    /// change with a macOS release.
+    public enum Reading: String, Codable, Sendable, CaseIterable {
+        /// Its original, on this Mac.
+        case original
+        /// Photos' render of an edit.
+        case edited
+        /// A photo whose original is only in iCloud: Photos' largest still preview of it.
+        case preview
+        /// A video whose original is only in iCloud: the stills of Photos' filmstrip of it (`filmstrip(startingAt:)`),
+        /// each read as a frame with no time. The asset's file is the first.
+        case stills
+        /// A video only in iCloud that has no filmstrip: one still of it, its poster, else Photos' small thumbnail.
+        case poster
+
+        /// A video in iCloud read from what Photos keeps of it: pictures, not a video (`Indexer`).
+        public var isStandIn: Bool { self == .stills || self == .poster }
+    }
+
+    /// How an asset came into the library (`Asset.origin`, kept as `photos_assets.origin`), from what Photos' catalog
+    /// records: whether it's a screenshot, the app that saved it (since about iOS 13: `Asset.originApp`) and a number
+    /// (ZADDITIONALASSETATTRIBUTES.ZIMPORTEDBY: `Asset.importedBy`).
+    public enum Origin: String, Sendable, CaseIterable {
+        /// Shot with a device's camera into this library.
+        case camera
+        /// Photos says it's a screenshot.
+        case screenshot
+        /// Another app or the system saved it: Messages, AirDrop, Safari, any other app.
+        case saved
+        /// Imported through Photos, from a Mac's folder or a camera's card.
+        case imported
+        /// Nothing recorded (older items).
+        case unknown
+
+        /// The apps whose saving a picture means a device's camera took it: the Camera app, and Messages' camera.
+        static let cameraApps: Set<String> = ["com.apple.camera", "com.apple.camera.CameraMessagesApp"]
+        /// Photos itself: an import.
+        static let photosApp = "com.apple.Photos"
+        /// ZIMPORTEDBY's numbers, which Apple doesn't document: their meaning is inferred from a real library (56,302
+        /// items, read 2026-10-21), by the lens each item's EXIF names and the apps Photos recorded beside the
+        /// number. 1 is the back camera (17,180 of its 17,946 items name a back-camera lens, 1 a front one), 2 the front
+        /// one (3,112 of 3,138 name a front-camera lens). 5 comes with Photos as the app (3,636 of 4,040): an import. 3
+        /// and 6 come with other apps (Reddit and X clients, ChatGPT, Instagram…); 7 with no app (164 items); 8 with
+        /// the system's (screenshots, Messages' camera, AirDrop, Messages, Safari); 9 with Messages, Safari and Files;
+        /// 12 with Messages. 0 is nothing recorded (4,628 items).
+        static let cameraNumbers: Set<Int> = [1, 2]
+        static let importedNumber = 5
+        static let savedNumbers: Set<Int> = [3, 6, 7, 8, 9, 12]
+
+        /// The origin Photos' records mean, in this order: a screenshot is one whoever saved it; then the camera, by
+        /// its number or its app; an import, by Photos as the app or its number; saved, by any other app or a number
+        /// that means another app or the system; else unknown.
+        public init(screenshot: Bool, importedBy number: Int?, app: String?) {
+            if screenshot {
+                self = .screenshot
+            } else if number.map(Self.cameraNumbers.contains) == true || app.map(Self.cameraApps.contains) == true {
+                self = .camera
+            } else if app == Self.photosApp || number == Self.importedNumber {
+                self = .imported
+            } else if app != nil || number.map(Self.savedNumbers.contains) == true {
+                self = .saved
+            } else {
+                self = .unknown
+            }
+        }
+    }
+
     /// A picture or video of the library, as DigUp reads it.
     public struct Asset: Codable, Sendable, Equatable {
         public let uuid: String
-        /// The file read (a real path, inside the library): the edited version, else the original, else (a photo whose
-        /// original is only in iCloud) Photos' largest still preview.
+        /// The file read (a real path, inside the library), as `reading` says: the edited version, else the original,
+        /// else (its original only in iCloud) a photo's largest still preview, or a video's first filmstrip still or
+        /// its poster.
         public let path: String
+        public let reading: Reading
         public let movie: Bool
         /// Photos says it's a screenshot: one has its words searched too, as screenshots elsewhere do. They're the ones
         /// Photos read in it (`RecognizedText`), else DigUp's own reading (`OCR`).
@@ -98,17 +173,29 @@ public enum PhotosLibrary {
         /// The uuids of the people and pets named in it (`Listing.people`), and of its albums (`Listing.albums`).
         public let people: [String]
         public let albums: [String]
+        /// How it came into the library, as Photos' catalog records it (`origin` reads them): its ZIMPORTEDBY number
+        /// (nil where the catalog keeps none), and the app that saved it, by its bundle id (nil when Photos recorded
+        /// none).
+        public let importedBy: Int?
+        public let originApp: String?
+        /// The device that took it, from the EXIF Photos kept ("iPhone 15 Pro"); nil when there's none.
+        public let camera: String?
 
         public init(uuid: String, path: String, movie: Bool, screenshot: Bool, title: String, date: Double,
                     words: [String], favorite: Bool = false, latitude: Double? = nil, longitude: Double? = nil,
-                    place: String? = nil, people: [String] = [], albums: [String] = []) {
-            (self.uuid, self.path, self.movie, self.screenshot) = (uuid, path, movie, screenshot)
+                    place: String? = nil, people: [String] = [], albums: [String] = [], reading: Reading = .original,
+                    importedBy: Int? = nil, originApp: String? = nil, camera: String? = nil) {
+            (self.uuid, self.path, self.reading, self.movie, self.screenshot) = (uuid, path, reading, movie, screenshot)
             (self.title, self.date, self.words) = (title, date, words)
             (self.favorite, self.latitude, self.longitude, self.place) = (favorite, latitude, longitude, place)
             (self.people, self.albums) = (people, albums)
+            (self.importedBy, self.originApp, self.camera) = (importedBy, originApp, camera)
         }
 
+        /// A video stays one, whichever file of it is read (`reading`).
         public var kind: FileKind { movie ? .video : screenshot ? .screenshot : .image }
+
+        public var origin: Origin { Origin(screenshot: screenshot, importedBy: importedBy, app: originApp) }
 
         /// Photos' words as keyword search keeps them, one a line.
         public var text: String { words.joined(separator: "\n") }
@@ -119,6 +206,21 @@ public enum PhotosLibrary {
             return Location(latitude: latitude, longitude: longitude, source: .photos, place: place)
         }
     }
+
+    /// The stills of Photos' filmstrip of a video, in order, from the first (`Reading.stills`): the files of its folder
+    /// (resources/derivatives/cvt/F/<uuid>/) named <uuid>_cvt_tNNNN.jpeg, NNNN from 0000 up. Photos keeps them for a
+    /// video whose original is only in iCloud: 6.4 a video on average in a real library, 360 × 640, with no times.
+    static func filmstrip(startingAt first: String) -> [String] {
+        let folder = (first as NSString).deletingLastPathComponent
+        guard let uuid = asset(ofFile: first)?.uuid,
+              let names = try? FileManager.default.contentsOfDirectory(atPath: folder) else { return [] }
+        let prefix = uuid + filmstripMark
+        return names.filter { $0.hasPrefix(prefix) && $0.lowercased().hasSuffix(".jpeg") }.sorted()
+            .map { (folder as NSString).appendingPathComponent($0) }
+    }
+
+    /// What follows the uuid in a filmstrip still's name, before its number (`filmstrip(startingAt:)`).
+    static let filmstripMark = "_cvt_t"
 
     /// A person or pet someone named in Photos. Faces nobody named aren't listed: there's nothing to find them by.
     public struct Person: Codable, Sendable, Equatable {
@@ -161,11 +263,12 @@ public enum PhotosLibrary {
         }
     }
 
-    /// How a library is read: its path in, its listing out. It throws when the library can't be read at all.
+    /// How a library is read: its path in, and whether what's hidden in Photos is listed too
+    /// (`IndexOptions.includeHiddenPhotos`); its listing out. It throws when the library can't be read at all.
     public struct Reader: Sendable {
-        public let list: @Sendable (_ library: String) throws -> Listing
+        public let list: @Sendable (_ library: String, _ hidden: Bool) throws -> Listing
 
-        public init(list: @escaping @Sendable (_ library: String) throws -> Listing) {
+        public init(list: @escaping @Sendable (_ library: String, _ hidden: Bool) throws -> Listing) {
             self.list = list
         }
     }
@@ -299,22 +402,24 @@ public enum PhotosLibrary {
     public static func osxphotosReader(keepingListingsIn folder: URL?) -> Reader? {
         guard let program = osxphotos else { return nil }
         let listings = folder?.appendingPathComponent("photos", isDirectory: true)
-        return Reader { library in try listing(of: library, program: program, keptIn: listings) }
+        return Reader { library, hidden in try listing(of: library, hidden: hidden, program: program, keptIn: listings) }
     }
 
-    /// The library's listing: the one kept from before while it's current (`Kept.isCurrent`), else a new one.
-    static func listing(of library: String, program: String, keptIn folder: URL?, now: Date = Date()) throws
-        -> Listing {
+    /// The library's listing, with what's hidden in Photos or without (`hidden`): the one kept from before while it's
+    /// current (`Kept.isCurrent`), else a new one.
+    static func listing(of library: String, hidden: Bool, program: String, keptIn folder: URL?, now: Date = Date())
+        throws -> Listing {
         // Looked at before osxphotos reads it, so that a change while it reads is caught by the next crawl.
         let state = State(of: library)
         let file = folder?.appendingPathComponent(keptName(of: library))
         if let file, let data = try? Data(contentsOf: file), let kept = try? JSONDecoder().decode(Kept.self, from: data),
-           kept.isCurrent(library: library, state: state, now: now.timeIntervalSince1970) {
+           kept.isCurrent(library: library, hidden: hidden, state: state, now: now.timeIntervalSince1970) {
             return kept.listing
         }
-        let listing = try run(program, library: library)
+        let listing = try run(program, library: library, hidden: hidden)
         if let file, let folder {
-            let kept = Kept(library: library, listedAt: now.timeIntervalSince1970, state: state, listing: listing)
+            let kept = Kept(library: library, hidden: hidden, listedAt: now.timeIntervalSince1970, state: state,
+                            listing: listing)
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try? JSONEncoder().encode(kept).write(to: file, options: .atomic)
         }
@@ -322,9 +427,9 @@ public enum PhotosLibrary {
     }
 
     /// What a kept listing is checked against: the folders where pictures land (a new, edited or downloaded picture
-    /// changes one of them, one level down) and the databases osxphotos reads: the catalog, and the search database
-    /// that holds Photos' labels and places (search/psi.sqlite in libraries from macOS 13 to 26, search/leo.sqlite in
-    /// macOS 27's, as seen 2026-10-21).
+    /// changes one of them, one level down; a video's new filmstrip changes one of cvt's) and the databases osxphotos
+    /// reads: the catalog, and the search database that holds Photos' labels and places (search/psi.sqlite in
+    /// libraries from macOS 13 to 26, search/leo.sqlite in macOS 27's, as seen 2026-10-21).
     struct State: Codable, Equatable {
         var pictures: String
         var database: String
@@ -336,7 +441,7 @@ public enum PhotosLibrary {
 
         init(of library: String) {
             var pictures: [String] = []
-            for folder in PhotosLibrary.pictureFolders + ["resources/derivatives/masters"] {
+            for folder in PhotosLibrary.pictureFolders + ["resources/derivatives/masters", "resources/derivatives/cvt"] {
                 let path = library + "/" + folder
                 pictures.append("\(folder) \(Self.stamp(path))")
                 for name in ((try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []).sorted()
@@ -362,16 +467,19 @@ public enum PhotosLibrary {
         /// The script that listed it (`script`, hashed): a listing made another way is made again.
         var reader = PhotosLibrary.hash(PhotosLibrary.script)
         var library: String
+        /// Whether what's hidden in Photos is in it (`IndexOptions.includeHiddenPhotos`): a listing made the other way
+        /// is made again.
+        var hidden: Bool
         var listedAt: Double
         var state: State
         var listing: Listing
 
-        /// Made by this script, the pictures are as they were, and so are the databases, or the listing is younger
-        /// than `listingLifetime`.
-        func isCurrent(library: String, state: State, now: Double) -> Bool {
+        /// Made by this script, with what's hidden or without as asked, the pictures are as they were, and so are the
+        /// databases, or the listing is younger than `listingLifetime`.
+        func isCurrent(library: String, hidden: Bool, state: State, now: Double) -> Bool {
             let age = now - listedAt
             return version == Self.currentVersion && reader == PhotosLibrary.hash(PhotosLibrary.script)
-                && self.library == library && self.state.pictures == state.pictures
+                && self.library == library && self.hidden == hidden && self.state.pictures == state.pictures
                 && (self.state.database == state.database || (0..<PhotosLibrary.listingLifetime).contains(age))
         }
     }
@@ -388,9 +496,10 @@ public enum PhotosLibrary {
         return String(format: "%016llx", hash)
     }
 
-    /// Runs osxphotos on the library (`script`), for up to `timeout` seconds: macOS may first ask whether DigUp can see
-    /// the photos (the read waits for the answer), and a big library takes osxphotos a while by itself.
-    static func run(_ program: String, library: String, timeout: Double = 1800) throws -> Listing {
+    /// Runs osxphotos on the library (`script`), with what's hidden in Photos or without, for up to `timeout` seconds:
+    /// macOS may first ask whether DigUp can see the photos (the read waits for the answer), and a big library takes
+    /// osxphotos a while by itself.
+    static func run(_ program: String, library: String, hidden: Bool, timeout: Double = 1800) throws -> Listing {
         let fm = FileManager.default
         let work = fm.temporaryDirectory.appendingPathComponent("DigUp-photos-\(UUID().uuidString)")
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
@@ -402,7 +511,7 @@ public enum PhotosLibrary {
         fm.createFile(atPath: errors.path, contents: nil)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: program)
-        process.arguments = ["run", code.path, library, output.path]
+        process.arguments = ["run", code.path, library, output.path, hidden ? "include-hidden" : "skip-hidden"]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = try FileHandle(forWritingTo: errors)
@@ -424,10 +533,11 @@ public enum PhotosLibrary {
         return try JSONDecoder().decode(Listing.self, from: data)
     }
 
-    /// What osxphotos runs (`osxphotos run list.py <library> <output>`): the listing, as JSON, written to <output>.
+    /// What osxphotos runs (`osxphotos run list.py <library> <output> include-hidden|skip-hidden`): the listing, as
+    /// JSON, written to <output>.
     static let script = #"""
         # DigUp's reader of a Photos library (Sources/DigUpKit/PhotosLibrary.swift):
-        #   osxphotos run list.py <library> <output.json>
+        #   osxphotos run list.py <library> <output.json> include-hidden|skip-hidden
         import json
         import os
         import sys
@@ -489,30 +599,80 @@ public enum PhotosLibrary {
             return (plain(quietly(lambda: info.name)) or None) if info else None
 
 
-        def picture(photo):
-            """The file that shows it as Photos does, or None when there's none on this Mac."""
-            for path in (photo.path_edited, photo.path):
-                if path:
-                    return path
+        def filmstrip(photo, root):
+            """The stills of Photos' filmstrip of a video, in order: resources/derivatives/cvt/<the uuid's first
+            character>/<uuid>/<uuid>_cvt_tNNNN.jpeg, NNNN from 0000 up. Photos keeps them for a video whose original is
+            only in iCloud; osxphotos' path_derivatives doesn't list them."""
+            folder = os.path.join(root, "resources", "derivatives", "cvt", photo.uuid[0], photo.uuid)
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                return []
+            mark = photo.uuid + "_cvt_t"
+            return sorted(os.path.join(folder, name) for name in names
+                          if name.startswith(mark) and name.lower().endswith(".jpeg"))
+
+
+        def picture(photo, root):
+            """The file that shows it as Photos does, and what it is of the asset (PhotosLibrary.Reading), or None, None
+            when there's none on this Mac."""
+            if photo.path_edited:
+                return photo.path_edited, "edited"
+            if photo.path:
+                return photo.path, "original"
             if photo.ismovie:
-                return None
-            for path in quietly(lambda: photo.path_derivatives):  # largest first
+                stills = filmstrip(photo, root)
+                if stills:
+                    return stills[0], "stills"
+            # Largest first, and last Photos' small thumbnail (resources/derivatives/masters/F/<uuid>_4_5005_c.jpeg).
+            for path in quietly(lambda: photo.path_derivatives):
                 if path.lower().endswith(STILLS):
-                    return path
-            return None
+                    return path, "poster" if photo.ismovie else "preview"
+            return None, None
+
+
+        def imported_by(db):
+            """How each asset came into the library, by uuid: the number Photos' catalog keeps for it
+            (ZADDITIONALASSETATTRIBUTES.ZIMPORTEDBY, PhotosLibrary.Origin), read through osxphotos' own connection to the
+            catalog. None for all of them where the catalog doesn't keep it (an older Photos)."""
+            connection, cursor = db.get_db_connection()
+            try:
+                for assets in ("ZASSET", "ZGENERICASSET"):  # the table's name from macOS 11 on, and in macOS 10.15
+                    try:
+                        return dict(cursor.execute(
+                            f"SELECT a.ZUUID, x.ZIMPORTEDBY FROM {assets} a "
+                            "JOIN ZADDITIONALASSETATTRIBUTES x ON x.ZASSET = a.Z_PK").fetchall())
+                    except Exception:
+                        continue
+                return {}
+            finally:
+                connection.close()
+
+
+        def origin_app(photo):
+            """The app that put it in the library, as Photos recorded it (its bundle id), or None."""
+            app = quietly(lambda: photo.imported_by)  # (display name, bundle id)
+            return (app[1] or None) if app else None
+
+
+        def camera(photo):
+            """The device that took it, from the EXIF Photos kept ("iPhone 15 Pro"), or None."""
+            info = quietly(lambda: photo.exif_info)
+            return (plain(quietly(lambda: info.camera_model)) or None) if info else None
 
 
         def main():
-            library, output = sys.argv[1], sys.argv[2]
+            library, output, hidden = sys.argv[1], sys.argv[2], sys.argv[3] == "include-hidden"
             db = osxphotos.PhotosDB(dbfile=library)
             root = os.path.realpath(library) + os.sep
+            numbers = imported_by(db)
             assets, skipped = [], {}
 
             def skip(reason):
                 skipped[reason] = skipped.get(reason, 0) + 1
 
             for photo in db.photos():  # not those in the trash, and of a burst only the shots picked
-                if photo.hidden:
+                if photo.hidden and not hidden:
                     skip("hidden in Photos")
                     continue
                 if photo.shared:
@@ -521,7 +681,7 @@ public enum PhotosLibrary {
                 if quietly(lambda: photo.syndicated) and not quietly(lambda: photo.saved_to_library):
                     skip("shared with you, not saved")
                     continue
-                path = None if photo.isreference else picture(photo)
+                path, reading = (None, None) if photo.isreference else picture(photo, root)
                 if photo.isreference or (path and not os.path.realpath(path).startswith(root)):
                     skip("kept outside the library")
                     continue
@@ -531,6 +691,7 @@ public enum PhotosLibrary {
                 assets.append({
                     "uuid": photo.uuid,
                     "path": os.path.realpath(path),
+                    "reading": reading,
                     "movie": bool(photo.ismovie),
                     "screenshot": bool(quietly(lambda: photo.screenshot)),
                     "title": photo.title or photo.original_filename or "",
@@ -544,6 +705,9 @@ public enum PhotosLibrary {
                     "people": sorted({p.uuid for p in quietly(lambda: photo.person_info) if named(p.name)}),
                     # A shared album too, but a shared album's pictures are left out above.
                     "albums": sorted({a.uuid for a in quietly(lambda: photo.album_info)}),
+                    "importedBy": numbers.get(photo.uuid),
+                    "originApp": origin_app(photo),
+                    "camera": camera(photo),
                 })
             people = [{"uuid": p.uuid, "name": named(p.name)}
                       for p in quietly(lambda: db.person_info) if named(p.name)]
