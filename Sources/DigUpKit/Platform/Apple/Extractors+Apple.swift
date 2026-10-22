@@ -64,6 +64,9 @@ extension ImageExtractor {
         return Location(latitude: south ? -latitude : latitude, longitude: west ? -longitude : longitude, source: .exif)
     }
 
+    /// An animated GIF's later frames are read here (ImageIO).
+    static let readsAnimations = true
+
     /// An animated GIF's frames read besides its first (`framesRead(ofAnimation:)`), each as a JPEG of `maxPixel` on its
     /// long side, from the moment it's shown to the moment the next one is: its start is the delays of the frames
     /// before it, as Apple's players and browsers play them (ImageIO's DelayTime, where a delay of 0 or 0.01 s is 0.1

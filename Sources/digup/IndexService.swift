@@ -84,7 +84,7 @@ final class IndexService: @unchecked Sendable {
                     emit(["event": "stopped", "path": path, "why": stopped.why, "code": part.code])
                 }
             }
-            let again = try main.store.readAgainOnce()   // what older indexes couldn't read: scans' words, SVGs
+            let again = try main.store.readAgainOnce()   // what older indexes couldn't read: scans' words, SVGs, GIFs
             if again > 0 { emit(["event": "rescan", "files": again]) }
             let located = try main.store.locateOnce()    // where the pictures and videos it read before were taken
             if located > 0 { emit(["event": "located", "files": located]) }
