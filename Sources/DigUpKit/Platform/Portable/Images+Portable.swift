@@ -50,6 +50,8 @@ extension ImageExtractor {
 
     /// An animated GIF's later frames aren't read here yet (`RGBImage.load` decodes the first): off the Mac a GIF is
     /// its first frame.
+    static let readsAnimations = false
+
     static func animationFrames(of url: URL, maxPixel: Int, to folder: URL) -> [MediaPiece] { [] }
 
     /// The whole picture, through ffmpeg as 8-bit RGB (PPM down a pipe), turned the way the file says (irot/imir in

@@ -74,6 +74,29 @@ import WinSDK
         #expect(try store.pending(limit: nil).map(\.path) == ["/a/chart.svg"])
         #expect(try store.readAgainOnce() == 0)
     }
+
+    @Test func gifsReadBeforeTheirFramesWereAreReadOnceMore() throws {
+        // GIFs read by an older DigUp, which read only their first frame: read again for their later frames, once.
+        let store = try IndexStore(directory: folder)
+        let dance = try store.insert(file("/a/dance.GIF", inode: 1))
+        try store.addSegment(file: dance, kind: .image, modality: .image, vector: FakeEmbedder.vector(for: "dance"))
+        try store.finish(dance, state: "done")
+        let framed = try store.insert(file("/a/framed.gif", inode: 2))   // read since: it has its frames
+        try store.addSegment(file: framed, kind: .frame, modality: .image, loc: 0.1,
+                             vector: FakeEmbedder.vector(for: "framed"))
+        try store.finish(framed, state: "done")
+        try store.finish(try store.insert(file("/a/icon.gif", inode: 3)), state: "skipped", detail: "small image 64×64")
+        try store.finish(try store.insert(file("/a/photo.png", inode: 4)), state: "done")
+        #expect(try store.readAgainOnce() == 1)
+        #expect(try store.pending(limit: nil).map(\.path) == ["/a/dance.GIF"])
+        var images = 0
+        try store.db.query("SELECT COUNT(*) FROM segments WHERE file = ? AND kind = 'image'", [.int(dance)]) {
+            images = Int($0.int(0))
+        }
+        #expect(images == 0)   // what was read of it goes until it's read again
+        try store.finish(dance, state: "done")
+        #expect(try store.readAgainOnce() == 0)
+    }
     #endif
 
     @Test func theForksTablesAreAddedOnceAndTheSchemaStaysUpstreams() throws {

@@ -91,9 +91,10 @@ public final class Indexer {
     /// (no re-embedding), and files that are gone or newly excluded are removed. A Photos library's asset stays one row
     /// while its file changes (downloaded, edited, re-rendered, back to Photos' stills): a file of a library at a new
     /// path is the row of the same library and asset uuid, if there's one, re-pathed and read again, keeping its id and
-    /// with it its people, albums, favorite and place. What Photos says about a Photos library's files (its words,
-    /// favorites, places, people and albums) is brought up to date too, without reading them again, and a person or
-    /// album no file is linked to any more is deleted.
+    /// with it its people, albums, favorite and place. That row is the asset's before any file is matched by its inode,
+    /// and a move by inode never crosses a library's edge (`staysOnItsSide`). What Photos says about a Photos library's
+    /// files (its words, favorites, places, people and albums) is brought up to date too, without reading them again,
+    /// and a person or album no file is linked to any more is deleted.
     public func sync(_ roots: [URL]) throws -> SyncSummary {
         let crawl = Crawler.crawl(roots, options: options)
         let existing = try store.files(under: roots.map { $0.standardizedFileURL.path })
@@ -106,6 +107,15 @@ public final class Indexer {
             if let key = Self.assetKey(file.path) { byAsset[key] = file }
         }
         let seen = Set(crawl.candidates.map(\.path))
+        // A library's file at a new path takes its asset's row first, whatever order the crawl found the files in: a
+        // file elsewhere that shares the old file's inode (a hard link) must not take it by inode before it.
+        var assetRows: [String: FileRecord] = [:]   // candidate path → its asset's row
+        var reserved = Set<Int64>()
+        for file in crawl.candidates where byPath[file.path] == nil && crawl.photos[file.path] != nil {
+            guard let row = Self.assetKey(file.path).flatMap({ byAsset[$0] }), !seen.contains(row.path),
+                  reserved.insert(row.id).inserted else { continue }
+            assetRows[file.path] = row
+        }
         var movedFrom = Set<String>()
         var ids: [String: Int64] = [:]   // the Photos library files' rows, for their facts
         var summary = SyncSummary(crawl: crawl)
@@ -121,8 +131,7 @@ public final class Indexer {
                     } else {
                         summary.unchanged += 1
                     }
-                } else if crawl.photos[file.path] != nil, let row = Self.assetKey(file.path).flatMap({ byAsset[$0] }),
-                          !seen.contains(row.path), !movedFrom.contains(row.path) {
+                } else if let row = assetRows[file.path] {
                     // Another file of an asset the index has: the asset's row, read again from its new file.
                     id = row.id
                     try store.move(row.id, to: file.path)
@@ -130,8 +139,9 @@ public final class Indexer {
                     movedFrom.insert(row.path)
                     summary.changed += 1
                     summary.queued.append(row.id)
-                } else if let row = byInode["\(file.device):\(file.inode)"], !seen.contains(row.path),
-                          !movedFrom.contains(row.path), row.size == file.size, abs(row.mtime - file.mtime) < 0.001 {
+                } else if let row = byInode["\(file.device):\(file.inode)"], !reserved.contains(row.id),
+                          !seen.contains(row.path), !movedFrom.contains(row.path), row.size == file.size,
+                          abs(row.mtime - file.mtime) < 0.001, Self.staysOnItsSide(row.path, file.path) {
                     id = row.id
                     try store.move(row.id, to: file.path)
                     movedFrom.insert(row.path)
@@ -163,6 +173,14 @@ public final class Indexer {
     /// file.
     private static func assetKey(_ path: String) -> String? {
         PhotosLibrary.asset(ofFile: path).map { $0.library + "/" + $0.uuid }
+    }
+
+    /// Whether a file found at `new` with the inode of the row at `old` is that row moved: only on one side of a Photos
+    /// library's edge. A library's file stands for its asset, with Photos' facts and place, and any other file only for
+    /// itself, with its own place: one moved, or hard-linked, across the edge is a new file to read, and the old row
+    /// goes with what it had (a library renamed or moved keeps its files' rows: both paths are in a library).
+    private static func staysOnItsSide(_ old: String, _ new: String) -> Bool {
+        (PhotosLibrary.library(containing: old) == nil) == (PhotosLibrary.library(containing: new) == nil)
     }
 
     /// Writes what Photos says about the library files a sync found (`ids`, by path) where it differs from what's

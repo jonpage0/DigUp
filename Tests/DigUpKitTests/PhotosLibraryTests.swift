@@ -364,6 +364,111 @@ import Testing
         try stillOneRow(at: preview.path, reading: .preview)
     }
 
+    /// Photos' facts about a file, as the index keeps them: its `photos_assets` row (reading), its locations' sources
+    /// and its `photosInfo` segments.
+    func photosFacts(of file: Int64, in store: IndexStore) throws -> (readings: [String], located: [String], info: Int) {
+        var facts = (readings: [String](), located: [String](), info: 0)
+        try store.db.query("SELECT reading FROM photos_assets WHERE file = ?", [.int(file)]) {
+            facts.readings.append($0.text(0) ?? "")
+        }
+        try store.db.query("SELECT source FROM locations WHERE file = ?", [.int(file)]) {
+            facts.located.append($0.text(0) ?? "")
+        }
+        try store.db.query("SELECT COUNT(*) FROM segments WHERE file = ? AND kind = ?",
+                           [.int(file), .text(SegmentKind.photosInfo.rawValue)]) { facts.info = Int($0.int(0)) }
+        return facts
+    }
+
+    /// A library's preview read first, then its original downloaded, while a file elsewhere is a hard link to the old
+    /// preview (the same inode, size and date): a picture in an ordinary folder, or the same preview in a copy of the
+    /// library made with hard links. The asset's row stays the asset's whichever folder the crawl walks first, and the
+    /// file elsewhere is a new one, with only what its own library says about it.
+    @Test(arguments: [true, false], [false, true])
+    func anAssetKeepsItsRowWhenAFileElsewhereSharesItsOldFile(libraryFirst: Bool, inACopy: Bool) throws {
+        let (library, listed) = try library(1, in: folder)
+        let uuid = listed[0].uuid
+        let derivatives = "resources/derivatives/\(uuid.prefix(1))", previewName = uuid + "_1_105_c.jpeg"
+        let previews = library.appendingPathComponent(derivatives)
+        try FileManager.default.createDirectory(at: previews, withIntermediateDirectories: true)
+        let preview = previews.appendingPathComponent(previewName)
+        try Data("preview".utf8).write(to: preview)
+        @Sendable func listing(_ path: String, _ reading: PhotosLibrary.Reading) -> PhotosLibrary.Listing {
+            PhotosLibrary.Listing(assets: [
+                PhotosLibrary.Asset(uuid: uuid, path: path, movie: false, screenshot: false, title: "IMG_1",
+                                    date: 1_700_000_000, words: ["Beach"], favorite: true, latitude: 51.5,
+                                    longitude: -0.13, reading: reading),
+            ])
+        }
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        _ = try indexer(store) { _ in listing(preview.path, .preview) }.sync([library])
+        let asset = try #require(try store.files(under: [library.path]).first)
+        let elsewhere = folder.appendingPathComponent(inACopy ? "Copy.photoslibrary" : "elsewhere")
+        let copy = inACopy ? elsewhere.appendingPathComponent(derivatives).appendingPathComponent(previewName)
+            : elsewhere.appendingPathComponent("copy.jpeg")
+        try FileManager.default.createDirectory(at: copy.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.linkItem(at: preview, to: copy)
+
+        let roots = libraryFirst ? [library, elsewhere] : [elsewhere, library]
+        // (The crawl spells a chosen library as it's chosen: /var where the disk says /private/var.)
+        let sync = try indexer(store) { path in
+            (path as NSString).lastPathComponent == library.lastPathComponent ? listing(listed[0].path, .original)
+                : listing(copy.path, .preview)
+        }.sync(roots)
+        #expect(sync.changed == 1 && sync.added == 1 && sync.moved == 0 && sync.removed == 0)
+        let rows = Dictionary(uniqueKeysWithValues: try store.files(under: roots.map(\.path)).map { ($0.path, $0.id) })
+        #expect(rows[listed[0].path] == asset.id)
+        let other = try #require(rows[copy.path])
+        #expect(other != asset.id)
+        let facts = try photosFacts(of: asset.id, in: store)
+        #expect(facts.readings == ["original"] && facts.located == ["photos"] && facts.info == 1)
+        let its = try photosFacts(of: other, in: store)
+        if inACopy {
+            #expect(its.readings == ["preview"] && its.located == ["photos"] && its.info == 1)
+        } else {
+            #expect(its.readings.isEmpty && its.located.isEmpty && its.info == 0)
+        }
+    }
+
+    /// A file whose row moves by its inode stays on its side of a library's edge: a library's file that leaves the
+    /// library (its asset gone from Photos, the file moved out) is a new file outside, and its old row goes with all
+    /// Photos said about it; a file moved into a library is a new file of it, without its own location.
+    @Test func aFileMovedAcrossALibrarysEdgeIsANewFile() throws {
+        let (library, listed) = try library(1, in: folder)
+        let katie = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katie")
+        let elsewhere = folder.appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let roots = [elsewhere, library]
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        let photographed = asset(listed[0], favorite: true, at: (51.5, -0.13), people: [katie])
+        _ = try indexer(store) { _ in PhotosLibrary.Listing(assets: [photographed], people: [katie]) }.sync(roots)
+        let asset = try #require(try store.files(under: [library.path]).first)
+
+        // Out: the asset deleted in Photos, its file moved elsewhere.
+        let out = elsewhere.appendingPathComponent("out.jpeg")
+        try FileManager.default.moveItem(atPath: listed[0].path, toPath: out.path)
+        let left = try indexer(store) { _ in PhotosLibrary.Listing(assets: []) }.sync(roots)
+        #expect(left.moved == 0 && left.added == 1 && left.removed == 1)
+        let outside = try #require(try store.files(under: [elsewhere.path]).first)
+        #expect(outside.id != asset.id && outside.path == out.path)
+        let none = try photosFacts(of: outside.id, in: store)
+        #expect(none.readings.isEmpty && none.located.isEmpty && none.info == 0)
+        #expect(try store.photosPeople().isEmpty)
+
+        // In: a picture read elsewhere, with its own GPS tags, moved into the library as a new asset's original.
+        try store.setLocation(try #require(Location(latitude: 25.79, longitude: -80.13, source: .exif)), of: outside.id)
+        let uuid = UUID().uuidString
+        let inside = library.appendingPathComponent("originals/F/\(uuid).jpeg")
+        try FileManager.default.moveItem(at: out, to: inside)
+        let imported = PhotosLibrary.Asset(uuid: uuid, path: inside.path, movie: false, screenshot: false,
+                                           title: "out.jpeg", date: 1_700_000_000, words: ["out.jpeg"])
+        let came = try indexer(store) { _ in PhotosLibrary.Listing(assets: [imported]) }.sync(roots)
+        #expect(came.moved == 0 && came.added == 1 && came.removed == 1)
+        let row = try #require(try store.files(under: [library.path]).first)
+        #expect(row.id != outside.id && row.path == inside.path)
+        let facts = try photosFacts(of: row.id, in: store)
+        #expect(facts.readings == ["original"] && facts.located.isEmpty && facts.info == 1)
+    }
+
     @Test func anIndexFromBeforeTheReadingAndOriginsGetsThemAtTheNextSync() throws {
         let (library, listed) = try library(2, in: folder)
         let assets = [asset(listed[0], importedBy: 1, app: "com.apple.camera", camera: "iPhone 15 Pro"), listed[1]]

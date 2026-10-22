@@ -397,7 +397,7 @@ func index(_ args: Arguments) throws {
     })
     indexer.embedderSource = embedderSource()
     indexer.costsFolder = store.directory
-    try store.readAgainOnce()   // what older indexes couldn't read: scanned pages' words, SVGs
+    try store.readAgainOnce()   // what older indexes couldn't read: scanned pages' words, SVGs, GIFs' later frames
     try store.locateOnce()      // where the pictures and videos it read before were taken
     try indexer.checkModel()
     let folders = try args.folders()

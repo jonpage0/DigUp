@@ -498,8 +498,10 @@ public final class IndexStore {
 
     /// Files read once more because DigUp reads them better now, each kind once per index (the schema stays as it was,
     /// so an older DigUp still opens the index): PDFs with pages read as pictures, whose words come from OCR now
-    /// (`meta` "scans_ocr"), and pictures that couldn't be read at all, like SVGs, which AppKit draws now
-    /// ("pictures_drawn"). Only where this machine does either. Returns how many files.
+    /// (`meta` "scans_ocr"), pictures that couldn't be read at all, like SVGs, which AppKit draws now
+    /// ("pictures_drawn"), and GIFs read before an animated one's later frames were read too (`animationFrames`), each
+    /// read again unless it has frames already ("gifs_framed"; a GIF that isn't animated is read again once as well, as
+    /// telling them apart would mean reading every one). Only where this machine does each. Returns how many files.
     @discardableResult
     public func readAgainOnce() throws -> Int {
         var files = Set<Int64>(), flags: [String] = []
@@ -511,6 +513,13 @@ public final class IndexStore {
             try db.query("SELECT id FROM files WHERE kind = 'image' AND state = 'skipped' AND detail = ?",
                          [.text(ExtractError.tooSmall(0, 0).description)]) { files.insert($0.int(0)) }
             flags.append("pictures_drawn")
+        }
+        if ImageExtractor.readsAnimations, try meta("gifs_framed") == nil {
+            try db.query("""
+                SELECT id FROM files WHERE kind = 'image' AND state = 'done' AND lower(path) LIKE '%.gif'
+                AND id NOT IN (SELECT file FROM segments WHERE kind = '\(SegmentKind.frame.rawValue)')
+                """) { files.insert($0.int(0)) }
+            flags.append("gifs_framed")
         }
         guard !flags.isEmpty else { return 0 }
         try db.transaction {
