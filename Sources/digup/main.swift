@@ -15,7 +15,7 @@ let usage = """
       digup index <folder>... [--limit N]     sync the index with these folders, embed what's new, then the rest
                                               of long PDFs and documents
       digup search [<words>...] [--kind K,K] [--with NAME]... [--album TITLE]... [--favorites] [--origin O]...
-                   [--camera NAME]... [--within LAT,LON,LAT,LON] [-n 10] [--json]
+                   [--camera NAME]... [--shot-on NAME]... [--within LAT,LON,LAT,LON] [-n 10] [--json]
                                               "code: <words>" searches the code index; with filters and no
                                               words, the newest files they keep
       digup status                            what's in the index
@@ -48,6 +48,8 @@ let usage = """
                            screenshot, saved, imported or unknown (repeatable: any of them)
       --camera NAME        only Photos' pictures and videos taken with this device, as Photos keeps it ("iPhone 15
                            Pro"; repeatable: any of them)
+      --shot-on NAME       only what was shot on this device (repeatable: any of them): what its camera saved to
+                           Photos, what a camera saved with no device named, and older items taken with it
       --within LAT,LON,LAT,LON
                            only files taken inside the box with these two corners (degrees)
       --include-code       also index loose source code and data files as documents (outside code projects)
@@ -85,7 +87,7 @@ struct Arguments {
                                       "--linger", "--shot-tokens", "--code-stretch", "--encoder-idle", "--to",
                                       "--memory-limit", "--time-limit", "--tries", "--when-quiet", "--within"]
     static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude", "--with",
-                                        "--album", "--origin", "--camera"]
+                                        "--album", "--origin", "--camera", "--shot-on"]
 
     init(_ raw: ArraySlice<String>) throws {
         var index = raw.startIndex
@@ -178,12 +180,12 @@ struct Arguments {
     /// A search's filters were given (`filter`).
     var filtered: Bool {
         lists["--with"] != nil || lists["--album"] != nil || flags.contains("--favorites") || values["--within"] != nil
-            || lists["--origin"] != nil || lists["--camera"] != nil
+            || lists["--origin"] != nil || lists["--camera"] != nil || lists["--shot-on"] != nil
     }
 
     /// The search's filter: --with NAME (every one in it; a name that several people in Photos share means any of
-    /// them), --album TITLE (in any of them), --favorites, --origin O and --camera NAME (any of them each),
-    /// --within LAT,LON,LAT,LON (two corners of a box).
+    /// them), --album TITLE (in any of them), --favorites, --origin O, --camera NAME and --shot-on NAME (any of them
+    /// each), --within LAT,LON,LAT,LON (two corners of a box).
     func filter(in store: IndexStore) throws -> SearchFilter {
         var filter = SearchFilter(favorites: flags.contains("--favorites"))
         if let names = lists["--with"] {
@@ -215,9 +217,9 @@ struct Arguments {
                 return origin.rawValue
             })
         }
-        if let names = lists["--camera"] {
-            let cameras = try store.photosCameras()
-            filter.cameras = Set(try names.map { name in
+        let cameras = lists["--camera"] == nil && lists["--shot-on"] == nil ? [] : try store.photosCameras()
+        func models(_ names: [String]) throws -> Set<String> {
+            Set(try names.map { name in
                 guard let camera = cameras.first(where: { $0.model.caseInsensitiveCompare(name) == .orderedSame })
                 else {
                     let known = cameras.map(\.model).joined(separator: ", ")
@@ -227,6 +229,8 @@ struct Arguments {
                 return camera.model
             })
         }
+        if let names = lists["--camera"] { filter.cameras = try models(names) }
+        if let names = lists["--shot-on"] { filter.shotOn = try models(names) }
         if let box = values["--within"] {
             let corners = box.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
             guard corners.count == 4 else { throw CLIError("--within takes two corners: LAT1,LON1,LAT2,LON2") }

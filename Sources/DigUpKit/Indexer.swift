@@ -851,7 +851,8 @@ public final class Indexer {
     }
 
     /// A library's video in iCloud, from what Photos keeps of it (`PhotosLibrary.Reading.isStandIn`): each still a frame
-    /// with its own vector and no time, which the stills don't carry (a guessed one would be a made-up fact). Its place
+    /// with its own vector and no time, which the stills don't carry (a guessed one would be a made-up fact). The frames
+    /// are written in the filmstrip's order, which is how a hit knows the still it's on (`PhotosHit.still`). Its place
     /// is Photos' (the sync's).
     private func stills(_ file: FileRecord, _ stills: [String]) throws -> (String, String?) {
         let vectors = try fullWorker().embedImages(stills, budget: options.frameBudget)

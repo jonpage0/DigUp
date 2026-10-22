@@ -38,6 +38,9 @@ public struct PhotosHit: Sendable, Equatable {
     /// The file read of it (nil if the crawl hasn't said yet): a video in iCloud was read from Photos' stills of it or
     /// its poster (`PhotosLibrary.Reading.isStandIn`), a photo in iCloud from its preview.
     public var reading: PhotosLibrary.Reading? = nil
+    /// A video in iCloud: the still to show for it. The one that matched when the hit is one of its stills (a stills
+    /// video's frame segments are its filmstrip's stills, in order), else its first still or its poster.
+    public var still: String? = nil
 }
 
 /// What a search keeps besides its kinds: Photos' facts about a library's files, and where files were taken. The
@@ -50,11 +53,15 @@ public struct SearchFilter: Sendable, Equatable {
     public var albums: Set<Int64>
     /// Only Photos' favorites.
     public var favorites: Bool
-    /// How a file came into its library, any of these (`PhotosLibrary.Origin`'s raw values). "Shot on my devices" is
-    /// origins camera and unknown with `cameras` the user's own devices.
+    /// How a file came into its library, any of these (`PhotosLibrary.Origin`'s raw values).
     public var origins: Set<String>
     /// The device that took a file, any of these (`IndexStore.photosCameras`' models).
     public var cameras: Set<String>
+    /// Shot on one of these devices (`IndexStore.photosCameras`' models), the app's "Shot on my devices": a camera
+    /// took it into the library (origin camera) on one of them, or with no device recorded (Photos says a camera took
+    /// it, which is the user's: 234 of 21,165 in a real library had no device name); or an older item, which Photos
+    /// says nothing about (origin unknown), whose device is one of them.
+    public var shotOn: Set<String>
     /// Only files taken inside this box (`IndexStore.locations`).
     public var area: Area?
 
@@ -69,13 +76,14 @@ public struct SearchFilter: Sendable, Equatable {
     }
 
     public init(people: [Set<Int64>] = [], albums: Set<Int64> = [], favorites: Bool = false, origins: Set<String> = [],
-                cameras: Set<String> = [], area: Area? = nil) {
+                cameras: Set<String> = [], shotOn: Set<String> = [], area: Area? = nil) {
         (self.people, self.albums, self.favorites, self.area) = (people, albums, favorites, area)
-        (self.origins, self.cameras) = (origins, cameras)
+        (self.origins, self.cameras, self.shotOn) = (origins, cameras, shotOn)
     }
 
     public var isEmpty: Bool {
-        people.isEmpty && albums.isEmpty && !favorites && origins.isEmpty && cameras.isEmpty && area == nil
+        people.isEmpty && albums.isEmpty && !favorites && origins.isEmpty && cameras.isEmpty && shotOn.isEmpty
+            && area == nil
     }
 
     /// The files it keeps, as a query of their ids and the values it takes; nil when it keeps every file.
@@ -95,6 +103,14 @@ public struct SearchFilter: Sendable, Equatable {
         if !cameras.isEmpty {
             parts.append("SELECT file FROM photos_assets WHERE camera IN (\(placeholders(cameras)))")
             values += cameras.map { .text($0) }
+        }
+        if !shotOn.isEmpty {
+            let devices = placeholders(shotOn)
+            parts.append("""
+                SELECT file FROM photos_assets WHERE (origin = 'camera' AND (camera IS NULL OR camera IN (\(devices))))
+                    OR (origin = 'unknown' AND camera IN (\(devices)))
+                """)
+            values += shotOn.map { .text($0) } + shotOn.map { .text($0) }
         }
         if let area {
             parts.append("SELECT file FROM locations WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")
@@ -333,7 +349,7 @@ public final class Searcher {
                                   cosine: semantic?.cosine, keywordRank: keyword?.0, segment: segment,
                                   segmentID: segmentID, loc: loc, locEnd: locEnd, excerpt: snippet ?? storedExcerpt,
                                   modified: row.modified, size: row.size, info: row.info, focus: focus,
-                                  photos: try photosHit(file: file, path: row.path)))
+                                  photos: try photosHit(file: file, path: row.path, segment: segmentID, kind: segment)))
         }
         return hits
     }
@@ -360,7 +376,7 @@ public final class Searcher {
             return SearchHit(path: row.path, kind: row.kind, score: 0, z: nil, cosine: nil, keywordRank: nil,
                              segment: segment.kind, segmentID: segment.id, loc: nil, locEnd: nil, excerpt: nil,
                              modified: row.modified, size: row.size, info: row.info,
-                             photos: try photosHit(file: file, path: row.path))
+                             photos: try photosHit(file: file, path: row.path, segment: segment.id, kind: segment.kind))
         }
     }
 
@@ -380,9 +396,9 @@ public final class Searcher {
         return row
     }
 
-    /// A Photos library's file: the asset it shows, its title and date in Photos (its `photosInfo` segment), and what
-    /// was read of it (`photos_assets`). Nil for any other file.
-    private func photosHit(file: Int64, path: String) throws -> PhotosHit? {
+    /// A Photos library's file: the asset it shows, its title and date in Photos (its `photosInfo` segment), what was
+    /// read of it (`photos_assets`), and for a video in iCloud the still the hit is on. Nil for any other file.
+    private func photosHit(file: Int64, path: String, segment: Int64, kind: SegmentKind) throws -> PhotosHit? {
         guard let asset = PhotosLibrary.asset(ofFile: path) else { return nil }
         var title = "", date: Double?, reading: PhotosLibrary.Reading?
         try store.db.query("SELECT excerpt, loc FROM segments WHERE file = ? AND kind = ? LIMIT 1",
@@ -393,7 +409,19 @@ public final class Searcher {
         try store.db.query("SELECT reading FROM photos_assets WHERE file = ?", [.int(file)]) {
             reading = PhotosLibrary.Reading(rawValue: $0.text(0) ?? "")
         }
-        return PhotosHit(library: asset.library, uuid: asset.uuid, title: title, date: date, reading: reading)
+        var still: String?
+        if reading?.isStandIn == true { still = path }
+        if reading == .stills, kind == .frame {
+            // The indexer writes a stills video's frames in its filmstrip's order (`Indexer.stills`), so a frame's place
+            // among the file's frames is its still's.
+            var place = 0
+            try store.db.query("SELECT COUNT(*) FROM segments WHERE file = ? AND kind = ? AND id < ?",
+                               [.int(file), .text(SegmentKind.frame.rawValue), .int(segment)]) { place = Int($0.int(0)) }
+            let stills = PhotosLibrary.filmstrip(startingAt: path)
+            if stills.indices.contains(place) { still = stills[place] }
+        }
+        return PhotosHit(library: asset.library, uuid: asset.uuid, title: title, date: date, reading: reading,
+                         still: still)
     }
 
     /// Code: the stretch to point at, and the line in it to open at. A name looked up points at the stretch that

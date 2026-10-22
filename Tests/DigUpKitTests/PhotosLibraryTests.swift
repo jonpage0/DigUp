@@ -271,11 +271,12 @@ import Testing
     }
 
     @Test func filtersKeepHowItCameInAndTheDeviceAmongMoreWordMatchesThanSearchLooksAt() throws {
-        let (library, listed) = try library(4, in: folder)   // taken in this order, a second apart
+        let (library, listed) = try library(5, in: folder)   // taken in this order, a second apart
         let assets = [asset(listed[0], importedBy: 1, app: "com.apple.camera", camera: "iPhone 15 Pro"),
                       asset(listed[1], importedBy: 0, camera: "iPhone 15 Pro"),   // nothing recorded: an older one
                       asset(listed[2], importedBy: 3, app: "com.apple.MobileSMS", camera: "iPhone 12"),   // sent
-                      asset(listed[3], importedBy: 2, camera: "iPhone Air")]
+                      asset(listed[3], importedBy: 2, camera: "iPhone Air"),
+                      asset(listed[4], importedBy: 1)]   // a camera's, with no device in its EXIF
         let store = try IndexStore(directory: folder.appendingPathComponent("index"))
         _ = try indexer(store) { _ in PhotosLibrary.Listing(assets: assets) }.sync([library])
         #expect(try store.photosCameras() == [IndexStore.PhotosCamera(model: "iPhone 15 Pro", files: 2, fromCamera: 1),
@@ -291,6 +292,11 @@ import Testing
         #expect(try kept(SearchFilter(origins: ["saved"])) == [listed[2].path])
         #expect(try kept(SearchFilter(cameras: ["iPhone 12"])) == [listed[2].path])
         #expect(try kept(SearchFilter(origins: ["camera"], cameras: ["iPhone 12"])).isEmpty)
+        // "Shot on my devices" as the app asks for it: a camera's with no device named counts too, an older one only
+        // with a device of mine.
+        #expect(try kept(SearchFilter(shotOn: ["iPhone 15 Pro", "iPhone Air"]))
+            == [listed[4].path, listed[3].path, listed[1].path, listed[0].path])
+        #expect(try kept(SearchFilter(shotOn: ["iPhone Air"])) == [listed[4].path, listed[3].path])
 
         // With words: the filter narrows the matches before they're cut to the best 1,000 (more notes than that say
         // "beach", each more than Photos' words do).
@@ -494,6 +500,22 @@ import Testing
         // A result says it's a video in iCloud, read from Photos' stills of it.
         let hits = try Searcher(store: store).search("", queryVector: nil, filter: SearchFilter(origins: ["unknown"]))
         #expect(Set(hits.map { $0.photos?.reading }) == [.stills, .poster])
+        // A hit by meaning on the second still shows that still; the poster video shows its poster.
+        var onSecond: [Float] = []
+        try store.db.query("""
+            SELECT s.vec FROM segments s JOIN files f ON f.id = s.file WHERE f.path = ? AND s.kind = 'frame'
+            ORDER BY s.id LIMIT 1 OFFSET 1
+            """, [.text(stills[0].path)]) { row in
+            onSecond = (row.blob(0) ?? Data()).withUnsafeBytes { Array($0.bindMemory(to: Float16.self)).map(Float.init) }
+        }
+        // Other pictures for it to stand out from (a meaning hit has to, `Searcher.meaning`), on the poster video.
+        let other = try #require(files[poster.path]).id
+        for index in 0..<60 {
+            try store.addSegment(file: other, kind: .image, modality: .image, vector: FakeEmbedder.vector(for: "\(index)"))
+        }
+        let matched = try Searcher(store: store).search("", queryVector: onSecond)
+        #expect(matched.first { $0.path == stills[0].path }?.photos?.still == stills[1].path)
+        #expect(hits.first { $0.path == poster.path }?.photos?.still == poster.path)
     }
     #endif
 
