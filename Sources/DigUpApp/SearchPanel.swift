@@ -48,6 +48,8 @@ final class SearchPanelController {
     @ObservationIgnored let model: AppModel
     @ObservationIgnored private let engine: Engine
     @ObservationIgnored private unowned let app: AppController
+    /// DigUp's own favorites (the heart under the preview).
+    var favorites: Favorites { app.favorites }
     @ObservationIgnored private var window: SearchPanelWindow?
     @ObservationIgnored weak var field: NSTextField?
     @ObservationIgnored private var generation = 0

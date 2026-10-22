@@ -184,12 +184,16 @@ struct PreviewPane: View {
     }
 }
 
-/// Open and Show in Finder (Show in Photos, for a Photos library's picture), under the preview (the panel and the window).
-/// A Photos library's item whose original is in iCloud also gets Download Original (`PhotosDownloads`).
+/// Open and Show in Finder (Show in Photos, for a Photos library's picture), and ♥ (DigUp's own favorites), under the
+/// preview (the panel and the window). A Photos library's item whose original is in iCloud also gets Download Original
+/// (`PhotosDownloads`).
 struct PreviewActions: View {
     let row: ResultRow
     let open: () -> Void
     let reveal: () -> Void
+    let favorites: Favorites
+    /// The heart was pressed (the window's Favorites filter follows).
+    var toggledFavorite: () -> Void = {}
     var controlSize: ControlSize = .regular
 
     var body: some View {
@@ -198,6 +202,19 @@ struct PreviewActions: View {
                 Button(row.openTitle, action: open)
                     .keyboardShortcut(.defaultAction)
                 Button(row.revealTitle, action: reveal)
+                let marked = favorites.contains(row)
+                Button {
+                    favorites.toggle(row)
+                    toggledFavorite()
+                } label: {
+                    Image(systemName: marked ? "heart.fill" : "heart")
+                        .foregroundStyle(marked ? AnyShapeStyle(Brand.ember) : AnyShapeStyle(.secondary))
+                }
+                .keyboardShortcut("d", modifiers: .command)
+                .disabled(favorites.unreadable)
+                .help(favorites.unreadable ? "DigUp's favorites file can't be read, so nothing can be marked"
+                      : marked ? "Remove from Favorites (⌘D)" : "Add to Favorites (⌘D): DigUp's own, not Photos'")
+                .accessibilityLabel(marked ? "Remove from Favorites" : "Add to Favorites")
             }
             if let photos = row.photos, let reading = photos.reading, reading == .preview || reading.isStandIn {
                 DownloadOriginal(uuid: photos.uuid, video: row.kind == .video)

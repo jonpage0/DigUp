@@ -15,6 +15,8 @@ final class AppController {
     let download: ModelDownload
     let hotkeys = HotkeyCenter()
     let updates: Updates
+    /// What's marked ♥ in DigUp, beside the index folder (`Favorites`).
+    let favorites: Favorites
     private let power: PowerPolicy
     private let schedule: IndexSchedule
     private(set) var panel: SearchPanelController!
@@ -54,6 +56,7 @@ final class AppController {
         self.schedule = schedule
         self.engine = engine
         updates = Updates(model: model)
+        favorites = Favorites(beside: settings.indexDirectory)
     }
 
     /// `showWindow`: opened by hand (not at login), so the search window comes up once the app is set up.
@@ -227,6 +230,19 @@ final class AppController {
         AppSettings.save(includeHiddenPhotos: on)
         model.settings.includeHiddenPhotos = on
         engine.setIncludeHiddenPhotos(on)
+    }
+
+    /// A device on "my devices" or off it (Settings → Photos). `fromCamera`: its camera saved something into a library,
+    /// which makes it one of the user's unless they took it off.
+    func setMyDevice(_ device: String, mine: Bool, fromCamera: Bool) {
+        var added = model.settings.myDevicesAdded.filter { $0 != device }
+        var removed = model.settings.myDevicesRemoved.filter { $0 != device }
+        if mine, !fromCamera { added.append(device) }
+        if !mine, fromCamera { removed.append(device) }
+        AppSettings.save(myDevicesAdded: added, removed: removed)
+        model.settings.myDevicesAdded = added
+        model.settings.myDevicesRemoved = removed
+        log("photos: \(added.count) devices added to mine, \(removed.count) taken off")
     }
 
     /// "Index only at set hours": on or off, and the hours (kept while it's off).

@@ -17,7 +17,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
 
     init(app: AppController) {
         self.app = app
-        search = SearchModel(engine: app.engine)
+        search = SearchModel(engine: app.engine, favorites: app.favorites)
     }
 
     var isVisible: Bool { window?.isVisible == true }
@@ -246,18 +246,22 @@ final class SearchModel {
     var columns = 4
     @ObservationIgnored weak var field: NSTextField?
     @ObservationIgnored private let engine: Engine
+    /// What's marked ♥ in DigUp: the heart in the preview, and the Favorites filter.
+    @ObservationIgnored let favorites: Favorites
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var shownGeneration = 0
     @ObservationIgnored private var task: Task<Void, Never>?
 
-    init(engine: Engine) {
+    init(engine: Engine, favorites: Favorites) {
         self.engine = engine
+        self.favorites = favorites
     }
 
     /// Every result shown, in order (strong ones, then the weaker ones once they're unfolded).
     var rows: [ResultRow] { results.ranked + (showWeaker ? results.weaker : []) }
 
-    /// What the results are kept to besides their kind.
+    /// What the results are kept to besides their kind. DigUp's favorites are here as "some files" (the paths are
+    /// looked up when the search runs, `run`).
     var searchFilter: SearchFilter {
         var filter = SearchFilter(area: area)
         for token in tokens {
@@ -265,6 +269,7 @@ final class SearchModel {
             case .person(_, let ids): filter.people.append(ids)
             case .album(let ids, _): filter.albums.formUnion(ids)
             case .photosFavorites: filter.favorites = true
+            case .digupFavorites: filter.paths = []
             case .shotOn(let devices): filter.shotOn = devices
             case .origin(let origin): filter.origins = [origin.rawValue]
             case .area: break
@@ -272,6 +277,12 @@ final class SearchModel {
         }
         return filter
     }
+
+    /// A result was marked ♥ in DigUp or unmarked: with the Favorites filter on, the results follow.
+    func favoriteToggled() {
+        if has(.digupFavorites) { run() }
+    }
+
     /// The filters in the search field, in order: the tokens, then the map's area.
     var shownTokens: [FilterToken] { tokens + (area == nil ? [] : [.area]) }
     /// Filters the words being typed could name (Tab takes the first).
@@ -402,6 +413,9 @@ final class SearchModel {
             return
         }
         task = Task {
+            var searchFilter = searchFilter
+            // DigUp's favorites: the files they are now (a Photos favorite's file changes when it's downloaded).
+            if searchFilter.paths != nil { searchFilter.paths = await favorites.paths(using: engine) }
             let vector = text.isEmpty ? nil : await engine.embedQuery(text)
             guard !Task.isCancelled, current == generation else { return }
             let all = await engine.search(text, vector: vector, prefixLast: false, filter: searchFilter, limit: 120)
@@ -459,7 +473,8 @@ struct SearchWindowView: View {
                             PreviewPane(row: row, imageSize: CGSize(width: 292, height: 230),
                                         open: { search.open(row) })
                             PreviewActions(row: row, open: { search.open(row) },
-                                           reveal: { Opener.reveal(row.url) })
+                                           reveal: { Opener.reveal(row.url) }, favorites: search.favorites,
+                                           toggledFavorite: { search.favoriteToggled() })
                         }
                         .padding(16)
                     }
@@ -545,13 +560,32 @@ struct SearchWindowView: View {
             .padding(.leading, 78)   // beside the window buttons
             .frame(height: 52)
             .zIndex(1)   // over the chips below it, for the suggestions
-            HStack(spacing: 10) {
-                KindFilters(search: search, showsCode: model.hasCode)
-                if search.searchesPhotos, !search.isCode {
-                    Divider().frame(height: 16).padding(.horizontal, 2)
-                    PhotosFilterMenus(search: search)
+            // The chips scroll sideways when the window is too narrow for all of them.
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    KindFilters(search: search, showsCode: model.hasCode)
+                    if !search.isCode {
+                        Divider().frame(height: 16).padding(.horizontal, 2)
+                        Button {
+                            search.toggle(.digupFavorites)
+                        } label: {
+                            FilterChipLabel(title: "Favorites",
+                                            symbol: search.has(.digupFavorites) ? "heart.fill" : "heart",
+                                            selected: search.has(.digupFavorites))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Favorites: only what you've marked ♥ in DigUp (\(search.favorites.count))")
+                        .accessibilityAddTraits(search.has(.digupFavorites) ? .isSelected : [])
+                    }
+                    if search.searchesPhotos, !search.isCode {
+                        Divider().frame(height: 16).padding(.horizontal, 2)
+                        PhotosFilterMenus(search: search,
+                                          devices: search.choices.devices(added: model.settings.myDevicesAdded,
+                                                                          removed: model.settings.myDevicesRemoved))
+                    }
                 }
             }
+            .scrollClipDisabled()
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 10)
@@ -800,7 +834,7 @@ private struct ResultsGrid: View {
     }
 
     private func cell(_ row: ResultRow) -> some View {
-        GridCell(row: row, selected: row.id == search.selectedRow?.id)
+        GridCell(row: row, selected: row.id == search.selectedRow?.id, favorite: search.favorites.contains(row))
             .id(row.id)
             .overlay(FileDragArea(url: row.url, openTitle: row.openTitle, onClick: { search.select(row) },
                                   onOpen: { search.open(row) }))
@@ -810,6 +844,8 @@ private struct ResultsGrid: View {
 private struct GridCell: View {
     let row: ResultRow
     let selected: Bool
+    /// Marked ♥ in DigUp.
+    var favorite = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -840,6 +876,17 @@ private struct GridCell: View {
             .overlay(alignment: .bottomTrailing) {
                 if let place = row.place { PlaceBadge(text: place, onImage: true).padding(6) }
             }
+            .overlay(alignment: .topTrailing) {
+                if favorite {
+                    Image(systemName: "heart.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(5)
+                        .background(Circle().fill(Brand.ember.opacity(0.9)))
+                        .padding(6)
+                        .accessibilityHidden(true)
+                }
+            }
             .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .strokeBorder(selected ? Color.accentColor : Color.primary.opacity(0.08), lineWidth: selected ? 3 : 0.5)
                 .padding(selected ? -3 : 0))
@@ -858,7 +905,7 @@ private struct GridCell: View {
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(row.kind.title), \(row.name), \(row.reason)")
+        .accessibilityLabel("\(row.kind.title), \(row.name), \(row.reason)\(favorite ? ", in Favorites" : "")")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

@@ -193,6 +193,8 @@ final class SettingsState {
     private(set) var osxphotos = PhotosLibrary.osxphotos
     /// The Photos tab has looked at its libraries once (debug snapshots wait for this).
     private(set) var photosLoaded = false
+    /// The devices the indexed libraries' pictures were taken with (the "My devices" list).
+    private(set) var cameras: [IndexStore.PhotosCamera] = []
     @ObservationIgnored private var estimating: [Process] = []
 
     /// The Photos tab, when it shows: osxphotos looked for again, each library's counts and last listing, whether macOS
@@ -216,6 +218,7 @@ final class SettingsState {
                                  access: access, estimate: libraries.first { $0.id == url.path }?.estimate))
         }
         libraries = found
+        cameras = await app.engine.photosChoices().cameras
         photosLoaded = true
         estimating.removeAll { !$0.isRunning }
         let unestimated = found.filter { !$0.searched && $0.estimate == nil && $0.access == .allowed }.map(\.url)
@@ -749,6 +752,37 @@ private struct PhotosSettings: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                }
+            }
+            if !state.cameras.isEmpty {
+                Section {
+                    ForEach(state.cameras) { camera in
+                        let settings = state.model.settings
+                        let mine = (camera.fromCamera > 0 || settings.myDevicesAdded.contains(camera.model))
+                            && !settings.myDevicesRemoved.contains(camera.model)
+                        Toggle(isOn: Binding(get: { mine }, set: {
+                            state.app.setMyDevice(camera.model, mine: $0, fromCamera: camera.fromCamera > 0)
+                        })) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(camera.model)
+                                Text(camera.fromCamera > 0
+                                     ? "\(camera.fromCamera.formatted()) shot with its camera · \(camera.files.formatted()) in all"
+                                     : "\(camera.files.formatted()) saved from elsewhere, none shot into Photos")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("My devices")
+                } footer: {
+                    Text("The search window's From → Shot on my devices keeps what these took: what their camera saved "
+                         + "to Photos, and older pictures taken with one of them. A device whose camera saved something "
+                         + "is on by itself, so a new phone joins without asking.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

@@ -376,6 +376,8 @@ enum DebugHooks {
                                 search.set(.album(ids: album.ids, title: album.title), on: true)
                             } else if kind == "favorites" {
                                 search.set(.photosFavorites, on: true)
+                            } else if kind == "digup" {
+                                search.set(.digupFavorites, on: true)
                             } else {
                                 log("debug: no filter \"\(part)\"")
                             }

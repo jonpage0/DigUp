@@ -89,7 +89,8 @@ struct SearchPanelView: View {
                             PreviewPane(row: row, imageSize: CGSize(width: 410, height: 214),
                                         open: { controller.openSelected() })
                             PreviewActions(row: row, open: { controller.openSelected() },
-                                           reveal: { controller.revealSelected() }, controlSize: .small)
+                                           reveal: { controller.revealSelected() }, favorites: controller.favorites,
+                                           controlSize: .small)
                         }
                     } else if controller.selection == SearchPanelController.weakerToggle {
                         WeakerExplainer(count: controller.results.weaker.count, expanded: controller.showWeaker)

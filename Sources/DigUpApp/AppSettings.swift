@@ -44,6 +44,11 @@ nonisolated struct AppSettings: Sendable {
     var codeQuietSeconds: Double
     /// Photos' hidden items (its Hidden album) are indexed too. Off by default: Photos hides them on purpose.
     var includeHiddenPhotos: Bool
+    /// "Shot on my devices" (approved 2026-10-22): the devices a camera saved something from into a library are the
+    /// user's, plus these, minus these (`PhotosChoices.devices`). Keeping the changes, not the list, lets next year's
+    /// phone join by itself while a device taken off stays off.
+    var myDevicesAdded: [String]
+    var myDevicesRemoved: [String]
 
     static let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/DigUp")
@@ -87,7 +92,9 @@ nonisolated struct AppSettings: Sendable {
             codeEditor: defaults.string(forKey: "codeEditor"),
             codeQuietSeconds: defaults.object(forKey: "codeQuietSeconds") == nil
                 ? 60 : max(1, defaults.double(forKey: "codeQuietSeconds")),
-            includeHiddenPhotos: defaults.bool(forKey: "includeHiddenPhotos"))
+            includeHiddenPhotos: defaults.bool(forKey: "includeHiddenPhotos"),
+            myDevicesAdded: defaults.stringArray(forKey: "myDevicesAdded") ?? [],
+            myDevicesRemoved: defaults.stringArray(forKey: "myDevicesRemoved") ?? [])
     }
 
     /// A list of folders: a plist array, or paths joined with ":" (the form launch arguments use).
@@ -145,6 +152,11 @@ nonisolated struct AppSettings: Sendable {
 
     static func save(includeHiddenPhotos: Bool) {
         defaults.set(includeHiddenPhotos, forKey: "includeHiddenPhotos")
+    }
+
+    static func save(myDevicesAdded: [String], removed: [String]) {
+        defaults.set(myDevicesAdded, forKey: "myDevicesAdded")
+        defaults.set(removed, forKey: "myDevicesRemoved")
     }
 
     /// Expands "~" and resolves symlinks, so crawled paths match the paths FSEvents reports.

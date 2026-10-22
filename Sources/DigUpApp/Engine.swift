@@ -863,6 +863,16 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
+    /// The indexed file of each of these Photos assets (DigUp's favorites keep assets, `Favorites`), by uuid.
+    func paths(ofAssets uuids: Set<String>) async -> [String: String] {
+        guard !uuids.isEmpty else { return [:] }
+        return await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: (try? searchStore?.paths(ofAssets: uuids)) ?? [:])
+            }
+        }
+    }
+
     /// Where the files at `paths` were taken (the map's pins), by path.
     func locations(of paths: [String]) async -> [String: Location] {
         await withCheckedContinuation { continuation in

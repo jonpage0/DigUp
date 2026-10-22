@@ -5,9 +5,15 @@ import SwiftUI
 struct PhotosChoices: Sendable, Equatable {
     var people: [Person] = []
     var albums: [Album] = []
-    /// The devices "Shot on my devices" means: every one a camera saved something from into a library, most first.
-    /// (Adding and removing devices waits on Jon's approval of where that list is kept.)
-    var devices: [String] = []
+    /// The devices that took the libraries' pictures (`IndexStore.photosCameras`), most files first.
+    var cameras: [IndexStore.PhotosCamera] = []
+
+    /// "Shot on my devices": every device a camera saved something from into a library, plus the ones the user added,
+    /// minus the ones they took off (`AppSettings.myDevicesAdded`, `myDevicesRemoved`), most files first.
+    func devices(added: [String], removed: [String]) -> [String] {
+        let mine = cameras.filter { ($0.fromCamera > 0 || added.contains($0.model)) && !removed.contains($0.model) }
+        return mine.map(\.model)
+    }
 
     /// One name: Photos can keep two people of one name (two libraries, or a name given twice), and a picture of
     /// either counts (`SearchFilter.people`).
@@ -33,7 +39,7 @@ struct PhotosChoices: Sendable, Equatable {
 
     /// Only people and albums with an indexed file: the others would filter to nothing.
     init(people: [IndexStore.PhotosPerson], albums: [IndexStore.PhotosAlbum], cameras: [IndexStore.PhotosCamera]) {
-        devices = cameras.filter { $0.fromCamera > 0 }.map(\.model)
+        self.cameras = cameras
         var byName: [String: (ids: Set<Int64>, files: Int)] = [:]
         var names: [String] = []
         for person in people where person.files > 0 {
@@ -106,6 +112,8 @@ enum FilterToken: Equatable, Identifiable {
     case album(ids: Set<Int64>, title: String)
     /// Marked ♥ in Photos.
     case photosFavorites
+    /// Marked ♥ in DigUp (`Favorites`), any file.
+    case digupFavorites
     /// Shot on one of these devices (`SearchFilter.shotOn`). One "From" choice at a time, as `origin` is.
     case shotOn(Set<String>)
     /// Came into the library this way (`PhotosLibrary.Origin`): saved from another app, or imported through Photos.
@@ -118,6 +126,7 @@ enum FilterToken: Equatable, Identifiable {
         case .person(let name, _): "person:\(name)"
         case .album(let ids, _): "album:\(ids.sorted())"
         case .photosFavorites: "photos-favorites"
+        case .digupFavorites: "digup-favorites"
         case .shotOn: "from:mine"
         case .origin(let origin): "from:\(origin.rawValue)"
         case .area: "area"
@@ -133,6 +142,7 @@ enum FilterToken: Equatable, Identifiable {
         case .person(let name, _): name
         case .album(_, let title): title
         case .photosFavorites: "Photos Favorites"
+        case .digupFavorites: "Favorites"
         case .shotOn: "Shot on my devices"
         case .origin(let origin): origin == .imported ? "Imported into Photos" : "Saved from other apps"
         case .area: "In the map's area"
@@ -144,6 +154,7 @@ enum FilterToken: Equatable, Identifiable {
         case .person: "person.crop.circle"
         case .album: "rectangle.stack"
         case .photosFavorites: "heart.fill"
+        case .digupFavorites: "heart.fill"
         case .shotOn: "iphone"
         case .origin(let origin): origin == .imported ? "square.and.arrow.down" : "arrow.down.app"
         case .area: "map"
@@ -155,6 +166,7 @@ enum FilterToken: Equatable, Identifiable {
         case .person(let name, _): "Only pictures Photos knows \(name) is in"
         case .album(_, let title): "Only what's in the album “\(title)”"
         case .photosFavorites: "Only what you've marked ♥ in Photos"
+        case .digupFavorites: "Only what you've marked ♥ in DigUp"
         case .shotOn(let devices):
             "Only what you shot: what the camera saved to Photos on \(devices.sorted().formatted(.list(type: .or))), "
                 + "and older items taken with one of them"
@@ -242,6 +254,8 @@ struct FilterSuggestionsBar: View {
 /// too. Everyone picked must be in a picture; it may be in any album picked.
 struct PhotosFilterMenus: View {
     let search: SearchModel
+    /// "Shot on my devices" (`PhotosChoices.devices(added:removed:)`, as Settings → Photos edits them).
+    let devices: [String]
 
     var body: some View {
         HStack(spacing: 6) {
@@ -277,18 +291,17 @@ struct PhotosFilterMenus: View {
             Button {
                 search.toggle(.photosFavorites)
             } label: {
-                FilterChipLabel(title: "Favorites", symbol: search.has(.photosFavorites) ? "heart.fill" : "heart",
+                FilterChipLabel(title: "Photos Favorites", symbol: search.has(.photosFavorites) ? "heart.fill" : "heart",
                                 selected: search.has(.photosFavorites))
             }
             .buttonStyle(.plain)
             .help("Photos Favorites: only what you've marked ♥ in Photos")
             .accessibilityAddTraits(search.has(.photosFavorites) ? .isSelected : [])
             Menu {
-                let mine = FilterToken.shotOn(Set(search.choices.devices))
-                PhotosFilterToggle(title: "Shot on my devices", token: mine, search: search)
-                    .disabled(search.choices.devices.isEmpty)
-                if !search.choices.devices.isEmpty {
-                    Text(search.choices.devices.formatted(.list(type: .and)))
+                PhotosFilterToggle(title: "Shot on my devices", token: .shotOn(Set(devices)), search: search)
+                    .disabled(devices.isEmpty)
+                if !devices.isEmpty {
+                    Text(devices.formatted(.list(type: .and)))
                 }
                 Divider()
                 PhotosFilterToggle(title: "Saved from other apps", token: .origin(.saved), search: search)
@@ -380,5 +393,8 @@ struct FilterChipLabel: View {
         .padding(.vertical, 4)
         .background(Capsule().fill(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.primary.opacity(0.06))))
         .contentShape(Capsule())
+        // One element named by its title (VoiceOver, and the menus' items read as one button each, not three).
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
     }
 }
