@@ -66,10 +66,17 @@ extension ResultRow {
 enum QuickLookMoment {
     private static var generation = 0
 
-    static func show(_ row: ResultRow?, in panel: QLPreviewPanel) {
+    /// `now`: the preview is already up (the same files, at a new place), so the state is set at once too. Either way a
+    /// newer call replaces what an older one still has to set.
+    static func show(_ row: ResultRow?, in panel: QLPreviewPanel, now: Bool = false) {
         generation += 1
         let current = generation
-        guard let row, let state = row.quickLookState else { return }
+        guard let row else { return }
+        // Page 1 or the start: nothing to jump to when the preview opens, but a preview already elsewhere goes back.
+        guard let state = row.quickLookState
+                ?? (now ? row.page != nil ? ["CurrentPage": 0] : row.moment != nil ? ["CurrentTime": 0] : nil : nil)
+        else { return }
+        if now { panel.displayState = state }
         for delay in [0.6, 1.2] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 guard current == generation, panel.isVisible,
@@ -133,10 +140,9 @@ extension QuickLookSource {
         if sameFiles, panel.isVisible {
             // The same files showing (a key that didn't move the selection, or the same file matching elsewhere):
             // reloading them would restart a movie, so only a new place in them moves Quick Look.
-            guard !samePlace, let row else { return }
+            guard !samePlace else { return }
             if panel.currentPreviewItemIndex != start { panel.currentPreviewItemIndex = start }
-            panel.displayState = row.quickLookState ?? (row.page != nil ? ["CurrentPage": 0]
-                : row.moment != nil ? ["CurrentTime": 0] : panel.displayState)
+            QuickLookMoment.show(row, in: panel, now: true)
             return
         }
         panel.reloadData()

@@ -86,10 +86,13 @@ With the .deb, DigUp tells you when there's a new version and opens its release 
 | ⇧⌘Space | Ctrl+Shift+Space | Opens the search panel from any app (you can change it) |
 | ↓ ↑ | ↓ ↑ | Moves through the results |
 | ↩ | Enter | Opens the result: PDFs at the page, recordings and videos at the moment, code in your editor at the line |
-| Space | Space | A big preview, at the page or moment (once you've moved to a result) |
+| Space | Space | A big preview, at the page or moment (once you've moved to a result, or with nothing typed) |
 | ⌘↩ | Ctrl+Enter | Shows it in Finder, Explorer or your file manager |
 | ⌘C | Ctrl+C (in the window) | Copies the file, to paste anywhere |
 | ⌘O | Ctrl+O | The same search in a bigger window, with a picture grid and filters |
+| ⌘D | | Adds it to DigUp's own Favorites, or takes it off (the ♥ under the preview) |
+
+On a Mac, Settings → Shortcuts lists every key, in the panel and the window, and sets the one that opens the panel.
 
 DigUp lives in the menu bar on a Mac and in the tray on Windows and Linux, where you can see how indexing is going,
 pause it, or open Settings. Opening it from the Start menu or your app list shows the search window.
@@ -176,12 +179,19 @@ The search window's map (its map button) shows where results were taken: Photos'
 photo's GPS tags and a video's location for other files. Search This Area keeps the results to what's in view, and
 with nothing typed it lists everything taken there, newest first. The map is Apple Maps, so it's online (see Private).
 
-Beside the kinds, the search window has People, Albums, Favorites and From: results are kept to pictures with everyone
-you pick in them, in any album you pick, marked ♥ in Photos, or, from From, shot on your own devices (what a device's
-camera saved to Photos, and older items taken with one of those devices), saved from other apps (Messages, AirDrop,
-Safari…), or imported into Photos. Each filter that's on is a token in the search field (its × takes it off, as ⌫ does
-in an empty field), and typing a person's or an album's name offers it as a filter (Tab takes it). With nothing typed,
-the window lists everything the filters keep, newest first.
+Beside the kinds, the search window has People, Albums, Photos Favorites and From: results are kept to pictures with
+everyone you pick in them, in any album you pick, marked ♥ in Photos, or, from From, shot on your own devices (what a
+device's camera saved to Photos, and older items taken with one of those devices), saved from other apps (Messages,
+AirDrop, Safari…), or imported into Photos. Settings → Photos → My devices says which devices are yours: a device
+whose camera saved something is on by itself (so a new phone joins), and you can take one off or add one that only
+took older pictures. Each filter that's on is a token in the search field (its × takes it off, as ⌫ does in an empty
+field), and typing a person's or an album's name offers it as a filter (Tab takes it). With nothing typed, the window
+lists everything the filters keep, newest first.
+
+Anything DigUp finds, in Photos or not, can be marked ♥ in DigUp itself (under the preview, or ⌘D), without touching
+Photos' own favorites; the Favorites filter beside the kinds keeps those. They're kept in `favorites.json` beside the
+index, so rebuilding or deleting the index keeps them; a Photos picture stays marked through downloads and edits, and
+a file through moves and renames on its disk.
 
 A result whose original is only in iCloud has Download Original under its preview: Photos gets the original from your
 iCloud and keeps it in the library, as when you open it in Photos, and DigUp then reads the original under the same
@@ -198,9 +208,9 @@ What it reads of a library, and what it leaves alone:
   ("Optimize Mac Storage", which can be nearly every picture), it reads Photos' own preview instead: 1,024 pixels on its
   long side for a photo, as many as DigUp gives the model anyway. A video that's only in iCloud is read from what Photos
   keeps of it on this Mac: the stills of Photos' filmstrip of it (six or so, each found like a frame of the video,
-  though they carry no time; the preview shows the one that matched), else one still of it; a video Photos keeps
-  nothing of is left out until it's on this Mac. A picture whose file changes (downloaded, edited) stays one result,
-  with all Photos says about it, and is read again.
+  though they carry no time; the preview shows the one that matched, and Space shows them all, starting at that one),
+  else one still of it; a video Photos keeps nothing of is left out until it's on this Mac. A picture whose file
+  changes (downloaded, edited) stays one result, with all Photos says about it, and is read again.
 - the words in a picture are the ones Photos read in it, kept in its catalog, so DigUp doesn't read each screenshot
   again (1.4 s each on an M3 Max on battery). On 60 iPhone screenshots read from their previews,
   Photos' reading and DigUp's found as many words, and each found over 9 in 10 of the other's codes, URLs and prices;
