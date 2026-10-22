@@ -48,6 +48,10 @@ extension ImageExtractor {
 
     static func location(of url: URL) -> Location? { nil }
 
+    /// An animated GIF's later frames aren't read here yet (`RGBImage.load` decodes the first): off the Mac a GIF is
+    /// its first frame.
+    static func animationFrames(of url: URL, maxPixel: Int, to folder: URL) -> [MediaPiece] { [] }
+
     /// The whole picture, through ffmpeg as 8-bit RGB (PPM down a pipe), turned the way the file says (irot/imir in
     /// HEIF, the EXIF orientation elsewhere) and, for a tiled HEIC, stitched whole. ffmpeg 8.1 and later do both
     /// (2026-10-11; 6.1 reads no HEIC and leaves WebP and TIFF unturned), so builds bring their own. A

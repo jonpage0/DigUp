@@ -25,8 +25,8 @@ public struct SearchHit: Sendable {
     public var photos: PhotosHit? = nil
 }
 
-/// A hit from a Photos library (`PhotosLibrary`): the asset it shows, and its title and date in Photos (from its
-/// `photosInfo` segment).
+/// A hit from a Photos library (`PhotosLibrary`): the asset it shows, its title and date in Photos (from its
+/// `photosInfo` segment), and what DigUp read of it.
 public struct PhotosHit: Sendable, Equatable {
     /// The library, as the index spells it (a real path).
     public let library: String
@@ -35,6 +35,9 @@ public struct PhotosHit: Sendable, Equatable {
     public let title: String
     /// When it was taken, in seconds since 1970.
     public let date: Double?
+    /// The file read of it (nil if the crawl hasn't said yet): a video in iCloud was read from Photos' stills of it or
+    /// its poster (`PhotosLibrary.Reading.isStandIn`), a photo in iCloud from its preview.
+    public var reading: PhotosLibrary.Reading? = nil
 }
 
 /// What a search keeps besides its kinds: Photos' facts about a library's files, and where files were taken. The
@@ -47,6 +50,11 @@ public struct SearchFilter: Sendable, Equatable {
     public var albums: Set<Int64>
     /// Only Photos' favorites.
     public var favorites: Bool
+    /// How a file came into its library, any of these (`PhotosLibrary.Origin`'s raw values). "Shot on my devices" is
+    /// origins camera and unknown with `cameras` the user's own devices.
+    public var origins: Set<String>
+    /// The device that took a file, any of these (`IndexStore.photosCameras`' models).
+    public var cameras: Set<String>
     /// Only files taken inside this box (`IndexStore.locations`).
     public var area: Area?
 
@@ -60,21 +68,34 @@ public struct SearchFilter: Sendable, Equatable {
         }
     }
 
-    public init(people: [Set<Int64>] = [], albums: Set<Int64> = [], favorites: Bool = false, area: Area? = nil) {
+    public init(people: [Set<Int64>] = [], albums: Set<Int64> = [], favorites: Bool = false, origins: Set<String> = [],
+                cameras: Set<String> = [], area: Area? = nil) {
         (self.people, self.albums, self.favorites, self.area) = (people, albums, favorites, area)
+        (self.origins, self.cameras) = (origins, cameras)
     }
 
-    public var isEmpty: Bool { people.isEmpty && albums.isEmpty && !favorites && area == nil }
+    public var isEmpty: Bool {
+        people.isEmpty && albums.isEmpty && !favorites && origins.isEmpty && cameras.isEmpty && area == nil
+    }
 
     /// The files it keeps, as a query of their ids and the values it takes; nil when it keeps every file.
     var query: (sql: String, values: [SQLValue])? {
         func list(_ ids: Set<Int64>) -> String { ids.map(String.init).joined(separator: ",") }
+        func placeholders(_ words: Set<String>) -> String { words.map { _ in "?" }.joined(separator: ",") }
         var parts: [String] = [], values: [SQLValue] = []
         for group in people {
             parts.append("SELECT file FROM photos_person_files WHERE person IN (\(list(group)))")
         }
         if !albums.isEmpty { parts.append("SELECT file FROM photos_album_files WHERE album IN (\(list(albums)))") }
         if favorites { parts.append("SELECT file FROM photos_assets WHERE favorite = 1") }
+        if !origins.isEmpty {
+            parts.append("SELECT file FROM photos_assets WHERE origin IN (\(placeholders(origins)))")
+            values += origins.map { .text($0) }
+        }
+        if !cameras.isEmpty {
+            parts.append("SELECT file FROM photos_assets WHERE camera IN (\(placeholders(cameras)))")
+            values += cameras.map { .text($0) }
+        }
         if let area {
             parts.append("SELECT file FROM locations WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")
             values += [.double(area.latitudes.lowerBound), .double(area.latitudes.upperBound),
@@ -359,17 +380,20 @@ public final class Searcher {
         return row
     }
 
-    /// A Photos library's file: the asset it shows, and its title and date in Photos (its `photosInfo` segment). Nil
-    /// for any other file.
+    /// A Photos library's file: the asset it shows, its title and date in Photos (its `photosInfo` segment), and what
+    /// was read of it (`photos_assets`). Nil for any other file.
     private func photosHit(file: Int64, path: String) throws -> PhotosHit? {
         guard let asset = PhotosLibrary.asset(ofFile: path) else { return nil }
-        var title = "", date: Double?
+        var title = "", date: Double?, reading: PhotosLibrary.Reading?
         try store.db.query("SELECT excerpt, loc FROM segments WHERE file = ? AND kind = ? LIMIT 1",
                            [.int(file), .text(SegmentKind.photosInfo.rawValue)]) {
             title = $0.text(0) ?? ""
             date = $0.isNull(1) ? nil : $0.double(1)
         }
-        return PhotosHit(library: asset.library, uuid: asset.uuid, title: title, date: date)
+        try store.db.query("SELECT reading FROM photos_assets WHERE file = ?", [.int(file)]) {
+            reading = PhotosLibrary.Reading(rawValue: $0.text(0) ?? "")
+        }
+        return PhotosHit(library: asset.library, uuid: asset.uuid, title: title, date: date, reading: reading)
     }
 
     /// Code: the stretch to point at, and the line in it to open at. A name looked up points at the stretch that

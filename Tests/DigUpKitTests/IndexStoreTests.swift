@@ -84,7 +84,7 @@ import WinSDK
             try store.db.query("SELECT name FROM sqlite_master") { names.insert($0.text(0) ?? "") }
             try store.db.query("PRAGMA user_version") { version = $0.int(0) }
             #expect(fork.isSubset(of: names))
-            #expect(try store.meta("fork_photos_facts") == "1")
+            #expect(try store.meta("fork_photos_facts") == "\(IndexStore.forkFactsVersion)")
             #expect(version == 5)
         }
         try check(try IndexStore(directory: folder))

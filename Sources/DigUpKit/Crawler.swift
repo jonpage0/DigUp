@@ -56,7 +56,7 @@ public enum Crawler {
             }
             let listing: PhotosLibrary.Listing
             do {
-                listing = try reader.list(path)
+                listing = try reader.list(path, options.includeHiddenPhotos)
             } catch {
                 report.skippedFolders["Photos library that couldn't be read", default: 0] += 1
                 report.unlisted += Set([path, FolderSelection.realPath(path)])

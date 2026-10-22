@@ -19,8 +19,9 @@ enum ExtractError: Error, CustomStringConvertible {
     }
 }
 
-/// Pictures for the model: a downscaled copy of each image (`prepare`), the camera's date and where it was taken.
-/// ImageIO on macOS (HEIC, RAW, WebP and friends); stb_image elsewhere (Platform/).
+/// Pictures for the model: a downscaled copy of each image (`prepare`), the camera's date and where it was taken, and a
+/// few later frames of an animated GIF (`animationFrames`). ImageIO on macOS (HEIC, RAW, WebP and friends); stb_image
+/// elsewhere (Platform/).
 enum ImageExtractor {
     struct Prepared: Sendable {
         let path: String
@@ -29,6 +30,17 @@ enum ImageExtractor {
         let taken: String?   // EXIF DateTimeOriginal, as written by the camera
         /// Its GPS tags (`Location.Source.exif`), where they're read (`readsLocations`).
         let location: Location?
+    }
+
+    /// An animated picture's frames read besides its first (`animationFrames(of:maxPixel:to:)`): up to this many.
+    static let animationFramesRead = 5
+
+    /// Which frames of an animation of `count` frames are read besides the first (numbered from 0): up to
+    /// `animationFramesRead`, spread evenly over it.
+    static func framesRead(ofAnimation count: Int) -> [Int] {
+        let more = min(animationFramesRead, count - 1)
+        guard more > 0 else { return [] }
+        return (1...more).map { $0 * count / (more + 1) }
     }
 }
 

@@ -155,5 +155,61 @@ import ImageIO
         CGImageDestinationAddImage(destination, image, properties as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { throw ExtractError.unreadable(url.path) }
     }
+
+    /// Writes a GIF of `side` × `side`, a frame of another color for each of `delays` (seconds each is shown).
+    static func writeGIF(_ url: URL, side: Int, delays: [Double]) throws {
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, "com.compuserve.gif" as CFString,
+                                                                delays.count, nil)
+        else { throw ExtractError.unreadable(url.path) }
+        for (number, delay) in delays.enumerated() {
+            guard let context = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+            else { throw ExtractError.unreadable("no context") }
+            context.setFillColor(CGColor(red: CGFloat(number) / CGFloat(delays.count), green: 0.5, blue: 0.2, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: side, height: side))
+            guard let frame = context.makeImage() else { throw ExtractError.unreadable(url.path) }
+            CGImageDestinationAddImage(destination, frame, [
+                kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: delay],
+            ] as CFDictionary)
+        }
+        guard CGImageDestinationFinalize(destination) else { throw ExtractError.unreadable(url.path) }
+    }
+
+    @Test func anAnimatedGIFIsReadByAFewOfItsFramesToo() throws {
+        #expect(ImageExtractor.framesRead(ofAnimation: 1).isEmpty)
+        #expect(ImageExtractor.framesRead(ofAnimation: 2) == [1])
+        #expect(ImageExtractor.framesRead(ofAnimation: 100) == [16, 33, 50, 66, 83])
+        let base = URL(fileURLWithPath: FolderSelection.realPath(folder.path))
+        let pictures = base.appendingPathComponent("pictures")
+        try FileManager.default.createDirectory(at: pictures, withIntermediateDirectories: true)
+        // Eight frames shown 0.1, 0.2… 0.8 s: the ones read besides the first are 1, 2, 4, 5 and 6, and each starts
+        // when the ones before it are done.
+        let dance = pictures.appendingPathComponent("dance.gif")
+        try Self.writeGIF(dance, side: 300, delays: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
+        try Self.writeGIF(pictures.appendingPathComponent("still.gif"), side: 300, delays: [0.5])   // not animated
+        try Self.writeGIF(pictures.appendingPathComponent("icon.gif"), side: 100, delays: [0.1, 0.1])   // too small
+        let store = try IndexStore(directory: base.appendingPathComponent("index"))
+        let indexer = try Indexer(store: store, options: IndexOptions(), makeEmbedder: { FakeEmbedder() })
+        _ = try indexer.sync([pictures])
+        #expect(try indexer.run() == ["done": 2, "skipped": 1])
+        var segments: [String: [(kind: String, loc: Double?, end: Double?)]] = [:]
+        try store.db.query("""
+            SELECT f.path, s.kind, s.loc, s.loc_end FROM segments s JOIN files f ON f.id = s.file
+            WHERE s.kind NOT IN \(IndexStore.crawlKinds) AND s.vec IS NOT NULL ORDER BY s.id
+            """) { row in
+            segments[(row.text(0)! as NSString).lastPathComponent, default: []]
+                .append((row.text(1)!, row.isNull(2) ? nil : row.double(2), row.isNull(3) ? nil : row.double(3)))
+        }
+        #expect(segments["still.gif"]?.map(\.kind) == ["image"])
+        let read = try #require(segments["dance.gif"])
+        #expect(read.map(\.kind) == ["image"] + Array(repeating: "frame", count: 5))
+        let moments: [(Double, Double)] = [(0.1, 0.3), (0.3, 0.6), (1.0, 1.5), (1.5, 2.1), (2.1, 2.8)]
+        for (frame, moment) in zip(read.dropFirst(), moments) {
+            #expect(abs((frame.loc ?? -1) - moment.0) < 1e-6 && abs((frame.end ?? -1) - moment.1) < 1e-6,
+                    "\(frame) at \(moment)")
+        }
+        #expect(try store.files(under: [pictures.path]).map(\.kind) == [.image, .image, .image])
+    }
     #endif
 }

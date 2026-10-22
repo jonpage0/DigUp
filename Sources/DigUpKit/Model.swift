@@ -23,7 +23,9 @@ public enum SegmentKind: String, Sendable {
     case pageImage = "page_image"  // a PDF page rendered as an image (scans, slides)
     case chunk            // a piece of a document's text
     case audio            // a window of audio (a file or a video's soundtrack)
-    case frame            // a video keyframe
+    case frame            // a picture of a video: a keyframe (loc: when it's shown), a still Photos keeps of a video
+                          // that's only in iCloud (no loc: the stills carry no time), or a later frame of an animated
+                          // GIF (loc: when it's shown)
     case lines            // a stretch of a code file: loc to loc_end are its first and last lines
     case cells            // a stretch of a notebook: loc to loc_end are its first and last cells, from 1
     /// What Apple Photos knows about a picture or video of a Photos library (`PhotosLibrary.Asset`), for keyword search
@@ -117,6 +119,8 @@ public struct IndexOptions: Sendable {
     /// How Photos libraries are read (`PhotosLibrary`): nil, and a library is skipped like any other bundle. Never for
     /// the code index.
     public var photos: PhotosLibrary.Reader?
+    /// Also what's hidden in Photos (its Hidden album), which a library's listing otherwise leaves out.
+    public var includeHiddenPhotos = false
 
     public init() {}
 
