@@ -84,7 +84,8 @@ struct ResultRow: Identifiable, Equatable {
         guard let loc else { return nil }
         switch segment {
         case .page, .pageImage: return "p. \(Int(loc))"
-        case .frame: return Self.clock(loc)
+        // A GIF's frames are a fraction of a second apart: the badge would say 0:00 for most of them.
+        case .frame: return kind == .image ? nil : Self.clock(loc)
         case .audio: return kind == .video ? "♪ \(Self.clock(loc))" : Self.clock(loc)
         case .lines: return Int(loc) == Int(locEnd ?? loc) ? "L\(Int(loc))" : "L\(Int(loc))–\(Int(locEnd ?? loc))"
         case .cells: return span
@@ -103,8 +104,8 @@ struct ResultRow: Identifiable, Equatable {
         }
     }
 
-    /// What the preview shows: the moment or the page that matched, else the file.
-    var previewKey: String { "\(id)|\(loc.map { "\($0)" } ?? "")" }
+    /// What the preview shows: the moment, page or still that matched, else the file.
+    var previewKey: String { "\(id)|\(loc.map { "\($0)" } ?? "")|\(photos?.still ?? "")" }
 
     var duration: Double? { info["duration"].flatMap(Double.init) }
 
@@ -121,7 +122,11 @@ struct ResultRow: Identifiable, Equatable {
         switch segment {
         case .image: return kind == .screenshot ? "Matches what's on screen" : "Matches the picture"
         case .ocr: return "Matches the text in it"
-        case .frame: return "Matches the frame at \(place)"
+        case .frame:
+            if kind == .image { return "Matches a frame of the animation" }
+            if photos?.reading == .stills { return "Matches one of Photos' stills of it" }
+            if photos?.reading == .poster { return "Matches its poster" }
+            return "Matches the frame at \(place)"
         case .audio: return kind == .video ? "Matches the sound at \(place)" : "Matches what's heard at \(place)"
         case .page: return "Matches the text on \(page)"
         case .pageImage: return "Matches \(page)"
@@ -156,6 +161,14 @@ struct ResultRow: Identifiable, Equatable {
             parts.append("partly read so far")
         }
         if let duration { parts.append(Self.clock(duration)) }
+        if let reading = photos?.reading {
+            switch reading {
+            case .stills: parts.append("in iCloud, read from \(info["frames"].map { "\($0) of " } ?? "")Photos' stills")
+            case .poster: parts.append("in iCloud, read from its poster")
+            case .preview: parts.append("original in iCloud")
+            case .original, .edited: break
+            }
+        }
         if size > 0 { parts.append(bytes(size)) }
         return parts.joined(separator: " · ")
     }

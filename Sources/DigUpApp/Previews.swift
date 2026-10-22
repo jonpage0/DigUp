@@ -24,8 +24,13 @@ final class Previews {
     func load(_ row: ResultRow, side: CGFloat, scale: CGFloat) async -> NSImage? {
         if let image = cached(row, side: side) { return image }
         var picture: CGImage?
-        if row.kind == .video, let loc = row.loc {
+        if row.kind == .video, let still = row.photos?.still {
+            // A video in iCloud: the still of it that matched (Photos' filmstrip or poster).
+            picture = await Self.thumbnail(URL(fileURLWithPath: still), side: side, scale: scale)
+        } else if row.kind == .video, let loc = row.loc {
             picture = await Self.frame(of: row.url, at: loc, pixels: side * scale)
+        } else if row.kind == .image, row.segment == .frame, let loc = row.loc {
+            picture = await Self.animationFrame(of: row.url, at: loc, pixels: side * scale)
         } else if let page = row.page {
             picture = await Self.page(page, of: row.url, pixels: side * scale, marking: row.foundWords + row.terms)
         }
@@ -55,6 +60,26 @@ final class Previews {
         generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
         return try? await generator.image(at: CMTime(seconds: seconds, preferredTimescale: 600)).image
+    }
+
+    /// An animated GIF's frame shown at `seconds`: its start is the delays of the frames before it, counted as the
+    /// indexer counts them (`ImageExtractor.animationFrames`).
+    private nonisolated static func animationFrame(of url: URL, at seconds: Double, pixels: CGFloat) async -> CGImage? {
+        await Task.detached(priority: .userInitiated) {
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+            var start = 0.0, index = 0
+            for frame in 0..<CGImageSourceGetCount(source) {
+                if start > seconds + 0.001 { break }
+                index = frame
+                let gif = (CGImageSourceCopyPropertiesAtIndex(source, frame, nil) as? [CFString: Any])?[
+                    kCGImagePropertyGIFDictionary] as? [CFString: Any]
+                start += (gif?[kCGImagePropertyGIFDelayTime] ?? gif?[kCGImagePropertyGIFUnclampedDelayTime]) as? Double ?? 0
+            }
+            return CGImageSourceCreateThumbnailAtIndex(source, index, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: pixels,
+            ] as CFDictionary)
+        }.value
     }
 
     /// Page `number` (1-based), fitted into a square of `pixels`, with `words` marked where they're on it, the way
@@ -160,6 +185,7 @@ struct PreviewPane: View {
 }
 
 /// Open and Show in Finder (Show in Photos, for a Photos library's picture), under the preview (the panel and the window).
+/// A Photos library's item whose original is in iCloud also gets Download Original (`PhotosDownloads`).
 struct PreviewActions: View {
     let row: ResultRow
     let open: () -> Void
@@ -167,12 +193,57 @@ struct PreviewActions: View {
     var controlSize: ControlSize = .regular
 
     var body: some View {
-        HStack(spacing: 8) {
-            Button(row.openTitle, action: open)
-                .keyboardShortcut(.defaultAction)
-            Button(row.revealTitle, action: reveal)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button(row.openTitle, action: open)
+                    .keyboardShortcut(.defaultAction)
+                Button(row.revealTitle, action: reveal)
+            }
+            if let photos = row.photos, let reading = photos.reading, reading == .preview || reading.isStandIn {
+                DownloadOriginal(uuid: photos.uuid, video: row.kind == .video)
+            }
         }
         .controlSize(controlSize)
+    }
+}
+
+/// Download Original, for a Photos item whose original is only in iCloud: Photos fetches it and keeps it in the library;
+/// DigUp then reads the original under the same result (a video as a video, frames and sound).
+private struct DownloadOriginal: View {
+    let uuid: String
+    let video: Bool
+    private var downloads: PhotosDownloads { .shared }
+
+    var body: some View {
+        switch downloads.state(of: uuid) {
+        case .downloading(let progress):
+            HStack(spacing: 8) {
+                ProgressView(value: progress).frame(width: 120)
+                Text("Downloading from iCloud…").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        case .done:
+            Label("Downloaded: DigUp reads it again shortly", systemImage: "checkmark.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        case .failed(let why):
+            VStack(alignment: .leading, spacing: 4) {
+                button
+                Text(why).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        case nil:
+            button
+        }
+    }
+
+    private var button: some View {
+        Button {
+            downloads.start(uuid)
+        } label: {
+            Label("Download Original", systemImage: "icloud.and.arrow.down")
+        }
+        .help(video ? "Photos downloads the video from iCloud and keeps it; DigUp then reads the video itself (its frames "
+              + "and sound), not Photos' stills of it"
+              : "Photos downloads the full picture from iCloud and keeps it; DigUp then reads it instead of the preview")
     }
 }
 

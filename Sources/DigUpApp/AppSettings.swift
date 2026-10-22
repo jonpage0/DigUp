@@ -42,6 +42,8 @@ nonisolated struct AppSettings: Sendable {
     var codeEditor: String?
     /// The code index catches up once the code folders have been quiet this long (`-codeQuietSeconds`, default 60).
     var codeQuietSeconds: Double
+    /// Photos' hidden items (its Hidden album) are indexed too. Off by default: Photos hides them on purpose.
+    var includeHiddenPhotos: Bool
 
     static let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/DigUp")
@@ -84,7 +86,8 @@ nonisolated struct AppSettings: Sendable {
             codeExcluded: folders(defaults, "codeExcludedFolders"),
             codeEditor: defaults.string(forKey: "codeEditor"),
             codeQuietSeconds: defaults.object(forKey: "codeQuietSeconds") == nil
-                ? 60 : max(1, defaults.double(forKey: "codeQuietSeconds")))
+                ? 60 : max(1, defaults.double(forKey: "codeQuietSeconds")),
+            includeHiddenPhotos: defaults.bool(forKey: "includeHiddenPhotos"))
     }
 
     /// A list of folders: a plist array, or paths joined with ":" (the form launch arguments use).
@@ -138,6 +141,10 @@ nonisolated struct AppSettings: Sendable {
 
     static func save(codeEditor: String) {
         defaults.set(codeEditor, forKey: "codeEditor")
+    }
+
+    static func save(includeHiddenPhotos: Bool) {
+        defaults.set(includeHiddenPhotos, forKey: "includeHiddenPhotos")
     }
 
     /// Expands "~" and resolves symlinks, so crawled paths match the paths FSEvents reports.

@@ -1,10 +1,13 @@
 import DigUpKit
 import SwiftUI
 
-/// The people and albums the indexed Photos libraries name, as the search window offers them to filter by.
+/// The people, albums and devices the indexed Photos libraries name, as the search window offers them to filter by.
 struct PhotosChoices: Sendable, Equatable {
     var people: [Person] = []
     var albums: [Album] = []
+    /// The devices "Shot on my devices" means: every one a camera saved something from into a library, most first.
+    /// (Adding and removing devices waits on Jon's approval of where that list is kept.)
+    var devices: [String] = []
 
     /// One name: Photos can keep two people of one name (two libraries, or a name given twice), and a picture of
     /// either counts (`SearchFilter.people`).
@@ -29,7 +32,8 @@ struct PhotosChoices: Sendable, Equatable {
     init() {}
 
     /// Only people and albums with an indexed file: the others would filter to nothing.
-    init(people: [IndexStore.PhotosPerson], albums: [IndexStore.PhotosAlbum]) {
+    init(people: [IndexStore.PhotosPerson], albums: [IndexStore.PhotosAlbum], cameras: [IndexStore.PhotosCamera]) {
+        devices = cameras.filter { $0.fromCamera > 0 }.map(\.model)
         var byName: [String: (ids: Set<Int64>, files: Int)] = [:]
         var names: [String] = []
         for person in people where person.files > 0 {
@@ -102,6 +106,10 @@ enum FilterToken: Equatable, Identifiable {
     case album(ids: Set<Int64>, title: String)
     /// Marked ♥ in Photos.
     case photosFavorites
+    /// Shot on one of these devices (`SearchFilter.shotOn`). One "From" choice at a time, as `origin` is.
+    case shotOn(Set<String>)
+    /// Came into the library this way (`PhotosLibrary.Origin`): saved from another app, or imported through Photos.
+    case origin(PhotosLibrary.Origin)
     /// Taken in the map's area ("Search This Area"; `SearchModel.area` holds the box).
     case area
 
@@ -110,15 +118,23 @@ enum FilterToken: Equatable, Identifiable {
         case .person(let name, _): "person:\(name)"
         case .album(let ids, _): "album:\(ids.sorted())"
         case .photosFavorites: "photos-favorites"
+        case .shotOn: "from:mine"
+        case .origin(let origin): "from:\(origin.rawValue)"
         case .area: "area"
         }
     }
+
+    /// Only one "From" filter is on at a time: what was shot on my devices and what was saved from apps exclude each
+    /// other, and both together would keep nothing.
+    var isFrom: Bool { id.hasPrefix("from:") }
 
     var title: String {
         switch self {
         case .person(let name, _): name
         case .album(_, let title): title
         case .photosFavorites: "Photos Favorites"
+        case .shotOn: "Shot on my devices"
+        case .origin(let origin): origin == .imported ? "Imported into Photos" : "Saved from other apps"
         case .area: "In the map's area"
         }
     }
@@ -128,6 +144,8 @@ enum FilterToken: Equatable, Identifiable {
         case .person: "person.crop.circle"
         case .album: "rectangle.stack"
         case .photosFavorites: "heart.fill"
+        case .shotOn: "iphone"
+        case .origin(let origin): origin == .imported ? "square.and.arrow.down" : "arrow.down.app"
         case .area: "map"
         }
     }
@@ -137,6 +155,12 @@ enum FilterToken: Equatable, Identifiable {
         case .person(let name, _): "Only pictures Photos knows \(name) is in"
         case .album(_, let title): "Only what's in the album “\(title)”"
         case .photosFavorites: "Only what you've marked ♥ in Photos"
+        case .shotOn(let devices):
+            "Only what you shot: what the camera saved to Photos on \(devices.sorted().formatted(.list(type: .or))), "
+                + "and older items taken with one of them"
+        case .origin(let origin):
+            origin == .imported ? "Only what was imported into Photos (from a folder on a Mac, or a camera's card)"
+                : "Only what other apps saved to Photos: Messages, AirDrop, Safari and the rest"
         case .area: "Only what was taken in the area you searched on the map"
         }
     }
@@ -259,12 +283,34 @@ struct PhotosFilterMenus: View {
             .buttonStyle(.plain)
             .help("Photos Favorites: only what you've marked ♥ in Photos")
             .accessibilityAddTraits(search.has(.photosFavorites) ? .isSelected : [])
+            Menu {
+                let mine = FilterToken.shotOn(Set(search.choices.devices))
+                PhotosFilterToggle(title: "Shot on my devices", token: mine, search: search)
+                    .disabled(search.choices.devices.isEmpty)
+                if !search.choices.devices.isEmpty {
+                    Text(search.choices.devices.formatted(.list(type: .and)))
+                }
+                Divider()
+                PhotosFilterToggle(title: "Saved from other apps", token: .origin(.saved), search: search)
+                PhotosFilterToggle(title: "Imported into Photos", token: .origin(.imported), search: search)
+            } label: {
+                FilterChipLabel(title: from?.title ?? "From", symbol: from?.symbol ?? "iphone", selected: from != nil,
+                                menu: true)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("From: what you shot on your own devices, what other apps saved, or what was imported")
         }
     }
 
     private var people: [String] {
         search.tokens.compactMap { if case .person(let name, _) = $0 { name } else { nil } }
     }
+
+    /// The "From" filter that's on, if one is.
+    private var from: FilterToken? { search.tokens.first(where: \.isFrom) }
 
     private var albums: [String] {
         search.tokens.compactMap { if case .album(_, let title) = $0 { title } else { nil } }

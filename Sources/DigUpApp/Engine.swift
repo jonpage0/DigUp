@@ -136,6 +136,8 @@ nonisolated final class Engine: @unchecked Sendable {
     private var excludedTypes: [String]
     private var codeRoots: [URL]
     private var codeExcluded: [URL]
+    /// What's hidden in Photos is indexed too (`IndexOptions.includeHiddenPhotos`): off unless it's turned on.
+    private var includeHiddenPhotos: Bool
 
     // indexQueue only
     /// Code search was turned off: the code index goes once no helper has it open.
@@ -174,6 +176,7 @@ nonisolated final class Engine: @unchecked Sendable {
         excludedTypes = settings.excludedTypes
         codeRoots = settings.codeRoots
         codeExcluded = settings.codeExcluded
+        includeHiddenPhotos = settings.includeHiddenPhotos
         codeQuietSeconds = settings.codeQuietSeconds
         pruneWanted = !settings.roots.isEmpty
         self.backfillBlocker = backfillBlocker
@@ -281,6 +284,21 @@ nonisolated final class Engine: @unchecked Sendable {
         watchQueue.async { [self] in startWatching() }
         indexQueue.async { [self] in
             pruneWanted = true
+            if helper != nil {
+                restartHelper = true
+                stopHelper()
+            } else {
+                startHelper()
+            }
+        }
+    }
+
+    /// Photos' hidden items in or out: the helper restarts with the setting, and its next listing of a library (made
+    /// again for the change) brings them in, or takes them out of the index.
+    func setIncludeHiddenPhotos(_ on: Bool) {
+        lock.withLock { includeHiddenPhotos = on }
+        log("photos: hidden items \(on ? "included" : "left out")")
+        indexQueue.async { [self] in
             if helper != nil {
                 restartHelper = true
                 stopHelper()
@@ -501,6 +519,7 @@ nonisolated final class Engine: @unchecked Sendable {
         if pruneWanted { arguments.append("--prune") }
         for folder in excluded { arguments += ["--exclude", folder.path] }
         for type in types { arguments += ["--exclude-ext", type] }
+        if lock.withLock({ includeHiddenPhotos }) { arguments.append("--include-hidden-photos") }
         for folder in codeRoots { arguments += ["--code-root", folder.path] }
         for folder in codeExcluded { arguments += ["--code-exclude", folder.path] }
         // Dev runs can give the helper more (-debugHelperArgs "--time-limit 0": its watchdog stops on every file).
@@ -853,12 +872,13 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
-    /// The people and albums named in the indexed Photos libraries (the search window's filters).
+    /// The people, albums and devices of the indexed Photos libraries (the search window's filters).
     func photosChoices() async -> PhotosChoices {
         await withCheckedContinuation { continuation in
             searchQueue.async { [self] in
                 continuation.resume(returning: PhotosChoices(people: (try? searchStore?.photosPeople()) ?? [],
-                                                             albums: (try? searchStore?.photosAlbums()) ?? []))
+                                                             albums: (try? searchStore?.photosAlbums()) ?? [],
+                                                             cameras: (try? searchStore?.photosCameras()) ?? []))
             }
         }
     }

@@ -222,6 +222,13 @@ final class AppController {
         power.setIndexOnBattery(on)
     }
 
+    /// Photos' hidden items in the index or not (Settings → Photos).
+    func setIncludeHiddenPhotos(_ on: Bool) {
+        AppSettings.save(includeHiddenPhotos: on)
+        model.settings.includeHiddenPhotos = on
+        engine.setIncludeHiddenPhotos(on)
+    }
+
     /// "Index only at set hours": on or off, and the hours (kept while it's off).
     func setIndexHours(on: Bool, hours: IndexHours) {
         AppSettings.save(indexHoursOn: on, hours: hours)

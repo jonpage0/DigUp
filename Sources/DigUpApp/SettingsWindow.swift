@@ -728,15 +728,28 @@ private struct PhotosSettings: View {
                 Text("Libraries")
             } footer: {
                 Text("Each picture is read as Photos shows it, edited or not; when the original is only in iCloud, "
-                     + "from Photos' own preview. Left out: what's hidden or in Recently Deleted, the shots of a burst "
-                     + "nobody picked, shared albums, Shared with You items not saved to the library, and videos that "
-                     + "are only in iCloud (DigUp never downloads anything). Your pictures, and what Photos knows about "
-                     + "them, are never changed.")
+                     + "from Photos' own preview, and a video only in iCloud from the stills Photos keeps of it "
+                     + "(Download Original, on a result, has Photos get the original). Left out: what's in Recently "
+                     + "Deleted, the shots of a burst nobody picked, shared albums, and Shared with You items not saved "
+                     + "to the library. Your pictures, and what Photos knows about them, are never changed.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            Section {
+                Toggle(isOn: Binding(get: { state.model.settings.includeHiddenPhotos },
+                                     set: { state.app.setIncludeHiddenPhotos($0) })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Include what's hidden in Photos")
+                        Text("Its Hidden album. They show in DigUp's results like any picture; Photos may ask for Touch "
+                             + "ID or your password when one is opened there.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
         }
         .formStyle(.grouped)

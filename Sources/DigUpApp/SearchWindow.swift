@@ -265,6 +265,8 @@ final class SearchModel {
             case .person(_, let ids): filter.people.append(ids)
             case .album(let ids, _): filter.albums.formUnion(ids)
             case .photosFavorites: filter.favorites = true
+            case .shotOn(let devices): filter.shotOn = devices
+            case .origin(let origin): filter.origins = [origin.rawValue]
             case .area: break
             }
         }
@@ -306,7 +308,9 @@ final class SearchModel {
         if token == .area {
             if !on { area = nil }
         } else if on {
-            if !has(token) { tokens.append(token) }
+            guard !has(token) else { return }
+            // One "From" at a time: the one picked replaces the other.
+            tokens = (token.isFrom ? tokens.filter { !$0.isFrom } : tokens) + [token]
         } else {
             tokens.removeAll { $0.id == token.id }
         }
