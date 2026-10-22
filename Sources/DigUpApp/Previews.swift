@@ -217,10 +217,13 @@ struct PreviewPane: View {
     /// What was found for this result (nothing yet, while it's being looked for).
     private var current: Found? { found?.key == foundKey ? found : nil }
 
-    /// The moments under the picture: in the window, for a recording that matched somewhere in it (a poster video
-    /// has only the one picture).
+    /// The moments under the picture, in the window: a recording that matched somewhere in it, or a video in iCloud
+    /// read from more than one of Photos' stills, which line up whether or not one matched (it may be here by Photos'
+    /// words alone). A poster video has only the one picture.
     private var showsMoments: Bool {
-        exploresMoments && row.momentCount > 0 && row.photos?.reading != .poster
+        guard exploresMoments else { return false }
+        if row.photos?.reading == .stills { return (row.info["frames"].flatMap(Int.init) ?? 0) > 1 }
+        return row.momentCount > 0 && row.photos?.reading != .poster
     }
 
     /// What the bar on a recording's picture marks: nothing when the strip under it shows the moments, else every one
@@ -242,7 +245,7 @@ struct PreviewPane: View {
     private func find() async {
         guard wantsMoments else { return }
         let key = foundKey
-        let moments = await Previews.shared.moments(row.id, row.query)
+        let moments = row.momentCount > 0 ? await Previews.shared.moments(row.id, row.query) : []
         let filmstrip = showsMoments && row.photos?.reading == .stills
             ? PhotosLibrary.filmstrip(startingAt: row.url.path) : []
         guard !Task.isCancelled else { return }

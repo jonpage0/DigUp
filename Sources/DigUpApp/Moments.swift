@@ -481,8 +481,9 @@ struct PlayerView: NSViewRepresentable {
 }
 
 /// Under a recording's picture in the window: every moment of it that matched, best first, on a strip the length of
-/// the recording (a video in iCloud: along Photos' stills of it, which carry no time) and in a list. A click on a mark
-/// or a row plays from there (shows that still), and the result is at it from then on (`PreviewPlayback.pick`).
+/// the recording (a video in iCloud: along Photos' stills of it, which carry no time, all of them whether or not one
+/// matched) and in a list. A click on a mark, a still or a row plays from there (shows that still), and the result is
+/// at it from then on (`PreviewPlayback.pick`).
 struct MomentsSection: View {
     /// The result as the search gave it, and as the pane shows it (at the moment last picked).
     let row: ResultRow
@@ -505,7 +506,7 @@ struct MomentsSection: View {
                 MomentStrip(row: shown, moments: moments.filter { $0.start != nil }, duration: duration, width: width,
                             label: label, isAt: isAt, pick: pick(_:))
             }
-            MomentList(moments: moments, label: label, isAt: isAt, pick: pick(_:))
+            if !moments.isEmpty { MomentList(moments: moments, label: label, isAt: isAt, pick: pick(_:)) }
         }
     }
 

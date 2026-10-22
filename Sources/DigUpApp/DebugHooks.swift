@@ -59,8 +59,9 @@ import SwiftUI
 ///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup"   with -debugWindow search: these filters on
 ///                             (a Photos library's people and albums, by name; Photos' favorites; DigUp's own)
 ///     -debugMoment N          with -debugWindow search: before the snapshot, pick the selected result's Nth moment
-///                             under the preview (1: the best) as a click would: it plays from there (muted), and the
-///                             log says where playback got to and where Quick Look and Open would go
+///                             under the preview (1: the best; a video read from Photos' stills: its Nth still) as a
+///                             click would: it plays from there (muted), and the log says where playback got to and
+///                             where Quick Look and Open would go
 ///     -debugUpdateCheck YES   check for updates in the background a second after launch, as the daily check does
 ///     -debugUseModelFiles a:b take these files as the model, as Use Files… does, a second after launch
 ///     -debugHelperArgs "…"    more arguments for the indexing helper, in dev runs ("--time-limit 0")
@@ -431,29 +432,41 @@ enum DebugHooks {
         }
     }
 
-    /// `-debugMoment N`: picks the search window's selected result's Nth moment (1: the best) as a click under the
-    /// preview would, lets it play (muted) for 1.5 s, and logs where playback is and where Quick Look and Open would go.
+    /// `-debugMoment N`: picks the search window's selected result's Nth moment (1: the best), or for a video read from
+    /// Photos' stills its Nth still (1: the first, matched or not), as a click under the preview would; lets it play
+    /// (muted) for 1.5 s, and logs where playback is and where Quick Look and Open would go.
     private static func pickMoment(_ app: AppController, then done: @escaping () -> Void) {
         let number = UserDefaults.standard.integer(forKey: "debugMoment")
         guard number > 0, let row = app.searchWindow.search.selectedRow else { return done() }
+        let playback = PreviewPlayback.shared
+        playback.muted = true
+        func report(_ picked: String) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                let placed = playback.placed(row)
+                let at = playback.player.map { String(format: "%.2f s", $0.currentTime().seconds) } ?? "not playing"
+                log("debug: picked \(picked) of \(row.name) (\(placed.reason)): playback at \(at); Quick Look opens "
+                    + "item \(placed.quickLook.start + 1) at \(placed.quickLookState.map { "\($0)" } ?? "the start"); "
+                    + placed.openTitle)
+                done()
+            }
+        }
+        if row.photos?.reading == .stills {
+            let filmstrip = PhotosLibrary.filmstrip(startingAt: row.url.path)
+            guard filmstrip.indices.contains(number - 1) else {
+                log("debug: \(row.name) has \(filmstrip.count) stills, no still \(number)")
+                return done()
+            }
+            playback.pick(still: filmstrip[number - 1], of: row)
+            return report("still \(number) of \(filmstrip.count)")
+        }
         Task {
             let moments = await app.engine.moments(of: row.id, matching: row.query)
             guard moments.indices.contains(number - 1) else {
                 log("debug: \(row.name) has \(moments.count) moments, no moment \(number)")
                 return done()
             }
-            let playback = PreviewPlayback.shared
-            playback.muted = true
-            let filmstrip = row.photos?.reading == .stills ? PhotosLibrary.filmstrip(startingAt: row.url.path) : []
-            playback.pick(moments[number - 1], of: row, filmstrip: filmstrip)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                let placed = playback.placed(row)
-                let at = playback.player.map { String(format: "%.2f s", $0.currentTime().seconds) } ?? "not playing"
-                log("debug: picked moment \(number) of \(moments.count) of \(row.name) (\(placed.reason)): playback at "
-                    + "\(at); Quick Look opens item \(placed.quickLook.start + 1) at "
-                    + "\(placed.quickLookState.map { "\($0)" } ?? "the start"); \(placed.openTitle)")
-                done()
-            }
+            playback.pick(moments[number - 1], of: row, filmstrip: [])
+            report("moment \(number) of \(moments.count)")
         }
     }
 
