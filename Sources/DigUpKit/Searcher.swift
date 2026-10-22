@@ -60,8 +60,9 @@ public struct SearchFilter: Sendable, Equatable {
     /// Shot on one of these devices (`IndexStore.photosCameras`' models), the app's "Shot on my devices": a camera
     /// took it into the library (origin camera) on one of them, or with no device recorded (Photos says a camera took
     /// it, which is the user's: 234 of 21,165 in a real library had no device name); or an older item, which Photos
-    /// says nothing about (origin unknown), whose device is one of them.
-    public var shotOn: Set<String>
+    /// says nothing about (origin unknown), whose device is one of them. Nil doesn't filter; an empty set (every
+    /// device taken off the user's list) keeps only what a camera saved with no device named.
+    public var shotOn: Set<String>?
     /// Only these files, by path (the app's own favorites, `IndexStore.paths(ofAssets:)` for a Photos item's current
     /// file). Nil keeps every file; an empty set keeps none.
     public var paths: Set<String>?
@@ -79,13 +80,13 @@ public struct SearchFilter: Sendable, Equatable {
     }
 
     public init(people: [Set<Int64>] = [], albums: Set<Int64> = [], favorites: Bool = false, origins: Set<String> = [],
-                cameras: Set<String> = [], shotOn: Set<String> = [], paths: Set<String>? = nil, area: Area? = nil) {
+                cameras: Set<String> = [], shotOn: Set<String>? = nil, paths: Set<String>? = nil, area: Area? = nil) {
         (self.people, self.albums, self.favorites, self.area) = (people, albums, favorites, area)
         (self.origins, self.cameras, self.shotOn, self.paths) = (origins, cameras, shotOn, paths)
     }
 
     public var isEmpty: Bool {
-        people.isEmpty && albums.isEmpty && !favorites && origins.isEmpty && cameras.isEmpty && shotOn.isEmpty
+        people.isEmpty && albums.isEmpty && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
             && paths == nil && area == nil
     }
 
@@ -107,13 +108,18 @@ public struct SearchFilter: Sendable, Equatable {
             parts.append("SELECT file FROM photos_assets WHERE camera IN (\(placeholders(cameras)))")
             values += cameras.map { .text($0) }
         }
-        if !shotOn.isEmpty {
-            let devices = placeholders(shotOn)
-            parts.append("""
-                SELECT file FROM photos_assets WHERE (origin = 'camera' AND (camera IS NULL OR camera IN (\(devices))))
-                    OR (origin = 'unknown' AND camera IN (\(devices)))
-                """)
-            values += shotOn.map { .text($0) } + shotOn.map { .text($0) }
+        if let shotOn {
+            if shotOn.isEmpty {
+                parts.append("SELECT file FROM photos_assets WHERE origin = 'camera' AND camera IS NULL")
+            } else {
+                let devices = placeholders(shotOn)
+                parts.append("""
+                    SELECT file FROM photos_assets
+                    WHERE (origin = 'camera' AND (camera IS NULL OR camera IN (\(devices))))
+                        OR (origin = 'unknown' AND camera IN (\(devices)))
+                    """)
+                values += shotOn.map { .text($0) } + shotOn.map { .text($0) }
+            }
         }
         if let paths {
             parts.append(paths.isEmpty ? "SELECT id FROM files WHERE 0"

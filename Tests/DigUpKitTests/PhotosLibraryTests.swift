@@ -298,6 +298,9 @@ import Testing
         #expect(try kept(SearchFilter(shotOn: ["iPhone 15 Pro", "iPhone Air"]))
             == [listed[4].path, listed[3].path, listed[1].path, listed[0].path])
         #expect(try kept(SearchFilter(shotOn: ["iPhone Air"])) == [listed[4].path, listed[3].path])
+        // No device of mine left (all taken off in Settings): what a camera saved with no device named, and nothing
+        // else; the filter still keeps to the camera's, it doesn't stop filtering.
+        #expect(try kept(SearchFilter(shotOn: [])) == [listed[4].path])
 
         // With words: the filter narrows the matches before they're cut to the best 1,000 (more notes than that say
         // "beach", each more than Photos' words do).

@@ -844,7 +844,8 @@ private struct PhotosSettings: View {
                     }
                 }
             }
-            if !state.cameras.isEmpty {
+            // Whenever there's a device to turn on or off, an added one no picture names now included.
+            if !state.deviceChoices.isEmpty {
                 Section {
                     let mine = state.myDevices
                     HStack(alignment: .firstTextBaseline, spacing: 12) {

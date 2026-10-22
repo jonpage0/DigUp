@@ -144,8 +144,11 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             search.filter = kinds[index]
         case 26 where modifiers == .command && app.model.hasCode:   // ⌘7: code
             search.filter = .code
-        case 8 where modifiers == .command && search.navigated:   // ⌘C
-            guard let row = search.selectedRow else { return false }
+        case 8 where modifiers == .command:   // ⌘C
+            // The selected file, as in the panel, except right after you selected some of the query's words (then
+            // they're what you meant; arrowing or clicking to a result means the file).
+            let textSelected = (search.field?.currentEditor()?.selectedRange.length ?? 0) > 0
+            guard let row = search.selectedRow, !textSelected || search.navigated else { return false }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.writeObjects([row.url as NSURL])
         case 48 where modifiers.isEmpty && !search.suggestions.isEmpty:   // Tab: the first suggestion becomes a filter
@@ -191,6 +194,8 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
 /// A window that hands Quick Look the selected result (Space / ⌘Y).
 final class QuickLookWindow: NSWindow, QLPreviewPanelDataSource, QuickLookSource {
     var previewItems: [QuickLookItem] = []
+    /// Where in them Quick Look was last told to show (`showInQuickLook`).
+    var previewPlace = ""
 
     nonisolated override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
 
@@ -294,7 +299,7 @@ final class SearchModel {
             case .album(let ids, _): filter.albums.formUnion(ids)
             case .photosFavorites: filter.favorites = true
             case .digupFavorites: filter.paths = []
-            case .shotOnMyDevices: filter.shotOn = Set(myDevices)
+            case .shotOnMyDevices: filter.shotOn = Set(myDevices)   // empty: still filtering (`SearchFilter.shotOn`)
             case .origin(let origin): filter.origins = [origin.rawValue]
             case .area: break
             }

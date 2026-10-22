@@ -116,6 +116,8 @@ extension ResultRow {
 /// The window or panel that hands Quick Look the selected result (`QLPreviewPanelDataSource`): what it shows now.
 protocol QuickLookSource: AnyObject {
     var previewItems: [QuickLookItem] { get set }
+    /// Where in them it was last told to show: the first item, and the page or moment.
+    var previewPlace: String { get set }
 }
 
 extension QuickLookSource {
@@ -123,10 +125,20 @@ extension QuickLookSource {
     func showInQuickLook(_ row: ResultRow?) {
         let panel = QLPreviewPanel.shared()!
         let (items, start) = row?.quickLook ?? ([], 0)
-        let same = items.map(\.previewItemURL) == previewItems.map(\.previewItemURL)
+        let place = "\(start) \(row?.page ?? 0) \(row?.moment ?? -1)"
+        let sameFiles = items.map(\.previewItemURL) == previewItems.map(\.previewItemURL)
+        let samePlace = place == previewPlace
         previewItems = items
-        // The same file again (a key that didn't move the selection): reloading it would restart a movie.
-        guard !same || !panel.isVisible else { return }
+        previewPlace = place
+        if sameFiles, panel.isVisible {
+            // The same files showing (a key that didn't move the selection, or the same file matching elsewhere):
+            // reloading them would restart a movie, so only a new place in them moves Quick Look.
+            guard !samePlace, let row else { return }
+            if panel.currentPreviewItemIndex != start { panel.currentPreviewItemIndex = start }
+            panel.displayState = row.quickLookState ?? (row.page != nil ? ["CurrentPage": 0]
+                : row.moment != nil ? ["CurrentTime": 0] : panel.displayState)
+            return
+        }
         panel.reloadData()
         if start > 0 { panel.currentPreviewItemIndex = start }
         QuickLookMoment.show(row, in: panel)

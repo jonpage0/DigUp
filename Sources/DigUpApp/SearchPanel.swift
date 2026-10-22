@@ -224,6 +224,7 @@ final class SearchPanelController {
     }
 
     private func show(_ hits: [SearchHit], query: String, phase: SearchPhase) {
+        app.favorites.followMoves()   // a file marked ♥ that moved shows its heart where it is now
         // Code is one group: it gets the room of all of them.
         results = ResultSet(hits, query: query, rowsPerGroup: isCode ? Self.rowsPerGroup * 3 : Self.rowsPerGroup)
         if !navigated { showWeaker = false }
@@ -517,6 +518,8 @@ final class SearchPanelController {
 final class SearchPanelWindow: NSPanel, QLPreviewPanelDataSource, QuickLookSource {
     /// What Space / ⌘Y previews.
     var previewItems: [QuickLookItem] = []
+    /// Where in them Quick Look was last told to show (`showInQuickLook`).
+    var previewPlace = ""
 
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: SearchPanelController.width,
