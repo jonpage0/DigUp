@@ -86,6 +86,7 @@ final class AppController {
         }
 
         Previews.shared.passage = { [engine] id, code in await engine.text(ofSegment: id, code: code) }
+        Previews.shared.moments = { [engine] path, text in await engine.moments(of: path, matching: text) }
         CodeEditor.current = CodeEditor.chosen(model.settings.codeEditor)
         download.onReady = { [weak self] in self?.engine.modelArrived() }
         engine.start()

@@ -919,6 +919,21 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
+    /// Every moment of the recording at `path` that matches `text` (`Searcher.moments(of:queryVector:zGate:)`), best
+    /// first, for the preview. None when meaning search can't run: no query vector, or the index's vectors are another
+    /// model's (as `search` finds them).
+    func moments(of path: String, matching text: String) async -> [Moment] {
+        guard let vector = await embedQuery(text) else { return [] }
+        return await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                guard let searcher, searcher.vectorSource == nil || searcher.vectorSource == vector.source else {
+                    return continuation.resume(returning: [])
+                }
+                continuation.resume(returning: (try? searcher.moments(of: path, queryVector: vector.values)) ?? [])
+            }
+        }
+    }
+
     // MARK: Index overview (main window)
 
     /// What's indexed under one folder.

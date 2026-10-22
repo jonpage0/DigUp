@@ -12,6 +12,9 @@ final class Previews {
     private let cache = NSCache<NSString, NSImage>()
     /// The text of a document's passage or a stretch of code (`Engine.text(ofSegment:code:)`), set when the app starts.
     var passage: (Int64, Bool) async -> String? = { _, _ in nil }
+    /// Every moment of a recording that matches a query, by path and query (`Engine.moments(of:matching:)`), set when
+    /// the app starts. Not cached: the preview asks once a result.
+    var moments: (String, String) async -> [Moment] = { _, _ in [] }
 
     init() {
         cache.totalCostLimit = 48 << 20
@@ -52,8 +55,9 @@ final class Previews {
             as NSString
     }
 
-    /// The frame at `seconds` (within half a second, so it's a quick seek).
-    private nonisolated static func frame(of url: URL, at seconds: Double, pixels: CGFloat) async -> CGImage? {
+    /// The frame at `seconds` (within half a second, so it's a quick seek). Also what the window's moment strip shows
+    /// under the pointer (`MomentStrip`), which keeps none of them.
+    nonisolated static func frame(of url: URL, at seconds: Double, pixels: CGFloat) async -> CGImage? {
         let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: pixels, height: pixels)
@@ -144,18 +148,41 @@ final class Previews {
     }
 }
 
-/// The selected result, big: its picture (or the frame or page that matched), what it is, and why it's here.
+/// The selected result, big: its picture (or the frame or page that matched), what it is, and why it's here. A
+/// recording that matched in more places than one marks them all.
 struct PreviewPane: View {
     let row: ResultRow
     /// The picture's box.
     let imageSize: CGSize
     /// A double-click on the picture or passage: the file in its app, like Open.
     var open: () -> Void = {}
+    /// The window's pane: a recording's moments under its picture, as a strip and a list to play them from, and the
+    /// result shown at the one last picked (`MomentsSection`). The panel has room only to mark them on the picture.
+    var exploresMoments = false
+    /// A moment or still was picked under the picture (the window's Quick Look follows).
+    var picked: () -> Void = {}
+    @State private var found: Found?
+
+    /// What was found for one result (`key`): its moments for the query, and a video in iCloud's stills in order.
+    private struct Found {
+        let key: String
+        let moments: [Moment]
+        let filmstrip: [String]
+    }
 
     var body: some View {
+        let shown = exploresMoments ? PreviewPlayback.shared.placed(row) : row
         VStack(alignment: .leading, spacing: 0) {
-            PreviewPicture(row: row, size: imageSize, open: open)
+            // With the strip under it, the picture sits at the bottom of its box, on the strip.
+            PreviewPicture(row: shown, size: imageSize, open: open, stretches: barStretches,
+                           alignment: showsMoments ? .bottom : .center)
                 .frame(maxWidth: .infinity)
+            if showsMoments {
+                MomentsSection(row: row, shown: shown, moments: current?.moments ?? [],
+                               filmstrip: current?.filmstrip ?? [], width: imageSize.width, picked: picked)
+                    .id(foundKey)
+                    .padding(.top, 10)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 Text(row.title)
                     .font(.system(size: 14, weight: .semibold))
@@ -177,10 +204,49 @@ struct PreviewPane: View {
                     .lineLimit(1)
             }
             .padding(.top, 12)
-            WhyItMatched(row: row)
+            WhyItMatched(row: shown)
                 .padding(.top, 12)
             Spacer(minLength: 0)
         }
+        .task(id: foundKey) { await find() }
+    }
+
+    /// One result's: the meaning results that follow a search's first, keyword-only ones count its moments.
+    private var foundKey: String { "\(row.id)|\(row.query)|\(row.momentCount)" }
+
+    /// What was found for this result (nothing yet, while it's being looked for).
+    private var current: Found? { found?.key == foundKey ? found : nil }
+
+    /// The moments under the picture: in the window, for a recording that matched somewhere in it (a poster video
+    /// has only the one picture).
+    private var showsMoments: Bool {
+        exploresMoments && row.momentCount > 0 && row.photos?.reading != .poster
+    }
+
+    /// What the bar on a recording's picture marks: nothing when the strip under it shows the moments, else every one
+    /// found, or until they are the one the result points at.
+    private var barStretches: [ClosedRange<Double>] {
+        if showsMoments { return [] }
+        let all = (current?.moments ?? []).compactMap { moment in
+            moment.start.map { $0...max($0, moment.end ?? $0) }
+        }
+        return all.isEmpty ? (row.momentSpan.map { [$0] } ?? []) : all
+    }
+
+    /// Worth looking for: the window shows every moment; the panel only marks a recording's timed ones on its bar,
+    /// where the one the result points at is marked already.
+    private var wantsMoments: Bool {
+        exploresMoments ? showsMoments : row.momentCount > 1 && row.photos?.reading?.isStandIn != true
+    }
+
+    private func find() async {
+        guard wantsMoments else { return }
+        let key = foundKey
+        let moments = await Previews.shared.moments(row.id, row.query)
+        let filmstrip = showsMoments && row.photos?.reading == .stills
+            ? PhotosLibrary.filmstrip(startingAt: row.url.path) : []
+        guard !Task.isCancelled else { return }
+        found = Found(key: key, moments: moments, filmstrip: filmstrip)
     }
 }
 
@@ -264,13 +330,17 @@ private struct DownloadOriginal: View {
     }
 }
 
-/// The picture part of the preview. A video's moment sits on the frame as a scrub bar; audio has no picture, so it
-/// gets its moment on a timeline instead.
+/// The picture part of the preview. A video's moments sit on the frame as a scrub bar; audio has no picture, so it
+/// gets them on a timeline instead.
 struct PreviewPicture: View {
     let row: ResultRow
     let size: CGSize
     /// Double-click opens it, as in Finder's and Spotlight's previews (not on the player or its controls).
     var open: () -> Void = {}
+    /// What a recording's bar marks, in seconds: its moments (none, and there's no bar).
+    let stretches: [ClosedRange<Double>]
+    /// Where the picture sits in its box when it's smaller.
+    var alignment: Alignment = .center
     @State private var image: NSImage?
     @State private var loaded = false
     @Environment(\.displayScale) private var scale
@@ -278,7 +348,7 @@ struct PreviewPicture: View {
     var body: some View {
         Group {
             if row.kind == .audio {
-                AudioMoment(row: row)
+                AudioMoment(row: row, stretches: stretches)
                     .frame(height: min(size.height, 150))
             } else if row.kind == .code {
                 CodeLines(row: row)
@@ -305,7 +375,7 @@ struct PreviewPicture: View {
                     .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
                     .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
-                    .frame(maxWidth: size.width, maxHeight: size.height)
+                    .frame(maxWidth: size.width, maxHeight: size.height, alignment: alignment)
             } else {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.primary.opacity(0.05))
@@ -322,7 +392,10 @@ struct PreviewPicture: View {
             }
         }
         .frame(height: row.kind == .audio ? min(size.height, 150) : size.height)
-        .onChange(of: row.previewKey) { PreviewPlayback.shared.stop() }
+        // The selection moved on (not to another moment of the recording playing, picked under the preview).
+        .onChange(of: row.previewKey) {
+            if !PreviewPlayback.shared.isCurrent(row) { PreviewPlayback.shared.stop() }
+        }
         // The pane went away (the weaker-matches row selected, no results, the window's preview hidden): no sound
         // without its controls.
         .onDisappear { if PreviewPlayback.shared.isCurrent(row) { PreviewPlayback.shared.stop() } }
@@ -343,8 +416,8 @@ struct PreviewPicture: View {
         if let place = row.place {
             VStack(alignment: .leading, spacing: 7) {
                 PlaceBadge(text: place, onImage: true)
-                if row.kind == .video, let loc = row.loc, let duration = row.duration, duration > 0 {
-                    MomentBar(start: loc, end: row.locEnd ?? loc + 3, duration: duration, onImage: true)
+                if row.kind == .video, !stretches.isEmpty, let duration = row.duration, duration > 0 {
+                    MomentBar(stretches: stretches, duration: duration, onImage: true)
                 }
             }
             .padding(10)
@@ -358,9 +431,11 @@ struct PreviewPicture: View {
     }
 }
 
-/// An audio hit: the stretch that matched, on the file's timeline.
+/// An audio hit: where it matched, on the file's timeline.
 struct AudioMoment: View {
     let row: ResultRow
+    /// What its timeline marks, in seconds: its moments (none, and the window's strip under it shows them).
+    let stretches: [ClosedRange<Double>]
     private var playback: PreviewPlayback { .shared }
 
     var body: some View {
@@ -380,8 +455,8 @@ struct AudioMoment: View {
             }
             if let loc = row.loc {
                 VStack(spacing: 5) {
-                    if let duration = row.duration, duration > 0 {
-                        MomentBar(start: loc, end: row.locEnd ?? loc + 30, duration: duration,
+                    if !stretches.isEmpty, let duration = row.duration, duration > 0 {
+                        MomentBar(stretches: stretches, duration: duration,
                                   playhead: playback.isCurrent(row) ? playback.time : nil)
                             .frame(maxWidth: 260)
                     }
@@ -398,7 +473,7 @@ struct AudioMoment: View {
 
     /// "0:25 – 0:55 of 3:12"
     private func span(from start: Double) -> String {
-        let end = row.locEnd ?? start + 30
+        let end = row.momentSpan?.upperBound ?? start
         let total = row.duration.map { " of " + ResultRow.clock($0) } ?? ""
         return ResultRow.clock(start) + " – " + ResultRow.clock(end) + total
     }

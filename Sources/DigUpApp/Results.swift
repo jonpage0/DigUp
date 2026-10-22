@@ -8,10 +8,11 @@ struct ResultRow: Identifiable, Equatable {
     let name: String
     let folder: String      // "~/Downloads/Screenshots"
     let kind: FileKind
-    let segment: SegmentKind
-    let segmentID: Int64
-    let loc: Double?        // PDF page, seconds into audio or video, or a stretch of code's first line
-    let locEnd: Double?
+    // The part that matched; another moment of a recording once one is picked under the preview (`at`).
+    private(set) var segment: SegmentKind
+    private(set) var segmentID: Int64
+    private(set) var loc: Double?        // PDF page, seconds into audio or video, or a stretch of code's first line
+    private(set) var locEnd: Double?
     /// Code: the line to open at (where the name is defined, or the first line with the query's words).
     let focus: Double?
     let excerpt: String?    // matched words are wrapped in « »
@@ -22,12 +23,16 @@ struct ResultRow: Identifiable, Equatable {
     let modified: Date
     let size: Int64
     let info: [String: String]
-    /// The query's words (`Searcher.terms`): what the preview highlights on a page or in a passage.
+    /// The query (as searched, without "code:"), and its words (`Searcher.terms`): what the preview highlights on a
+    /// page or in a passage.
+    let query: String
     let terms: [String]
     /// A picture or video of a Photos library: it opens in Photos (`Opener.showInPhotos`).
-    let photos: PhotosHit?
+    private(set) var photos: PhotosHit?
+    /// A video or audio file: how many moments of it match (`SearchHit.momentCount`).
+    let momentCount: Int
 
-    init(_ hit: SearchHit, terms: [String] = []) {
+    init(_ hit: SearchHit, query: String = "", terms: [String] = []) {
         id = hit.path
         url = URL(fileURLWithPath: hit.path)
         photos = hit.photos
@@ -60,7 +65,28 @@ struct ResultRow: Identifiable, Equatable {
         modified = Date(timeIntervalSince1970: hit.photos?.date ?? hit.modified)
         size = hit.size
         info = hit.info
+        momentCount = hit.momentCount
+        self.query = query
         self.terms = terms
+    }
+
+    /// This result at another of its moments (`Searcher.moments(of:queryVector:zGate:)`), picked under the preview:
+    /// where it plays from, and where Quick Look and Open go. A still's file is found in `filmstrip`, the video's stills
+    /// in order.
+    func at(_ moment: Moment, filmstrip: [String]) -> ResultRow {
+        var placed = self
+        placed.segment = moment.kind == .heard ? .audio : .frame
+        placed.segmentID = moment.segmentID
+        (placed.loc, placed.locEnd) = (moment.start, moment.end)
+        if let still = moment.still, filmstrip.indices.contains(still) { placed.photos?.still = filmstrip[still] }
+        return placed
+    }
+
+    /// A video in iCloud showing another of Photos' stills of it, picked under the preview.
+    func showing(still: String) -> ResultRow {
+        var placed = self
+        placed.photos?.still = still
+        return placed
     }
 
     /// The name to show: left to right as Finder shows it, also when it starts in Arabic ("ملاحظة.md", not "md.ملاحظة").
@@ -259,7 +285,7 @@ struct ResultSet: Equatable {
         let terms = Searcher.terms(query)
         var order: [ResultGroupKind] = []
         var byGroup: [ResultGroupKind: [ResultRow]] = [:]
-        ranked = hits.prefix(strong).map { ResultRow($0, terms: terms) }
+        ranked = hits.prefix(strong).map { ResultRow($0, query: query, terms: terms) }
         for row in ranked {
             let group = ResultGroupKind(row.kind)
             if byGroup[group] == nil { order.append(group) }
@@ -268,7 +294,7 @@ struct ResultSet: Equatable {
         groups = order.map {
             ResultGroup(kind: $0, rows: Array(byGroup[$0]!.prefix(rowsPerGroup)), total: byGroup[$0]!.count)
         }
-        weaker = hits.dropFirst(strong).map { ResultRow($0, terms: terms) }
+        weaker = hits.dropFirst(strong).map { ResultRow($0, query: query, terms: terms) }
     }
 
     var strongRows: [ResultRow] { groups.flatMap(\.rows) }

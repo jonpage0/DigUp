@@ -247,6 +247,7 @@ private struct PanelRow: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     if let place = row.place { PlaceBadge(text: place) }
+                    if let moments = row.momentsLabel { PlaceBadge(text: moments) }
                 }
                 if let excerpt = row.excerpt, row.matchedWords, row.kind != .code {
                     Text(highlighted(excerpt, size: 11))
@@ -269,7 +270,7 @@ private struct PanelRow: View {
         .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
             .fill(selected ? Color.accentColor.opacity(0.24) : Color.clear))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(row.kind.title), \(row.name), \(row.reason)")
+        .accessibilityLabel("\(row.kind.title), \(row.name), \(row.reason)" + (row.momentsLabel.map { ", \($0)" } ?? ""))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

@@ -122,7 +122,10 @@ Only the folders you choose:
   like a data export, is matched by its exact text only
 - audio of any length: the model listens to 30 seconds at a time, so DigUp takes overlapping 30-second windows and a
   match points to its moment
-- video of any length: a frame every few seconds, one per shot, plus the soundtrack the same way as audio
+- video of any length: a frame every few seconds, one per shot, plus the soundtrack the same way as audio. A recording
+  that matches in several places stays one result ("3 moments"); on a Mac the search window's preview marks every
+  moment on a strip under the player and lists them ("0:42–0:51 · seen", "2:10–2:40 · heard", best first), and a
+  click plays from there (Space then opens Quick Look at it)
 - on a Mac with osxphotos installed, a Photos library's pictures and videos, by what they show and by what Photos knows
   about them (see [Apple Photos](#apple-photos))
 
@@ -208,7 +211,8 @@ What it reads of a library, and what it leaves alone:
   ("Optimize Mac Storage", which can be nearly every picture), it reads Photos' own preview instead: 1,024 pixels on its
   long side for a photo, as many as DigUp gives the model anyway. A video that's only in iCloud is read from what Photos
   keeps of it on this Mac: the stills of Photos' filmstrip of it (six or so, each found like a frame of the video,
-  though they carry no time; the preview shows the one that matched, and Space shows them all, starting at that one),
+  though they carry no time; the preview shows the one that matched, the search window's preview lines them all up with
+  the ones that matched marked, and Space shows them all, starting at that one),
   else one still of it; a video Photos keeps nothing of is left out until it's on this Mac. A picture whose file
   changes (downloaded, edited) stays one result, with all Photos says about it, and is read again.
 - the words in a picture are the ones Photos read in it, kept in its catalog, so DigUp doesn't read each screenshot

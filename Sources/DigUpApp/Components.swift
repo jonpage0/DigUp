@@ -58,10 +58,9 @@ struct PlaceBadge: View {
     }
 }
 
-/// Where a moment sits in a recording: a track with the matched stretch lit.
+/// Where a recording's moments sit: a track with each matched stretch lit (in seconds).
 struct MomentBar: View {
-    let start: Double
-    let end: Double
+    let stretches: [ClosedRange<Double>]
     let duration: Double
     /// Drawn over a picture: white on a dark track.
     var onImage = false
@@ -71,13 +70,16 @@ struct MomentBar: View {
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
-            let from = max(0, min(1, start / duration)), to = max(from, min(1, end / duration))
             ZStack(alignment: .leading) {
                 Capsule().fill(onImage ? Color.white.opacity(0.3) : Color.primary.opacity(0.12))
-                Capsule()
-                    .fill(onImage ? Color.white : Color.accentColor)
-                    .frame(width: max(4, width * (to - from)))
-                    .offset(x: width * from)
+                ForEach(Array(stretches.enumerated()), id: \.offset) { _, stretch in
+                    let from = max(0, min(1, stretch.lowerBound / duration))
+                    let to = max(from, min(1, stretch.upperBound / duration))
+                    Capsule()
+                        .fill(onImage ? Color.white : Color.accentColor)
+                        .frame(width: max(4, width * (to - from)))
+                        .offset(x: width * from)
+                }
                 if let playhead {
                     Circle()
                         .fill(Color.primary)
@@ -87,7 +89,9 @@ struct MomentBar: View {
             }
         }
         .frame(height: 4)
-        .accessibilityLabel("At \(ResultRow.clock(start)) of \(ResultRow.clock(duration))")
+        .accessibilityLabel(stretches.count == 1
+            ? "At \(ResultRow.clock(stretches[0].lowerBound)) of \(ResultRow.clock(duration))"
+            : "\(stretches.count) moments in \(ResultRow.clock(duration))")
     }
 }
 

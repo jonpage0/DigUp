@@ -23,6 +23,33 @@ public struct SearchHit: Sendable {
     public var focus: Double? = nil
     /// A picture or video of a Photos library: where it is in Photos, and what Photos calls it.
     public var photos: PhotosHit? = nil
+    /// A video or audio file: how many moments of it match the query (`Searcher.moments(of:queryVector:zGate:)`),
+    /// counted from the scores the search has anyway. 0 when none does (it's here by its name, say).
+    public var momentCount = 0
+}
+
+/// A stretch of a recording that matches a query (`Searcher.moments(of:queryVector:zGate:)`): its segments that stand
+/// out on the query's scale, neighbours of the same kind merged into one.
+public struct Moment: Sendable, Equatable {
+    public enum Kind: String, Sendable {
+        /// A frame of the video, or one of Photos' stills of a video in iCloud.
+        case seen
+        /// A window of its sound (an audio file, or a video's soundtrack).
+        case heard
+    }
+
+    public let kind: Kind
+    /// Seconds into the recording, from where its first segment starts to where its last one ends. Nil for a still,
+    /// which carries no time.
+    public let start: Double?
+    public let end: Double?
+    /// A video in iCloud read from Photos' filmstrip: the still's place in it, from 0 (the indexer writes a stills
+    /// video's frames in the filmstrip's order, `PhotosLibrary.filmstrip(startingAt:)`).
+    public let still: Int?
+    /// How far its best segment stands out for the query (`Searcher.meaning`): the moments of a file go best first.
+    public let score: Double
+    /// Its best segment.
+    public let segmentID: Int64
 }
 
 /// A hit from a Photos library (`PhotosLibrary`): the asset it shows, its title and date in Photos (from its
@@ -245,14 +272,19 @@ public final class Searcher {
             (kinds == nil || fileKind[file].map { kinds!.contains($0) } ?? false) && (kept?.contains(file) ?? true)
         }
 
-        // Meaning: score every vector on this query's scale (`meaning`), keep each file's best segment.
+        // Meaning: score every vector on this query's scale (`meaning`), keep each file's best segment, and a
+        // recording's segments that stand out (its moments, counted for the hits it makes).
         var best: [Int64: (z: Double, cosine: Double, row: Int)] = [:]
+        var standouts: [Int64: [(segment: Int64, z: Double)]] = [:]
         if let query = queryVector, query.count == Vectors.dimension, !rowFile.isEmpty {
             let scores = score(query)
             let meaning = Self.meaning(scores, rowModality, setsScale: rowSetsScale)
             for row in 0..<scores.count where allowed(rowFile[row]) {
-                let z = meaning[row]
-                if z > (best[rowFile[row]]?.z ?? -.infinity) { best[rowFile[row]] = (z, Double(scores[row]), row) }
+                let (file, z) = (rowFile[row], meaning[row])
+                if z > (best[file]?.z ?? -.infinity) { best[file] = (z, Double(scores[row]), row) }
+                if z >= zGate, let kind = fileKind[file], Self.recordings.contains(kind) {
+                    standouts[file, default: []].append((rowSegment[row], z))
+                }
             }
         }
 
@@ -363,7 +395,8 @@ public final class Searcher {
                                   cosine: semantic?.cosine, keywordRank: keyword?.0, segment: segment,
                                   segmentID: segmentID, loc: loc, locEnd: locEnd, excerpt: snippet ?? storedExcerpt,
                                   modified: row.modified, size: row.size, info: row.info, focus: focus,
-                                  photos: try photosHit(file: file, path: row.path, segment: segmentID, kind: segment)))
+                                  photos: try photosHit(file: file, path: row.path, segment: segmentID, kind: segment),
+                                  momentCount: try moments(ofFile: file, standouts[file] ?? []).count))
         }
         return hits
     }
@@ -436,6 +469,108 @@ public final class Searcher {
         }
         return PhotosHit(library: asset.library, uuid: asset.uuid, title: title, date: date, reading: reading,
                          still: still)
+    }
+
+    // MARK: Moments
+
+    /// The files read as recordings, a frame every few seconds and a window of sound at a time: the ones with moments.
+    private static let recordings: Set<FileKind> = [.video, .audio]
+
+    /// Every moment of the recording at `path` that matches the query, best first: its frames (or Photos' stills of it)
+    /// and windows of sound that stand out on the query's scale as `search` puts it (`meaning`, at least `zGate`), with
+    /// neighbours of the same kind merged (`merged`). A search's hits count theirs the same way (`momentCount`). None
+    /// for a file that isn't a video or audio, or without a query vector: frames and sound windows carry no words, so
+    /// only meaning finds them.
+    public func moments(of path: String, queryVector: [Float]?, zGate: Double = 2.0) throws -> [Moment] {
+        guard let query = queryVector, query.count == Vectors.dimension else { return [] }
+        var file: (id: Int64, kind: FileKind?)?
+        try store.db.query("SELECT id, kind FROM files WHERE path = ?", [.text(path)]) {
+            file = ($0.int(0), FileKind(rawValue: $0.text(1) ?? ""))
+        }
+        guard let file, let kind = file.kind, Self.recordings.contains(kind) else { return [] }
+        if !vectorsLoaded { try reload() }
+        guard !rowFile.isEmpty else { return [] }
+        let meaning = Self.meaning(score(query), rowModality, setsScale: rowSetsScale)
+        let standouts = rowFile.indices.filter { rowFile[$0] == file.id && meaning[$0] >= zGate }
+            .map { (segment: rowSegment[$0], z: meaning[$0]) }
+        return try moments(ofFile: file.id, standouts)
+    }
+
+    /// A recording's moments, from its segments that stand out (with their scores) and where the index has them.
+    private func moments(ofFile file: Int64, _ standouts: [(segment: Int64, z: Double)]) throws -> [Moment] {
+        guard !standouts.isEmpty else { return [] }
+        let scores = Dictionary(uniqueKeysWithValues: standouts.map { ($0.segment, $0.z) })
+        let ids = scores.keys.map(String.init).joined(separator: ",")
+        var placed: [(segment: Int64, kind: Moment.Kind, start: Double?, end: Double?)] = []
+        try store.db.query("SELECT id, kind, loc, loc_end FROM segments WHERE id IN (\(ids))") { row in
+            let kind: Moment.Kind? = switch SegmentKind(rawValue: row.text(1) ?? "") {
+            case .frame: .seen
+            case .audio: .heard
+            default: nil
+            }
+            guard let kind else { return }
+            placed.append((row.int(0), kind, row.isNull(2) ? nil : row.double(2), row.isNull(3) ? nil : row.double(3)))
+        }
+        // A frame with no time is one of Photos' stills of a video in iCloud: the indexer writes them in the
+        // filmstrip's order (`Indexer.stills`), so its place among the file's frames is its place in the filmstrip.
+        var filmstrip: [Int64: Int] = [:]
+        if placed.contains(where: { $0.kind == .seen && $0.start == nil }) {
+            try store.db.query("SELECT id FROM segments WHERE file = ? AND kind = ? ORDER BY id",
+                               [.int(file), .text(SegmentKind.frame.rawValue)]) { filmstrip[$0.int(0)] = filmstrip.count }
+        }
+        return Self.merged(placed.map {
+            MomentPiece(segment: $0.segment, kind: $0.kind, start: $0.start, end: $0.end,
+                        still: $0.start == nil ? filmstrip[$0.segment] : nil, score: scores[$0.segment] ?? 0)
+        })
+    }
+
+    /// A segment of a recording that stands out for a query, and where it is: what a moment is made of (`merged`).
+    private struct MomentPiece {
+        let segment: Int64
+        let kind: Moment.Kind
+        /// Seconds into the recording; nil for a still.
+        let start: Double?
+        let end: Double?
+        /// A still's place in its filmstrip.
+        let still: Int?
+        let score: Double
+    }
+
+    /// Moments from pieces, best first. Timed pieces of one kind merge while each starts where the moment so far ends,
+    /// or sooner: a video's kept frame stands for the stretch until the next one (`VideoExtractor.keyframes`), so two
+    /// frames that match one after the other touch, and windows of sound overlap (30 s long, 25 s apart); a frame or
+    /// window between them that doesn't match leaves a gap, and two moments. A piece spans at least its own stretch:
+    /// to its end as the index has it, else a frame step or a sound window on from its start. A still is a moment of
+    /// its own: stills carry no time, so none is known to be next to another.
+    private static func merged(_ pieces: [MomentPiece]) -> [Moment] {
+        let defaults = IndexOptions()
+        func moment(_ best: MomentPiece, from start: Double?, to end: Double?) -> Moment {
+            Moment(kind: best.kind, start: start, end: end, still: best.still, score: best.score,
+                   segmentID: best.segment)
+        }
+        var moments: [Moment] = []
+        for kind in [Moment.Kind.seen, .heard] {
+            let step = kind == .seen ? defaults.frameInterval : defaults.audioWindow
+            let timed = pieces.compactMap { piece in piece.start.map { (piece: piece, start: $0) } }
+                .filter { $0.piece.kind == kind }
+                .sorted { $0.start < $1.start }
+            var open: (start: Double, end: Double, best: MomentPiece)?
+            for (piece, start) in timed {
+                let end = max(piece.end ?? start + step, start)
+                if let current = open, start <= current.end {
+                    open = (current.start, max(current.end, end), piece.score > current.best.score ? piece : current.best)
+                } else {
+                    if let done = open { moments.append(moment(done.best, from: done.start, to: done.end)) }
+                    open = (start, end, piece)
+                }
+            }
+            if let done = open { moments.append(moment(done.best, from: done.start, to: done.end)) }
+        }
+        moments += pieces.filter { $0.start == nil }.map { moment($0, from: nil, to: nil) }
+        return moments.sorted { first, second in
+            first.score != second.score ? first.score > second.score
+                : (first.start ?? Double(first.still ?? 0)) < (second.start ?? Double(second.still ?? 0))
+        }
     }
 
     /// Code: the stretch to point at, and the line in it to open at. A name looked up points at the stretch that

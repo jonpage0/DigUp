@@ -23,6 +23,27 @@ extension ResultRow {
         return loc
     }
 
+    /// The stretch of a recording that matched, in seconds: to its end as the index has it, else a frame step or a
+    /// sound window on (as `Searcher.moments` counts a match).
+    var momentSpan: ClosedRange<Double>? {
+        guard let moment else { return nil }
+        let step = segment == .audio ? IndexOptions().audioWindow : IndexOptions().frameInterval
+        return moment...max(moment, locEnd ?? moment + step)
+    }
+
+    /// "3 moments": a recording that matched in more places than one.
+    var momentsLabel: String? {
+        momentCount > 1 ? "\(momentCount) moments" : nil
+    }
+
+    /// Whether this result is at `moment`: the one it matched at, or the one picked.
+    func isAt(_ moment: Moment, filmstrip: [String]) -> Bool {
+        if let still = moment.still { return filmstrip.indices.contains(still) && photos?.still == filmstrip[still] }
+        guard let loc, let start = moment.start, let end = moment.end,
+              (moment.kind == .heard) == (segment == .audio) else { return false }
+        return start <= loc && (loc < end || loc == start)
+    }
+
     /// Where opening or Quick Look should go when it isn't the start: a page after the first, or a moment ("p. 3",
     /// "0:06").
     var jump: String? {
@@ -345,8 +366,8 @@ enum Opener {
     }
 }
 
-/// Plays the selected recording in the preview pane, from the moment that matched. One at a time; it stops when the
-/// selection moves, or the panel or window closes.
+/// Plays the selected recording in the preview pane, from the moment that matched or the one picked under it. One at a
+/// time; it stops when the selection moves, or the panel or window closes.
 @Observable
 final class PreviewPlayback {
     static let shared = PreviewPlayback()
@@ -355,12 +376,39 @@ final class PreviewPlayback {
     private(set) var isPlaying = false
     /// Seconds into the recording, while it plays.
     private(set) var time: Double = 0
+    /// The moment or still last picked under the window's preview (`MomentsSection`): the result at it, kept under the
+    /// result as the search gave it (`pickKey`). The pane shows it, and Quick Look and Open go there (`placed`).
+    private(set) var picked: (key: String, row: ResultRow)?
     @ObservationIgnored private(set) var player: AVPlayer?
+    /// The file `player` plays.
+    @ObservationIgnored private var playingFile: String?
     @ObservationIgnored private var observer: Any?
     /// Debug runs keep quiet.
     @ObservationIgnored var muted = false
 
     func isCurrent(_ row: ResultRow) -> Bool { playingKey == row.previewKey }
+
+    /// A result and its query: what a pick is kept under (a new search may find the file matching elsewhere).
+    private static func pickKey(_ row: ResultRow) -> String { "\(row.previewKey)|\(row.query)" }
+
+    /// Picks `moment` of `row`, as a click under the preview does: `row` is at it from then on (until another is
+    /// picked), and plays from there. A still is in `filmstrip`, the video's stills in order.
+    func pick(_ moment: Moment, of row: ResultRow, filmstrip: [String]) {
+        let placed = row.at(moment, filmstrip: filmstrip)
+        picked = (Self.pickKey(row), placed)
+        if placed.moment != nil { play(placed) }
+    }
+
+    /// Picks one of Photos' stills of a video in iCloud (`row`) to show.
+    func pick(still: String, of row: ResultRow) {
+        picked = (Self.pickKey(row), row.showing(still: still))
+    }
+
+    /// `row` at the moment or still last picked for it, else as the search gave it.
+    func placed(_ row: ResultRow) -> ResultRow {
+        guard let picked, picked.key == Self.pickKey(row) else { return row }
+        return picked.row
+    }
 
     /// Play/pause for this row; a different row starts from its moment.
     func toggle(_ row: ResultRow) {
@@ -372,10 +420,22 @@ final class PreviewPlayback {
         play(row)
     }
 
+    /// Plays `row` from its moment; the recording already playing (another of its moments picked) goes there.
     func play(_ row: ResultRow) {
-        stop()
-        let player = AVPlayer(url: row.url)
-        player.isMuted = muted
+        let player: AVPlayer
+        if let current = self.player, playingFile == row.id {
+            player = current
+        } else {
+            stop()
+            player = AVPlayer(url: row.url)
+            player.isMuted = muted
+            observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
+                                                      queue: .main) { [weak self] time in
+                MainActor.assumeIsolated { self?.time = time.seconds }
+            }
+            self.player = player
+            playingFile = row.id
+        }
         let start = CMTime(seconds: row.moment ?? 0, preferredTimescale: 600)
         player.seek(to: start, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak player] finished in
             guard finished else { return }
@@ -385,11 +445,6 @@ final class PreviewPlayback {
                 player.play()
             }
         }
-        observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
-                                                  queue: .main) { [weak self] time in
-            MainActor.assumeIsolated { self?.time = time.seconds }
-        }
-        self.player = player
         playingKey = row.previewKey
         time = row.moment ?? 0
         isPlaying = true
@@ -402,6 +457,7 @@ final class PreviewPlayback {
         if let observer { player.removeTimeObserver(observer) }
         observer = nil
         self.player = nil
+        playingFile = nil
         playingKey = nil
         isPlaying = false
     }
@@ -421,5 +477,277 @@ struct PlayerView: NSViewRepresentable {
 
     func updateNSView(_ view: AVPlayerView, context: Context) {
         if view.player !== player { view.player = player }
+    }
+}
+
+/// Under a recording's picture in the window: every moment of it that matched, best first, on a strip the length of
+/// the recording (a video in iCloud: along Photos' stills of it, which carry no time) and in a list. A click on a mark
+/// or a row plays from there (shows that still), and the result is at it from then on (`PreviewPlayback.pick`).
+struct MomentsSection: View {
+    /// The result as the search gave it, and as the pane shows it (at the moment last picked).
+    let row: ResultRow
+    let shown: ResultRow
+    let moments: [Moment]
+    /// A video in iCloud: Photos' stills of it, in order.
+    let filmstrip: [String]
+    let width: CGFloat
+    /// A moment or still was picked.
+    let picked: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if row.photos?.reading == .stills {
+                if !filmstrip.isEmpty {
+                    StillsStrip(filmstrip: filmstrip, matched: Set(moments.compactMap(\.still)),
+                                showing: shown.photos?.still, width: width, pick: pick(still:))
+                }
+            } else if let duration {
+                MomentStrip(row: shown, moments: moments.filter { $0.start != nil }, duration: duration, width: width,
+                            label: label, isAt: isAt, pick: pick(_:))
+            }
+            MomentList(moments: moments, label: label, isAt: isAt, pick: pick(_:))
+        }
+    }
+
+    /// The recording's length as indexing measured it, else as far as its moments go.
+    private var duration: Double? {
+        row.duration ?? moments.compactMap(\.end).max()
+    }
+
+    /// "0:42–0:51 · seen", "2:10–2:40 · heard", "Still 3 of 7 · seen"
+    private func label(_ moment: Moment) -> String {
+        let kind = moment.kind.rawValue
+        if let still = moment.still { return "Still \(still + 1) of \(filmstrip.count) · \(kind)" }
+        guard let start = moment.start else { return kind }
+        return "\(ResultRow.clock(start))–\(ResultRow.clock(moment.end ?? start)) · \(kind)"
+    }
+
+    private func isAt(_ moment: Moment) -> Bool { shown.isAt(moment, filmstrip: filmstrip) }
+
+    private func pick(_ moment: Moment) {
+        PreviewPlayback.shared.pick(moment, of: row, filmstrip: filmstrip)
+        picked()
+    }
+
+    private func pick(still: String) {
+        PreviewPlayback.shared.pick(still: still, of: row)
+        picked()
+    }
+}
+
+/// A recording from start to end, each moment that matched marked (amber; the one the preview is at deeper; what's
+/// heard on a lane of its own when it matched both ways) and the playhead drawn across it, apart from the marks. A
+/// click on a mark plays from it. Hovering shows the frame there (`Previews.frame`), made where the pointer stops and
+/// dropped when it leaves: nothing is kept.
+struct MomentStrip: View {
+    /// The recording, at the moment the preview shows.
+    let row: ResultRow
+    let moments: [Moment]
+    let duration: Double
+    let width: CGFloat
+    let label: (Moment) -> String
+    let isAt: (Moment) -> Bool
+    let pick: (Moment) -> Void
+    @State private var pointer: (x: CGFloat, seconds: Double)?
+    @State private var frame: NSImage?
+    @State private var request: Task<Void, Never>?
+    @Environment(\.displayScale) private var scale
+    private var playback: PreviewPlayback { .shared }
+    private static let height: CGFloat = 22
+    private static let cardWidth: CGFloat = 148
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Capsule()
+                .fill(Color.primary.opacity(0.1))
+                .frame(width: width, height: 4)
+                .offset(y: (Self.height - 4) / 2)
+            ForEach(moments, id: \.segmentID) { moment in mark(moment) }
+            if playback.isCurrent(row) { playhead(at: playback.time) }
+        }
+        .frame(width: width, height: Self.height, alignment: .topLeading)
+        .contentShape(Rectangle())
+        .onContinuousHover { hover($0) }
+        .overlay(alignment: .bottomLeading) { if let pointer { card(pointer) } }
+        .onDisappear { request?.cancel() }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(moments.count) moments in \(ResultRow.clock(duration))")
+    }
+
+    /// What's seen and what's heard each get a lane when the recording matched both ways.
+    private var lanes: [Moment.Kind] {
+        [.seen, .heard].filter { kind in moments.contains { $0.kind == kind } }
+    }
+
+    private func x(_ seconds: Double) -> CGFloat { width * CGFloat(max(0, min(1, seconds / duration))) }
+
+    private func mark(_ moment: Moment) -> some View {
+        let length = min(width, max(5, x(moment.end ?? 0) - x(moment.start ?? 0)))
+        let laneHeight = (Self.height - 4) / CGFloat(max(lanes.count, 1))
+        let lane = CGFloat(lanes.firstIndex(of: moment.kind) ?? 0)
+        let at = isAt(moment)
+        return RoundedRectangle(cornerRadius: 2, style: .continuous)
+            .fill(at ? Brand.ember : Brand.amber.opacity(0.75))
+            .overlay(RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .strokeBorder(Color.primary.opacity(at ? 0.45 : 0), lineWidth: 1))
+            .frame(width: length, height: laneHeight - 2)
+            .offset(x: min(x(moment.start ?? 0), width - length), y: 3 + lane * laneHeight)
+            .onTapGesture { pick(moment) }
+            .accessibilityElement()
+            .accessibilityLabel("Play \(label(moment))")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { pick(moment) }
+    }
+
+    /// Where playback is: a line across the strip, taller than the marks and ringed, so it stands apart from them.
+    private func playhead(at seconds: Double) -> some View {
+        Capsule()
+            .fill(Color.primary)
+            .frame(width: 2, height: Self.height + 4)
+            .background(Capsule().fill(Color(nsColor: .windowBackgroundColor)).padding(-1.5))
+            .offset(x: x(seconds) - 1, y: -2)
+            .allowsHitTesting(false)
+    }
+
+    private func hover(_ phase: HoverPhase) {
+        switch phase {
+        case .active(let location):
+            let seconds = duration * Double(max(0, min(1, location.x / width)))
+            pointer = (location.x, seconds)
+            guard row.kind == .video else { return }
+            request?.cancel()
+            let (url, scale) = (row.url, scale)
+            request = Task {
+                // Only where the pointer stops: a frame for every point it crosses would queue up behind it.
+                try? await Task.sleep(for: .milliseconds(60))
+                guard !Task.isCancelled,
+                      let picture = await Previews.frame(of: url, at: seconds, pixels: Self.cardWidth * scale),
+                      !Task.isCancelled else { return }
+                frame = NSImage(cgImage: picture, size: NSSize(width: CGFloat(picture.width) / scale,
+                                                               height: CGFloat(picture.height) / scale))
+            }
+        case .ended:
+            request?.cancel()
+            request = nil
+            pointer = nil
+            frame = nil
+        }
+    }
+
+    /// What's under the pointer: the time, and for a video its frame there.
+    private func card(_ pointer: (x: CGFloat, seconds: Double)) -> some View {
+        let cardWidth = row.kind == .video ? Self.cardWidth : 52
+        return VStack(spacing: 3) {
+            if row.kind == .video {
+                ZStack {
+                    Color.black.opacity(0.85)
+                    if let frame { Image(nsImage: frame).resizable().aspectRatio(contentMode: .fit) }
+                }
+                .frame(width: cardWidth - 8, height: (cardWidth - 8) * 9 / 16)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            }
+            Text(ResultRow.clock(pointer.seconds))
+                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+        }
+        .padding(4)
+        .frame(width: cardWidth)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .shadow(color: .black.opacity(0.2), radius: 4, y: 1)
+        .offset(x: max(0, min(width - cardWidth, pointer.x - cardWidth / 2)), y: -(Self.height + 6))
+        .allowsHitTesting(false)
+    }
+}
+
+/// A video in iCloud along Photos' stills of it, in order (they carry no time, so there's no timeline): the ones that
+/// matched marked under them as the strip marks moments, the one the preview shows ringed. A click shows that still.
+struct StillsStrip: View {
+    let filmstrip: [String]
+    /// Places in the filmstrip that matched.
+    let matched: Set<Int>
+    /// The still the preview shows.
+    let showing: String?
+    let width: CGFloat
+    let pick: (String) -> Void
+    private static let spacing: CGFloat = 4
+
+    var body: some View {
+        let count = CGFloat(filmstrip.count)
+        let side = max(28, min(48, (width - Self.spacing * (count - 1)) / count))
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: Self.spacing) {
+                ForEach(Array(filmstrip.enumerated()), id: \.offset) { index, path in
+                    still(path, at: index, side: side)
+                }
+            }
+        }
+        .frame(width: width, height: side + 6)
+    }
+
+    private func still(_ path: String, at index: Int, side: CGFloat) -> some View {
+        let name = "Still \(index + 1) of \(filmstrip.count)" + (matched.contains(index) ? ", matched" : "")
+        return VStack(spacing: 2) {
+            ThumbnailView(url: URL(fileURLWithPath: path), side: side)
+                .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(path == showing ? Color.accentColor : Color.primary.opacity(0.12),
+                                  lineWidth: path == showing ? 2.5 : 0.5))
+            Capsule()
+                .fill(matched.contains(index) ? Brand.amber : Color.clear)
+                .frame(width: side - 8, height: 4)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { pick(path) }
+        .help("Show still \(index + 1) of \(filmstrip.count)")
+        .accessibilityElement()
+        .accessibilityLabel(name)
+        .accessibilityAddTraits(path == showing ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { pick(path) }
+    }
+}
+
+/// The moments as a list, best first ("0:42–0:51 · seen"), the one the preview is at lit. A click plays one (shows the
+/// still). The best few show, the rest a click away.
+struct MomentList: View {
+    let moments: [Moment]
+    let label: (Moment) -> String
+    let isAt: (Moment) -> Bool
+    let pick: (Moment) -> Void
+    @State private var showsAll = false
+    private static let few = 5
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(showsAll ? moments : Array(moments.prefix(Self.few)), id: \.segmentID) { moment in
+                item(moment)
+            }
+            if moments.count > Self.few {
+                Button(showsAll ? "Show fewer" : "Show all \(moments.count) moments") { showsAll.toggle() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 6)
+                    .padding(.top, 2)
+            }
+        }
+    }
+
+    private func item(_ moment: Moment) -> some View {
+        Button { pick(moment) } label: {
+            HStack(spacing: 7) {
+                Image(systemName: moment.kind == .seen ? "eye" : "ear")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Brand.ember)
+                    .frame(width: 14)
+                Text(label(moment))
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 11.5).monospacedDigit())
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(isAt(moment) ? Color.accentColor.opacity(0.18) : Color.clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isAt(moment) ? .isSelected : [])
     }
 }

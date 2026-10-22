@@ -355,6 +355,7 @@ func hitFields(_ hit: SearchHit) -> [String: Any] {
     if let end = hit.locEnd { row["loc_end"] = end }
     if let focus = hit.focus { row["focus"] = focus }
     if let excerpt = hit.excerpt { row["excerpt"] = excerpt }
+    if hit.momentCount > 0 { row["moments"] = hit.momentCount }
     if let photos = hit.photos {
         var asset: [String: Any] = ["library": photos.library, "uuid": photos.uuid, "title": photos.title]
         if let date = photos.date { asset["date"] = date }

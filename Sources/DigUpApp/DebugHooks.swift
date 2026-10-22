@@ -58,6 +58,9 @@ import SwiftUI
 ///     -debugArea "lat1,lon1,lat2,lon2"   with -debugWindow search: results kept to that box of the map
 ///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup"   with -debugWindow search: these filters on
 ///                             (a Photos library's people and albums, by name; Photos' favorites; DigUp's own)
+///     -debugMoment N          with -debugWindow search: before the snapshot, pick the selected result's Nth moment
+///                             under the preview (1: the best) as a click would: it plays from there (muted), and the
+///                             log says where playback got to and where Quick Look and Open would go
 ///     -debugUpdateCheck YES   check for updates in the background a second after launch, as the daily check does
 ///     -debugUseModelFiles a:b take these files as the model, as Use Files… does, a second after launch
 ///     -debugHelperArgs "…"    more arguments for the indexing helper, in dev runs ("--time-limit 0")
@@ -398,30 +401,58 @@ enum DebugHooks {
                 log("window: \(page) loaded in \(ms(since: started)) (after a 0.5 s launch delay)")
                 if let list = choices() { act(on: list) }
                 waitUntil({ choices()?.estimatesDone ?? true }, deadline: Date().addingTimeInterval(30)) {
-                    whenPicturesSettle {
-                        save(page, draw, to: snapshotPath())
-                        if let list = choices() { log("choices: \(describe(list))") }
-                        if defaults.bool(forKey: "debugAdd"), app.settingsWindow.addSheet.isOpen {
-                            app.settingsWindow.addSheet.add()
-                            let settings = app.model.settings
-                            log("debug: added; folders \(settings.roots.map { tildePath($0.path) }) · skipping "
-                                + "\(settings.excludedFolders.map { tildePath($0.path) })")
-                        }
-                        if defaults.bool(forKey: "debugAdd"), app.settingsWindow.codeSheet.isOpen {
-                            app.settingsWindow.codeSheet.add()
-                            let settings = app.model.settings
-                            log("debug: added; code folders \(settings.codeRoots.map { tildePath($0.path) }) · "
-                                + "skipping \(settings.codeExcluded.map { tildePath($0.path) })")
-                        }
-                        press(keys, app, describe: { windowState(app) }) {
-                            if defaults.bool(forKey: "debugCloseWindow") {
-                                close()
-                                log("window: closed")
+                    pickMoment(app) {
+                        whenPicturesSettle {
+                            save(page, draw, to: snapshotPath())
+                            if let list = choices() { log("choices: \(describe(list))") }
+                            if defaults.bool(forKey: "debugAdd"), app.settingsWindow.addSheet.isOpen {
+                                app.settingsWindow.addSheet.add()
+                                let settings = app.model.settings
+                                log("debug: added; folders \(settings.roots.map { tildePath($0.path) }) · skipping "
+                                    + "\(settings.excludedFolders.map { tildePath($0.path) })")
                             }
-                            if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+                            if defaults.bool(forKey: "debugAdd"), app.settingsWindow.codeSheet.isOpen {
+                                app.settingsWindow.codeSheet.add()
+                                let settings = app.model.settings
+                                log("debug: added; code folders \(settings.codeRoots.map { tildePath($0.path) }) · "
+                                    + "skipping \(settings.codeExcluded.map { tildePath($0.path) })")
+                            }
+                            press(keys, app, describe: { windowState(app) }) {
+                                if defaults.bool(forKey: "debugCloseWindow") {
+                                    close()
+                                    log("window: closed")
+                                }
+                                if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
+                            }
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// `-debugMoment N`: picks the search window's selected result's Nth moment (1: the best) as a click under the
+    /// preview would, lets it play (muted) for 1.5 s, and logs where playback is and where Quick Look and Open would go.
+    private static func pickMoment(_ app: AppController, then done: @escaping () -> Void) {
+        let number = UserDefaults.standard.integer(forKey: "debugMoment")
+        guard number > 0, let row = app.searchWindow.search.selectedRow else { return done() }
+        Task {
+            let moments = await app.engine.moments(of: row.id, matching: row.query)
+            guard moments.indices.contains(number - 1) else {
+                log("debug: \(row.name) has \(moments.count) moments, no moment \(number)")
+                return done()
+            }
+            let playback = PreviewPlayback.shared
+            playback.muted = true
+            let filmstrip = row.photos?.reading == .stills ? PhotosLibrary.filmstrip(startingAt: row.url.path) : []
+            playback.pick(moments[number - 1], of: row, filmstrip: filmstrip)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                let placed = playback.placed(row)
+                let at = playback.player.map { String(format: "%.2f s", $0.currentTime().seconds) } ?? "not playing"
+                log("debug: picked moment \(number) of \(moments.count) of \(row.name) (\(placed.reason)): playback at "
+                    + "\(at); Quick Look opens item \(placed.quickLook.start + 1) at "
+                    + "\(placed.quickLookState.map { "\($0)" } ?? "the start"); \(placed.openTitle)")
+                done()
             }
         }
     }

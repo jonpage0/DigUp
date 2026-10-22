@@ -180,9 +180,9 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Quick Look shows the selected result at its page or moment.
+    /// Quick Look shows the selected result at its page or moment (the one last picked under the preview, if any).
     private func updateQuickLook() {
-        window?.showInQuickLook(search.selectedRow)
+        window?.showInQuickLook(search.selectedRow.map(PreviewPlayback.shared.placed))
     }
 
     /// A result was clicked: Quick Look, when it's open, follows.
@@ -266,7 +266,7 @@ final class SearchModel {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var shownGeneration = 0
     @ObservationIgnored private var task: Task<Void, Never>?
-    /// A result was clicked (Quick Look, when it's open, follows).
+    /// A result was clicked, or another moment of it picked under the preview (Quick Look, when it's open, follows).
     @ObservationIgnored var selected: () -> Void = {}
 
     init(engine: Engine, favorites: Favorites, model: AppModel) {
@@ -386,9 +386,10 @@ final class SearchModel {
         }
     }
 
-    /// The file in its app, at the page or moment that matched when the app can be told where.
+    /// The file in its app, at the page or moment that matched (or the one picked under the preview) when the app can
+    /// be told where.
     func open(_ row: ResultRow) {
-        engine.open(row)
+        engine.open(PreviewPlayback.shared.placed(row))
     }
 
     func move(by step: Int) {
@@ -512,8 +513,9 @@ struct SearchWindowView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
                             PreviewPane(row: row, imageSize: CGSize(width: 292, height: 230),
-                                        open: { search.open(row) })
-                            PreviewActions(row: row, open: { search.open(row) },
+                                        open: { search.open(row) }, exploresMoments: true,
+                                        picked: { search.selected() })
+                            PreviewActions(row: PreviewPlayback.shared.placed(row), open: { search.open(row) },
                                            reveal: { Opener.reveal(row.url) }, favorites: search.favorites,
                                            toggledFavorite: { search.favoriteToggled() })
                         }
@@ -915,6 +917,10 @@ private struct GridCell: View {
             .overlay(alignment: .bottomTrailing) {
                 if let place = row.place { PlaceBadge(text: place, onImage: true).padding(6) }
             }
+            // A recording that matched in more places than one: the preview lists them all.
+            .overlay(alignment: .bottomLeading) {
+                if let moments = row.momentsLabel { PlaceBadge(text: moments, onImage: true).padding(6) }
+            }
             .overlay(alignment: .topTrailing) {
                 if favorite {
                     Image(systemName: "heart.fill")
@@ -944,7 +950,8 @@ private struct GridCell: View {
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(row.kind.title), \(row.name), \(row.reason)\(favorite ? ", in Favorites" : "")")
+        .accessibilityLabel("\(row.kind.title), \(row.name), \(row.reason)"
+            + (row.momentsLabel.map { ", \($0)" } ?? "") + (favorite ? ", in Favorites" : ""))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
