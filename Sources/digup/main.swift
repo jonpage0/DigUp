@@ -265,7 +265,8 @@ struct Arguments {
         if let text = values["--length"] {
             guard let length = SearchFilter.Length(text) else {
                 throw CLIError("--length takes seconds as AT_LEAST..UNDER, either left out (..15, 15..60, 300..), "
-                               + "the first below the second")
+                               + "the first below the second, neither over "
+                               + "\(Int(SearchFilter.Length.longest)) (ten years)")
             }
             filter.length = length
         }

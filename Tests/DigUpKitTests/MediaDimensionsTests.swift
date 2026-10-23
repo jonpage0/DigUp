@@ -152,7 +152,8 @@ import Testing
         // another key; a shape that isn't one of the four or W:H in whole numbers from 1 to 99, written plainly.
         for bad in ["{}", #"{"atLeast": 60, "under": 15}"#, #"{"atLeast": 15, "under": 15}"#, #"{"atLeast": -1}"#,
                     #"{"under": 0}"#, #"{"atLeast": null}"#, #"{"atLeast": "15"}"#, #"{"atLeast": true}"#,
-                    #"{"atLeast": 15, "over": 60}"#, #"{"at_least": 15}"#, "15", #"[15, 60]"#] {
+                    #"{"atLeast": 15, "over": 60}"#, #"{"at_least": 15}"#, "15", #"[15, 60]"#, #"{"under": 1e30}"#,
+                    #"{"atLeast": 315360001}"#] {
             #expect(read(SearchFilter.Length.self, bad) == nil, "\(bad)")
         }
         for bad in [#""Portrait""#, #""tall""#, #""0:9""#, #""16:0""#, #""100:1""#, #""16:09""#, #""+16:9""#,
@@ -166,12 +167,27 @@ import Testing
         #expect(SearchFilter.Length("..15") == SearchFilter.Length(under: 15))
         #expect(SearchFilter.Length("300..") == SearchFilter.Length(atLeast: 300))
         #expect(SearchFilter.Length("7.5..20")?.text == "7.5..20")
-        for bad in ["15", "..", "60..15", "-5..10", "a..b", "15..60..90", "nan..", "..inf", ""] {
+        for bad in ["15", "..", "60..15", "-5..10", "a..b", "15..60..90", "nan..", "..inf", "", "..1e30",
+                    "315360001.."] {
             #expect(SearchFilter.Length(bad) == nil, "\(bad)")
         }
         #expect(SearchFilter.Shape("16:9") == .ratio(width: 16, height: 9))
         #expect(SearchFilter.Shape("99:1") == .ratio(width: 99, height: 1))
         #expect(SearchFilter.Shape("wide") == .wide)
+    }
+
+    /// A length's bounds go up to ten years: any longer is no recording's, and a number that big can't be said in
+    /// seconds and minutes (a saved search's token says it so).
+    @Test func aLengthsBoundsAreAtMostTenYears() {
+        let longest = SearchFilter.Length.longest
+        #expect(longest == 10 * 365 * 24 * 60 * 60)
+        #expect(SearchFilter.Length(under: longest)?.under == longest)
+        #expect(SearchFilter.Length(atLeast: longest)?.atLeast == longest)
+        for bad in [longest.nextUp, longest + 1, 1e30, .greatestFiniteMagnitude] {
+            #expect(SearchFilter.Length(under: bad) == nil && SearchFilter.Length(atLeast: bad) == nil)
+            #expect(SearchFilter.Length(atLeast: 15, under: bad) == nil)
+        }
+        #expect(SearchFilter.Length("..315360000")?.text == "..315360000")
     }
 
     #if canImport(ImageIO) && canImport(AVFoundation)

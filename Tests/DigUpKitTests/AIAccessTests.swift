@@ -135,6 +135,47 @@ import Testing
         #expect(try searcher.browse(SearchFilter(), kinds: [.image], limit: 10).map(\.path).count == 3)
     }
 
+    /// What an AI app may not see bears on nothing it searches, the meaning scale included (`Searcher.meaning`): a
+    /// Photos item left out (`photos`) or a picture not rated yet (`SearchFilter.leavingOutSensitive`) neither sets
+    /// the averages and the deviation a note's meaning is measured in, nor so decides whether it stands out.
+    @Test(arguments: [true, false])
+    func whatsLeftOutOfSightDoesntMoveTheMeaningScale(photos: Bool) throws {
+        // A note that means what's asked, among 25 that don't: all of them seen.
+        let store = try IndexStore(directory: index)
+        let query = FakeEmbedder.vector(for: "a zebra crossing a river")
+        var inode: UInt64 = 0
+        func add(_ path: String, _ kind: FileKind, _ vector: [Float]) throws {
+            inode += 1
+            let id = try store.insert(Candidate(path: path, kind: kind, size: 1, mtime: 1, inode: inode, device: 1))
+            let (segment, modality): (SegmentKind, Modality) = kind == .doc ? (.chunk, .text) : (.image, .image)
+            try store.addSegment(file: id, kind: segment, modality: modality, loc: kind == .doc ? 1 : nil,
+                                 vector: vector)
+            try store.finish(id, state: "done")
+        }
+        try add("/notes/zebra.txt", .doc, query)
+        for number in 0..<25 { try add("/notes/\(number).txt", .doc, FakeEmbedder.vector(for: "note \(number)")) }
+        var seen = SearchFilter()
+        if photos { seen.photosOnly = [] } else { seen.leavingOutSensitive = .revealing }
+        func z(_ filter: SearchFilter) throws -> Double? {
+            try Searcher(store: store).search("zebra", queryVector: query, filter: filter)
+                .first { $0.path == "/notes/zebra.txt" }?.z
+        }
+        let before = try #require(try z(seen))
+        #expect(try z(SearchFilter()) == before)
+
+        // Then 40 pictures as unlike the query as can be, which the app may not see: a library's, or not rated yet.
+        let opposite = query.map { -$0 }
+        for number in 0..<40 {
+            try add(photos ? "/L.photoslibrary/originals/F/\(UUID().uuidString).jpeg" : "/pictures/\(number).jpg",
+                    .image, opposite)
+        }
+        // The same, but for the last bits of the products, which depend on how many rows are multiplied at once.
+        let after = try #require(try z(seen))
+        #expect(abs(after - before) < 1e-6)
+        // DigUp's own window sees them all, and its scale moves, as before.
+        #expect(try #require(try z(SearchFilter())) > before)
+    }
+
     @Test func anIndexOpenedToReadIsReadAndNeverChanged() throws {
         let index = folder.appendingPathComponent("index")
         let made = try IndexStore(directory: index)

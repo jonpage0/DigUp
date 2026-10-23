@@ -159,11 +159,16 @@ public struct SearchFilter: Sendable, Equatable {
     public struct Length: Sendable, Hashable {
         public let atLeast: Double?
         public let under: Double?
+        /// The longest a bound can be: ten years of 365 days, in seconds. Any longer is no recording's, and a number
+        /// that big can't be said in minutes and seconds (a Length token says it so): the CLI, `digup mcp` and a saved
+        /// search's reader turn it down, as they do any length `init` does.
+        public static let longest: Double = 10 * 365 * 24 * 60 * 60
 
-        /// Nil with no bound, a bound below 0 (`under` above it) or that isn't a number, or `atLeast` not below `under`.
+        /// Nil with no bound, a bound below 0 (`under` above it), over `longest` or that isn't a number, or `atLeast`
+        /// not below `under`.
         public init?(atLeast: Double? = nil, under: Double? = nil) {
-            guard atLeast != nil || under != nil, atLeast.map({ $0.isFinite && $0 >= 0 }) ?? true,
-                  under.map({ $0.isFinite && $0 > 0 }) ?? true else { return nil }
+            guard atLeast != nil || under != nil, atLeast.map({ 0 <= $0 && $0 <= Self.longest }) ?? true,
+                  under.map({ 0 < $0 && $0 <= Self.longest }) ?? true else { return nil }
             if let atLeast, let under, atLeast >= under { return nil }
             (self.atLeast, self.under) = (atLeast, under)
         }
@@ -397,7 +402,7 @@ extension SearchFilter.Length: Codable {
         }
         guard let length = Self(atLeast: try bound(.atLeast), under: try bound(.under)) else {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription:
-                "a length has a bound or two, 0 or more seconds, atLeast below under"))
+                "a length has a bound or two, from 0 to \(Int(Self.longest)) seconds, atLeast below under"))
         }
         self = length
     }
@@ -537,13 +542,15 @@ public final class Searcher {
             (kinds == nil || fileKind[file].map { kinds!.contains($0) } ?? false) && (kept?.contains(file) ?? true)
         }
 
-        // Meaning: score every vector on this query's scale (`meaning`), keep each file's best segment, and a
-        // recording's segments that stand out (its moments, counted for the hits it makes).
+        // Meaning: score every vector on this query's scale (`meaning`), set by the vectors the caller may see
+        // (`rowsSettingScale`), keep each file's best segment, and a recording's segments that stand out (its moments,
+        // counted for the hits it makes).
         var best: [Int64: (z: Double, cosine: Double, row: Int)] = [:]
         var standouts: [Int64: [(segment: Int64, z: Double)]] = [:]
         if let query = queryVector, query.count == Vectors.dimension, !rowFile.isEmpty {
             let scores = score(query)
-            let meaning = Self.meaning(scores, rowModality, setsScale: rowSetsScale)
+            let setsScale = try rowsSettingScale(seeing: filter.exclusions)
+            let meaning = Self.meaning(scores, rowModality, setsScale: setsScale)
             for row in 0..<scores.count where allowed(rowFile[row]) {
                 let (file, z) = (rowFile[row], meaning[row])
                 if z > (best[file]?.z ?? -.infinity) { best[file] = (z, Double(scores[row]), row) }
@@ -762,7 +769,9 @@ public final class Searcher {
         var standouts: [(segment: Int64, z: Double)] = []
         if let query = queryVector, query.count == Vectors.dimension {
             if !vectorsLoaded { try reload() }
-            let meaning = Self.meaning(score(query), rowModality, setsScale: rowSetsScale)
+            // The app's preview: nothing is left out of its sight.
+            let setsScale = try rowsSettingScale(seeing: SearchFilter())
+            let meaning = Self.meaning(score(query), rowModality, setsScale: setsScale)
             standouts = rowFile.indices.filter { rowFile[$0] == file.id && meaning[$0] >= zGate }
                 .map { (segment: rowSegment[$0], z: meaning[$0]) }
         }
@@ -953,7 +962,8 @@ public final class Searcher {
     /// The scale (the averages and the deviation) comes from the vectors in `setsScale` (all by default): `search` leaves
     /// out the later pages of long files, which are scored on it but don't move it. A book's hundreds of pages pulled the
     /// text average down for every query, and documents rose over screenshots everywhere (2026-10-09, the testbed's long
-    /// files finished: real eval 24 → 22 of 26 first; 24 with the scale kept).
+    /// files finished: real eval 24 → 22 of 26 first; 24 with the scale kept). What the caller may not see is left
+    /// out of it too (`rowsSettingScale`).
     static func meaning(_ scores: [Float], _ modality: [Modality], setsScale: [Bool]? = nil) -> [Double] {
         let means = modalityMeans(scores, modality, setsScale: setsScale)
         let centered = zip(scores, modality).map { Double($0) - means[$1, default: 0] }
@@ -969,6 +979,18 @@ public final class Searcher {
         }
         let deviation = max((squares / max(count, 1)).squareRoot(), 0.02)
         return centered.map { ($0 - mean) / deviation }
+    }
+
+    /// The vectors that set a query's scale (`meaning`) for a caller who sees what `exclusions` keeps (an AI app's,
+    /// `SearchFilter.exclusions`): of those that set it at all (`rowSetsScale`), only its files'. A file left out of an
+    /// AI app's sight bears on nothing it searches (MCP-PLAN.md), and its vectors would move the averages and the
+    /// deviation, and so whether a file the app sees stands out (`zGate`). With nothing left out (DigUp's own window),
+    /// `rowSetsScale` as it is. Every meaning score of a search is put on the scale these give.
+    private func rowsSettingScale(seeing exclusions: SearchFilter) throws -> [Bool] {
+        guard let seen = exclusions.query else { return rowSetsScale }
+        var files = Set<Int64>()
+        try store.db.query(seen.sql, seen.values) { files.insert($0.int(0)) }
+        return rowSetsScale.indices.map { rowSetsScale[$0] && files.contains(rowFile[$0]) }
     }
 
     /// The average score of each modality for this query. Small groups (< 20 vectors) take the average of all.

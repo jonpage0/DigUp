@@ -819,7 +819,8 @@ final class MCPServer {
             return SearchFilter.Area(latitudes: edges[0]...edges[2], longitudes: edges[1]...edges[3])
         }
 
-        /// How long, in seconds: at least `at_least` and shorter than `under`, either left out but not both.
+        /// How long, in seconds: at least `at_least` and shorter than `under`, either left out but not both, neither
+        /// over ten years (`SearchFilter.Length.longest`).
         func length(_ key: String) throws -> SearchFilter.Length? {
             guard let value = value(key) else { return nil }
             let range = value as? [String: Any] ?? [:]
@@ -829,7 +830,8 @@ final class MCPServer {
                   let length = SearchFilter.Length(atLeast: bounds["at_least"] ?? nil, under: bounds["under"] ?? nil)
             else {
                 throw InputError("\(key) is {at_least, under} in seconds, either left out but not both: at_least 0 or "
-                                 + "more, under above it (under 15 s: {under: 15}; 5 min or longer: {at_least: 300}).")
+                                 + "more, under above it, neither over \(Int(SearchFilter.Length.longest)) (ten years) "
+                                 + "(under 15 s: {under: 15}; 5 min or longer: {at_least: 300}).")
             }
             return length
         }
@@ -893,8 +895,10 @@ final class MCPServer {
                              "required": ["south", "west", "north", "east"], "additionalProperties": false,
                              "description": "Only what was taken inside this box on the map, in degrees."],
             "length": ["type": "object",
-                       "properties": ["at_least": ["type": "number", "minimum": 0],
-                                      "under": ["type": "number", "exclusiveMinimum": 0]],
+                       "properties": ["at_least": ["type": "number", "minimum": 0,
+                                                   "maximum": SearchFilter.Length.longest],
+                                      "under": ["type": "number", "exclusiveMinimum": 0,
+                                                "maximum": SearchFilter.Length.longest]],
                        "minProperties": 1, "additionalProperties": false,
                        "description": "Only videos and recordings this long, in seconds: at least at_least and "
                         + "shorter than under, either left out (under 15 s: {under: 15}; 15 s to 1 min: {at_least: 15, "
