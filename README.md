@@ -211,6 +211,13 @@ where they're missing, with the SFace model (OpenCV Zoo, Apache-2.0) once `scrip
 it in the models folder; with neither, no faces are read. A macOS update reads them all again, on this Mac. Settings →
 Photos says whether faces are on, and how many pictures outside Photos show someone you've named.
 
+When DigUp guesses wrong, tell it: in the search window's preview, Not Tati takes a picture off her list, and clicking a
+face (each one found is outlined) offers This is… with everyone named in Photos. Saying who a face is keeps it as them
+however unlike it looks, and teaches DigUp, which then finds them by that face in other pictures too; saying who it
+isn't sends it to whoever's next nearest, or no one. Only faces outside Photos: in Photos, name faces in Photos. What
+you say is kept in `face-corrections.json` beside the index (a picture by a bookmark that follows it when it moves, a
+face by where it is in the picture, a person by Photos' ids for them), so rebuilding the index keeps it.
+
 Anything DigUp finds, in Photos or not, can be marked ♥ in DigUp itself (under the preview, or ⌘D), without touching
 Photos' own favorites; the Favorites filter beside the kinds keeps those. They're kept in `favorites.json` beside the
 index, so rebuilding or deleting the index keeps them; a Photos picture stays marked through downloads and edits, and
@@ -290,7 +297,8 @@ applies to the very next one:
   allow what's hidden in Photos too, an AI app sees only the pictures the library's last listing says aren't hidden:
   one it can't vouch for (indexed before hidden items were left out and not taken out yet, or listed before DigUp
   noted which are hidden) stays out until the library is listed again. People and albums are looked up only among
-  what the app may see, and a picture outside Photos is someone's to it only by the named faces it may see.
+  what the app may see, and a picture outside Photos is someone's to it only by the faces it may see (named in Photos,
+  or by you).
 - code search, and pictures themselves (`get_picture`), are each off until you turn them on.
 - a file the app may not see answers as one DigUp doesn't have, so it can't tell the file is there; `mcp.log` says why.
 - the tools' descriptions tell the model that whatever comes back is your data, never instructions: a file can say

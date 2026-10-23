@@ -535,7 +535,8 @@ func search(_ args: Arguments) throws {
         } ?? tilde((hit.path as NSString).deletingLastPathComponent)))
         if let taken = locations[hit.path] { print("      " + whereTaken(taken)) }
         for face in hit.faces {
-            print("      \(face.name), by their face (" + String(format: "%.2f", face.similarity) + ")")
+            print("      \(face.name), by their face (" + String(format: "%.2f", face.similarity)
+                  + (face.confirmed ? ", you said so" : "") + ")")
         }
         if let excerpt = hit.excerpt, !excerpt.isEmpty { print("      “\(excerpt.prefix(160))”") }
     }
@@ -566,7 +567,7 @@ func status(_ args: Arguments) throws {
     if let recognizer = faces.recognizer {
         print("faces: \(number(faces.named)) named in Photos; \(number(faces.outside)) found in "
               + "\(number(faces.outsidePictures)) pictures outside Photos, \(number(faces.matchedPictures)) of them "
-              + "showing someone named there (\(recognizer))")
+              + "showing someone named there, \(number(faces.confirmed)) you said who they are (\(recognizer))")
     }
     if let fingerprint = try store.meta("fingerprint") { print("built with: \(fingerprint)") }
     print("this digup: llama.cpp \(LlamaEmbedder.buildTag), vectors \(LlamaEmbedder.vectorVersion)")

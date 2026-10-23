@@ -364,7 +364,7 @@ func hitFields(_ hit: SearchHit) -> [String: Any] {
     }
     if !hit.faces.isEmpty {
         row["faces"] = hit.faces.map { face in
-            ["name": face.name, "similarity": face.similarity,
+            ["name": face.name, "similarity": face.similarity, "confirmed": face.confirmed,
              "box": ["x": face.box.x, "y": face.box.y, "width": face.box.width, "height": face.box.height]]
                 as [String: Any]
         }

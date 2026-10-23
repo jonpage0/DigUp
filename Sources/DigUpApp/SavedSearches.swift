@@ -3,46 +3,6 @@ import DigUpKit
 import Observation
 import SwiftUI
 
-/// Photos' id for a person or an album in one library, which a saved search keeps them by. Photos keeps it through a
-/// rename; `library` says where it was, for showing, and finding it again is by `uuid` alone, as DigUp's favorites
-/// find a picture (a copy of a library has the same people and albums).
-nonisolated struct PhotosID: Codable, Hashable, Sendable {
-    var library: String
-    var uuid: String
-}
-
-/// Any key at all, to see which an object of the file has.
-nonisolated private struct AnyKey: CodingKey {
-    let stringValue: String
-    init(stringValue: String) { self.stringValue = stringValue }
-    var intValue: Int? { nil }
-    init?(intValue: Int) { nil }
-}
-
-/// An object of `saved-searches.json` has only the keys the approved shape gives it (`Key`): one with any other isn't
-/// this shape, so the file is left alone rather than read and later written over without that key (`SavedSearches`).
-nonisolated private func onlyKeys<Key: CodingKey & CaseIterable>(_: Key.Type, in decoder: any Decoder) throws {
-    let approved = Set(Key.allCases.map(\.stringValue))
-    let others = try decoder.container(keyedBy: AnyKey.self).allKeys.map(\.stringValue).filter { !approved.contains($0) }
-    guard others.isEmpty else {
-        throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
-                                                debugDescription: "keys the approved shape doesn't have: \(others)"))
-    }
-}
-
-nonisolated extension PhotosID {
-    private enum CodingKeys: String, CodingKey, CaseIterable {
-        case library, uuid
-    }
-
-    init(from decoder: any Decoder) throws {
-        try onlyKeys(CodingKeys.self, in: decoder)
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        library = try container.decode(String.self, forKey: .library)
-        uuid = try container.decode(String.self, forKey: .uuid)
-    }
-}
-
 /// A search the user saved: its words, kind and filters, run again whenever it's opened (a smart folder: nothing about
 /// its results is kept). One entry of `saved-searches.json` (`SavedSearches`).
 struct SavedSearch: Equatable, Identifiable {

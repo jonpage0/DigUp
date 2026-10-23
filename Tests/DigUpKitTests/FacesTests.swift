@@ -164,7 +164,7 @@ import CoreGraphics
         #expect(reason(meaning: true, faces: ["Katie"]) == "Matches the picture · Katie, by their face")
         #expect(reason(faces: []) == "Fits your filters")
     }
- }
+}
 
 #if canImport(ImageIO)
 /// Faces read by a reader that knows each picture's faces from its name, prints and all: no Vision. What the index
@@ -258,13 +258,13 @@ final class FakeFaceReader: FaceReader, @unchecked Sendable {
         }
     }
 
-    func reader(_ identity: String = "fake 1") -> FakeFaceReader {
-        FakeFaceReader(identity, people: Self.prints, found: Self.outside)
+    func reader(_ identity: String = "fake 1", more: [String: [[Float]]] = [:]) -> FakeFaceReader {
+        FakeFaceReader(identity, people: Self.prints, found: Self.outside.merging(more) { $1 })
     }
 
-    /// A library of three pictures, one person named in each (two of them Sams), and Downloads with `outside`'s, read by
-    /// `reader` (none: an index from before faces were kept).
-    func indexed(by reader: FakeFaceReader?) throws -> Indexed {
+    /// A library of three pictures, one person named in each (two of them Sams), and Downloads with `outside`'s (and
+    /// `more`, which `reader` knows the faces of), read by `reader` (none: an index from before faces were kept).
+    func indexed(by reader: FakeFaceReader?, more: [String: [[Float]]] = [:]) throws -> Indexed {
         let library = folder.appendingPathComponent("Photos Library.photoslibrary")
         let originals = library.appendingPathComponent("originals/F")
         let downloads = folder.appendingPathComponent("Downloads")
@@ -282,13 +282,15 @@ final class FakeFaceReader: FaceReader, @unchecked Sendable {
                                               people: [person.uuid],
                                               faces: [PhotosLibrary.FaceBox(person: person, x: 0.5, y: 0.5, size: 0.3)]))
         }
-        for name in Self.outside.keys { try ImageTests.writeJPEG(downloads.appendingPathComponent(name)) }
+        for name in Array(Self.outside.keys) + more.keys {
+            try ImageTests.writeJPEG(downloads.appendingPathComponent(name))
+        }
         let indexed = Indexed(store: try IndexStore(directory: folder.appendingPathComponent("index")), library: library,
                               downloads: downloads, pictures: assets.map(\.path),
                               listing: PhotosLibrary.Listing(assets: assets, people: [Self.katie, Self.sam, Self.otherSam]))
         let indexer = try indexed.indexer(reader)
         _ = try indexer.sync([library, downloads])
-        #expect(try indexer.run()["done"] == 9)
+        #expect(try indexer.run()["done"] == 9 + more.count)
         return indexed
     }
 
@@ -345,8 +347,8 @@ final class FakeFaceReader: FaceReader, @unchecked Sendable {
         // Read again (it changed): its faces go, and those matched with Katie's go with the next making.
         try store.requeue(try #require(files[indexed.pictures[0]]))
         #expect(try indexed.count("faces", "person IS NOT NULL") == 2)
-        #expect(try store.rebuildFaceMatchesIfNamedChanged())
-        #expect(!(try store.rebuildFaceMatchesIfNamedChanged()))   // nothing changed since
+        #expect(try store.rebuildFaceMatchesIfChanged())
+        #expect(!(try store.rebuildFaceMatchesIfChanged()))   // nothing changed since
         #expect(try indexed.count("face_matches", "person = \(try indexed.person("P-KATIE"))") == 0)
         // A file gone: its faces and their matches.
         try store.delete(try #require(files[indexed.path("katie-and-sam.jpg")]))
@@ -427,6 +429,106 @@ final class FakeFaceReader: FaceReader, @unchecked Sendable {
         #expect(try indexed.kept([[katie]], SearchFilter()).count == 3)
         allowed.photosOnly = Set(indexed.pictures)
         #expect(try indexed.store.faceMatches(referencesKeptBy: allowed) == nil)
+    }
+
+    /// `face-corrections.json` beside the index folder, as the app writes it (the approved shape): `says` of the face of
+    /// the picture outside Photos called `name` (its place among the reader's faces of it) for `person`.
+    func correct(_ indexed: Indexed, _ said: [(name: String, face: Int, person: PhotosLibrary.Person, says: String)])
+        throws {
+        let corrections: [[String: Any]] = try said.map { name, face, person, says in
+            let url = URL(fileURLWithPath: indexed.path(name))
+            return ["file": ["bookmark": try url.bookmarkData().base64EncodedString(), "path": url.path],
+                    "face": ["x": 0.1 + 0.4 * Double(face), "y": 0.2, "width": 0.3, "height": 0.3],
+                    "person": ["name": person.name, "photos": [["library": indexed.library.path, "uuid": person.uuid]]],
+                    "says": says, "made": "2026-10-22T22:05:00Z"]
+        }
+        try JSONSerialization.data(withJSONObject: ["version": 1, "corrections": corrections])
+            .write(to: folder.appendingPathComponent("face-corrections.json"))
+    }
+
+    /// What you told DigUp about faces is kept over its guesses whenever `face_matches` is made again: "this is Katie"
+    /// keeps a face at any likeness, and teaches (a face like it is hers too); "this isn't Katie" sends a face to
+    /// whoever's next nearest, or no one.
+    @Test func correctionsAreKeptOverTheGuessesAndTeach() throws {
+        // Like the face in katie-85.jpg (0.97), less like Katie's in Photos (0.70) than the floor.
+        let more: [String: [[Float]]] = ["like-katie-85.jpg": [[0.7, 0, 0, 0.714]]]
+        let indexed = try indexed(by: reader(more: more), more: more)
+        let katie = try indexed.person("P-KATIE"), sam = try indexed.person("P-SAM")
+        try correct(indexed, [("katie-85.jpg", 0, Self.katie, "is"), ("katie-95.jpg", 0, Self.katie, "isNot"),
+                              ("katie-and-sam.jpg", 1, Self.sam, "isNot")])
+        // Until the matches are made again, the guesses stand.
+        #expect(Set(try indexed.kept([[katie]]).map(\.path))
+                == [indexed.pictures[0], indexed.path("katie-95.jpg"), indexed.path("katie-and-sam.jpg")])
+        try indexed.store.rebuildFaceMatches()
+        let withKatie = try indexed.kept([[katie]])
+        #expect(Set(withKatie.map(\.path)) == [indexed.pictures[0], indexed.path("katie-85.jpg"),
+                                               indexed.path("like-katie-85.jpg"), indexed.path("katie-and-sam.jpg")])
+        #expect(withKatie.first { $0.path == indexed.path("katie-85.jpg") }?.faces.map(\.name) == ["Katie"])
+        // Sam's face in katie-and-sam.jpg isn't Sam's, and no one else's is near it.
+        #expect(try indexed.kept([[sam]]).map(\.path) == [indexed.pictures[1]])
+        #expect(try indexed.count("face_matches", "confirmed = 1") == 1)
+    }
+
+    /// Corrections saved are read the next time `face_matches` might be stale (the end of a sync or a run, the faces
+    /// pass), and follow a picture read again (its faces' rows are new). One of a picture in Photos, or of someone who
+    /// isn't in Photos any more, corrects nothing; nor does a file that isn't their shape.
+    @Test func correctionsAreReadWhenSavedAndFollowAPictureReadAgain() throws {
+        let indexed = try indexed(by: reader())
+        let katie = try indexed.person("P-KATIE")
+        let store = indexed.store
+        #expect(!(try store.rebuildFaceMatchesIfChanged()))
+        func said(_ path: String, _ person: PhotosLibrary.Person, uuid: String? = nil) throws
+            -> FaceCorrections.Correction {
+            FaceCorrections.Correction(
+                file: .init(bookmark: try URL(fileURLWithPath: path).bookmarkData(), path: path),
+                face: try #require(Faces.Box(x: 0.1, y: 0.2, width: 0.3, height: 0.3)),
+                person: .init(name: person.name, photos: [PhotosID(library: indexed.library.path,
+                                                                   uuid: uuid ?? person.uuid)]), says: .is)
+        }
+        let url = FaceCorrections.url(beside: store.directory)
+        try FaceCorrections([try said(indexed.path("katie-85.jpg"), Self.katie),
+                             try said(indexed.pictures[1], Self.katie),                    // in Photos: Sam's
+                             try said(indexed.path("stranger.jpg"), Self.katie, uuid: "P-GONE")]).data().write(to: url)
+        #expect(try store.faceRulings().count == 1)
+        #expect(try store.rebuildFaceMatchesIfChanged())
+        #expect(!(try store.rebuildFaceMatchesIfChanged()))
+        #expect(try indexed.count("face_matches", "confirmed = 1") == 1)
+        #expect(try indexed.kept([[katie]]).contains { $0.path == indexed.path("katie-85.jpg") })
+        // The picture changed and is read again: its face is a new row, still Katie.
+        let files = Dictionary(uniqueKeysWithValues: try store.files(under: [indexed.downloads.path])
+            .map { ($0.path, $0.id) })
+        try store.requeue(try #require(files[indexed.path("katie-85.jpg")]))
+        #expect(try indexed.count("face_matches", "confirmed = 1") == 0)
+        #expect(try indexed.indexer(reader()).run()["done"] == 1)
+        let kept = try #require(try indexed.kept([[katie]]).first { $0.path == indexed.path("katie-85.jpg") })
+        #expect(kept.faces.map { "\($0.name) \($0.confirmed)" } == ["Katie true"])
+        #expect(try store.pictureFaces(ofPath: indexed.path("katie-85.jpg")).map { $0.match?.name } == ["Katie"])
+        // A file that isn't the shape: nothing corrected (and it's left as it is).
+        try Data(#"{"version": 1, "corrections": [], "by": "jon"}"#.utf8).write(to: url)
+        #expect(try store.rebuildFaceMatchesIfChanged())
+        #expect(try indexed.count("face_matches", "confirmed = 1") == 0)
+        #expect(try store.pictureFaces(ofPath: indexed.path("katie-85.jpg")).map { $0.match?.name } == [nil])
+        #expect(try String(contentsOf: url, encoding: .utf8).contains("jon"))
+    }
+
+    /// An AI app isn't told of a match taught by a face it may not see: a picture outside Photos you said is Katie
+    /// teaches only when the app may see that picture.
+    @Test func faceMatchesForAnAIAppAreTaughtOnlyByPicturesItMaySee() throws {
+        let more: [String: [[Float]]] = ["like-katie-85.jpg": [[0.7, 0, 0, 0.714]]]
+        let indexed = try indexed(by: reader(more: more), more: more)
+        let katie = try indexed.person("P-KATIE")
+        try correct(indexed, [("katie-85.jpg", 0, Self.katie, "is")])
+        try indexed.store.rebuildFaceMatches()
+        let everything = Set(try indexed.store.files(under: [indexed.library.path, indexed.downloads.path]).map(\.path))
+        var allowed = SearchFilter()
+        allowed.paths = everything
+        #expect(try indexed.store.faceMatches(referencesKeptBy: allowed) == nil)   // it sees them all
+        allowed.paths = everything.subtracting([indexed.path("katie-85.jpg")])
+        var filter = allowed
+        filter.faceMatches = try #require(try indexed.store.faceMatches(referencesKeptBy: allowed))
+        #expect(Set(try indexed.kept([[katie]], filter).map(\.path))
+                == [indexed.pictures[0], indexed.path("katie-95.jpg"), indexed.path("katie-and-sam.jpg")])
+        #expect(try indexed.kept([[katie]]).contains { $0.path == indexed.path("like-katie-85.jpg") })
     }
 }
 #endif

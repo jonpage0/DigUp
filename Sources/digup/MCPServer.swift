@@ -451,8 +451,9 @@ final class MCPServer {
                 guard !ids.isEmpty else { throw InputError("No one called “\(name)” in Photos' People.") }
                 return ids
             }
-            // Pictures outside Photos are kept by a face matched only with the named faces the AI app may see: a face
-            // in an item kept from it never decides whether a picture it sees is someone's.
+            // Pictures outside Photos are kept by a face matched only with the named faces, and the corrections, of
+            // files the AI app may see: a face in an item kept from it never decides whether a picture it sees is
+            // someone's.
             filter.faceMatches = try store.faceMatches(referencesKeptBy: allowed)
         }
         if let albums {

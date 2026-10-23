@@ -881,7 +881,9 @@ private struct PhotosSettings: View {
             } footer: {
                 Text("People ▾ also keeps your other pictures (Downloads, the Desktop, anywhere DigUp searches) that show "
                      + "someone you've named in Photos: DigUp compares the faces in them with the faces you named, on "
-                     + "this Mac. It's a guess, said as “Tati, by their face”.")
+                     + "this Mac. It's a guess, said as “Tati, by their face”. Click a face in the search window's "
+                     + "preview to say who it is, or that it isn't who DigUp took it for; what you say is kept in "
+                     + "face-corrections.json beside the index.")
                     .font(.system(size: 11))
                     .multilineTextAlignment(.leading)
                     .foregroundStyle(.secondary)
@@ -933,6 +935,7 @@ private struct PhotosSettings: View {
             + (faces.matchedPictures == 1 ? "picture shows" : "pictures show") + " someone you've named · "
             + "\(faces.outside.formatted()) faces found in \(faces.outsidePictures.formatted()) pictures, compared with "
             + "\(faces.named.formatted()) you named (\(by))"
+            + (faces.confirmed == 0 ? "" : " · \(faces.confirmed.formatted()) you said who they are")
     }
 }
 

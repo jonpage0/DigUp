@@ -3,8 +3,9 @@ import Foundation
 /// Telling people apart by their faces, to find the people named in Photos in pictures outside it (approved
 /// 2026-10-22: PHOTOS-FACTS-SCHEMA.md, "faces outside Photos"). The index keeps the faces of pictures (`faces`): in a
 /// Photos library the ones Photos named, with who they are, and outside every face found. Each face outside is matched
-/// to the nearest named face (`FaceMatcher`, kept as `face_matches`), and the People filter keeps a picture outside
-/// Photos with a face that matches the person at `threshold` (`SearchFilter.people`). `digup faces-eval` measured it.
+/// to the nearest named face (`FaceMatcher`, kept as `face_matches`) unless you said who it is or isn't
+/// (`FaceCorrections`, `FaceMatching`), and the People filter keeps a picture outside Photos with a face that matches
+/// the person at `threshold`, or that you said is them (`SearchFilter.people`). `digup faces-eval` measured it.
 ///
 /// A face recognizer (`FaceRecognizer`, on the Mac: Platform/Apple/Faces+Apple.swift) turns each face of a picture into
 /// an embedding, its print: a list of numbers that comes out alike for two faces of one person and apart for two
@@ -101,6 +102,10 @@ public enum Faces {
     /// someone (an upper bound: Photos leaves some faces of named people unnamed). `digup faces-eval` measured it.
     public static let threshold = 0.90
 
+    /// How much a correction's box and a face's have to overlap (`Box.overlap`) for the correction to be of that face
+    /// (`FaceCorrections`): at least half.
+    public static let sameFace = 0.5
+
     /// Where a face is in a picture, as the index keeps it (`faces`' x, y, width and height): a box in the picture as
     /// it's shown (upright), in fractions of its width and height from its top-left corner, all of it inside.
     public struct Box: Sendable, Equatable {
@@ -124,6 +129,14 @@ public enum Faces {
             let side = face.size * max(width, height)
             let (across, down) = (side / width, side / height)
             self.init(x: face.x - across / 2, y: 1 - face.y - down / 2, width: across, height: down)
+        }
+
+        /// The area it and `other` share, over the area they cover together: 0 apart, 1 the same box.
+        public func overlap(_ other: Box) -> Double {
+            let across = max(0, min(x + width, other.x + other.width) - max(x, other.x))
+            let down = max(0, min(y + height, other.y + other.height) - max(y, other.y))
+            let together = width * height + other.width * other.height - across * down
+            return together > 0 ? across * down / together : 0
         }
     }
 
@@ -232,22 +245,27 @@ public protocol FaceReader: Sendable {
     func faces(inPictureAt url: URL, named: [PhotosLibrary.FaceBox]?) throws -> [Faces.Found]
 }
 
-/// Who a face outside Photos is likeliest to be: the person of the nearest of the faces it compares against
-/// (`references`, the faces Photos named), by the cosine of their prints, when it's at least `Faces.matchFloor`. What
-/// `face_matches` holds (`IndexStore.rebuildFaceMatches`), and what `digup mcp` works out against only the faces an AI
-/// app may see. Two people of one name are two people: a match is to a person's row, never to a name.
+/// Who a face outside Photos is likeliest to be: the person of the nearest of the faces it's compared against, by the
+/// cosine of their prints, when it's at least `Faces.matchFloor`. Those are the faces Photos named (`references`), and
+/// the faces outside Photos you said are someone (`taught`, `FaceCorrections`). `FaceMatching` uses it for what
+/// `face_matches` holds, and for what `digup mcp` works out against only the faces an AI app may see. Two people of one
+/// name are two people: a match is to a person's row, never to a name.
 public struct FaceMatcher {
     public struct Match: Sendable, Equatable {
         /// The person's row (`IndexStore.photosPeople`).
         public let person: Int64
         public let similarity: Double
+        /// You said it's them (`FaceCorrections`): kept at any similarity.
+        public let confirmed: Bool
 
-        public init(person: Int64, similarity: Double) {
-            (self.person, self.similarity) = (person, similarity)
+        public init(person: Int64, similarity: Double, confirmed: Bool = false) {
+            (self.person, self.similarity, self.confirmed) = (person, similarity, confirmed)
         }
     }
 
     private let people: [Int64]
+    /// How many of the columns are faces Photos named: the first ones.
+    private let named: Int
     /// The references' prints scaled to length 1, one column each (`dimension` × `people.count`, row-major): one
     /// multiplication scores many faces against all of them.
     private let columns: [Float]
@@ -255,33 +273,66 @@ public struct FaceMatcher {
 
     /// Faces to compare against: who each is, and its print. One that isn't the first one's length (another
     /// recognizer's), or all zeros, is left out.
-    public init(references: [(person: Int64, print: [Float])]) {
-        let dimension = references.first?.print.count ?? 0
-        let kept: [(person: Int64, unit: [Float])] = references.compactMap { reference in
-            Self.unit(reference.print, dimension: dimension).map { (reference.person, $0) }
+    public init(references: [(person: Int64, print: [Float])], taught: [(person: Int64, print: [Float])] = []) {
+        let dimension = (references.first ?? taught.first)?.print.count ?? 0
+        func units(_ faces: [(person: Int64, print: [Float])]) -> [(person: Int64, unit: [Float])] {
+            faces.compactMap { face in Self.unit(face.print, dimension: dimension).map { (face.person, $0) } }
         }
+        let named = units(references)
+        let kept = named + units(taught)
         var columns = [Float](repeating: 0, count: dimension * kept.count)
         for (column, reference) in kept.enumerated() {
             for row in 0..<dimension { columns[row * kept.count + column] = reference.unit[row] }
         }
-        (people, self.columns, self.dimension) = (kept.map { $0.person }, columns, dimension)
+        (people, self.named, self.columns, self.dimension) = (kept.map { $0.person }, named.count, columns, dimension)
     }
 
     /// Faces scored together, at most: a block of scores is this many times the references.
     private static let block = 128
 
     /// Each print's match: the nearest reference's person and how near, nil below `Faces.matchFloor` (or for a print
-    /// that isn't the references' length).
-    public func matches(_ prints: [[Float]]) -> [Match?] {
+    /// that isn't the references' length). `skipping`: by a print's place, people it isn't (`FaceCorrections`), whose
+    /// faces it isn't compared with.
+    public func matches(_ prints: [[Float]], skipping: [Int: Set<Int64>] = [:]) -> [Match?] {
         var found = [Match?](repeating: nil, count: prints.count)
-        guard !people.isEmpty else { return found }
         let usable: [(index: Int, unit: [Float])] = prints.indices.compactMap { index in
             Self.unit(prints[index], dimension: dimension).map { (index, $0) }
         }
-        var scores = [Float](repeating: 0, count: Self.block * people.count)
-        for start in stride(from: 0, to: usable.count, by: Self.block) {
-            let some = usable[start..<min(start + Self.block, usable.count)]
-            let rows = some.flatMap { $0.unit }
+        score(usable.map(\.unit)) { place, scores in
+            let index = usable[place].index
+            let skip = skipping[index]
+            var best: Int?
+            for column in scores.indices where skip?.contains(people[column - scores.startIndex]) != true {
+                if best.map({ scores[column] > scores[$0] }) ?? true { best = column }
+            }
+            guard let best, Double(scores[best]) >= Faces.matchFloor else { return }
+            found[index] = Match(person: people[best - scores.startIndex], similarity: min(Double(scores[best]), 1))
+        }
+        return found
+    }
+
+    /// The person of the faces Photos named of `persons` that `print` is nearest, and how near, at any likeness; nil
+    /// when none of theirs is compared against (or the print isn't the references' length).
+    public func nearest(_ print: [Float], among persons: Set<Int64>) -> Match? {
+        guard let unit = Self.unit(print, dimension: dimension) else { return nil }
+        var best: (person: Int64, score: Float)?
+        score([unit]) { _, scores in
+            for column in 0..<named where persons.contains(people[column]) {
+                let score = scores[scores.startIndex + column]
+                if best.map({ score > $0.score }) ?? true { best = (people[column], score) }
+            }
+        }
+        return best.map { Match(person: $0.person, similarity: max(min(Double($0.score), 1), -1)) }
+    }
+
+    /// Scores `units` (prints of length 1) against every reference, a block of them at a time: `each` gets a unit's
+    /// place and its scores, one a column.
+    private func score(_ units: [[Float]], _ each: (Int, ArraySlice<Float>) -> Void) {
+        guard !people.isEmpty, !units.isEmpty else { return }
+        var scores = [Float](repeating: 0, count: min(Self.block, units.count) * people.count)
+        for start in stride(from: 0, to: units.count, by: Self.block) {
+            let some = units[start..<min(start + Self.block, units.count)]
+            let rows = some.flatMap { $0 }
             rows.withUnsafeBufferPointer { rows in
                 columns.withUnsafeBufferPointer { columns in
                     scores.withUnsafeMutableBufferPointer { scores in
@@ -290,16 +341,8 @@ public struct FaceMatcher {
                     }
                 }
             }
-            for (row, face) in some.enumerated() {
-                let scored = scores[row * people.count..<(row + 1) * people.count]
-                guard let best = scored.indices.max(by: { scored[$0] < scored[$1] }) else { continue }
-                let similarity = Double(scored[best])
-                if similarity >= Faces.matchFloor {
-                    found[face.index] = Match(person: people[best - row * people.count], similarity: min(similarity, 1))
-                }
-            }
+            for row in 0..<some.count { each(start + row, scores[row * people.count..<(row + 1) * people.count]) }
         }
-        return found
     }
 
     /// `print` scaled to length 1, or nil when it isn't `dimension` long or is all zeros.
@@ -307,6 +350,106 @@ public struct FaceMatcher {
         guard print.count == dimension, dimension > 0 else { return nil }
         let length = print.reduce(0) { $0 + $1 * $1 }.squareRoot()
         return length > 0 ? print.map { $0 / length } : nil
+    }
+}
+
+/// Who each face outside Photos is taken for, as `face_matches` holds it (`IndexStore.faceMatching`): the person you
+/// said it is (`FaceCorrections`), else the nearest face it's compared against (`FaceMatcher`: the faces Photos named,
+/// and the ones you said are someone) of someone you didn't say it isn't.
+public struct FaceMatching {
+    /// A face outside Photos: its row, its picture's file, where it is in the picture, and its print.
+    public struct Face: Sendable {
+        public let id: Int64
+        public let file: Int64
+        public let box: Faces.Box
+        public let print: [Float]
+
+        public init(id: Int64, file: Int64, box: Faces.Box, print: [Float]) {
+            (self.id, self.file, self.box, self.print) = (id, file, box, print)
+        }
+    }
+
+    /// A correction as it applies to the index (`IndexStore.faceRulings`): the face's box in its file, the rows of its
+    /// person (everyone of their Photos ids), and what it says.
+    public struct Ruling: Sendable, Equatable {
+        public let box: Faces.Box
+        public let people: Set<Int64>
+        public let says: FaceCorrections.Says
+
+        public init(box: Faces.Box, people: Set<Int64>, says: FaceCorrections.Says) {
+            (self.box, self.people, self.says) = (box, people, says)
+        }
+    }
+
+    /// What a file's rulings say of one of its faces: who it is (nil: they don't say), and who it isn't.
+    struct Said: Equatable {
+        var `is`: Set<Int64>?
+        var isNot: Set<Int64> = []
+    }
+
+    let matcher: FaceMatcher
+    /// By the file they're of, in the order they were made.
+    let rulings: [Int64: [Ruling]]
+
+    /// `named`: the faces Photos named, with their people. `rulings`: the corrections, by the file they're of.
+    /// `ruled`: every face of those files, so the ones you said are someone are compared against too.
+    public init(named: [(person: Int64, print: [Float])], rulings: [Int64: [Ruling]] = [:], ruled: [Face] = []) {
+        let photos = FaceMatcher(references: named)
+        let taught: [(person: Int64, print: [Float])] = Self.said(of: ruled, rulings).compactMap { place, said in
+            said.is.flatMap { Self.confirmed(ruled[place].print, as: $0, by: photos) }
+                .map { ($0.person, ruled[place].print) }
+        }
+        matcher = taught.isEmpty ? photos : FaceMatcher(references: named, taught: taught)
+        self.rulings = rulings
+    }
+
+    /// Each face's match, nil for no one: who you said it is (at its likeness to their faces in Photos), else its
+    /// nearest at `Faces.matchFloor` of the people you didn't say it isn't. A picture's faces go together: a correction
+    /// is of the face of its file that overlaps it most.
+    public func matches(_ faces: [Face]) -> [FaceMatcher.Match?] {
+        let said = Self.said(of: faces, rulings)
+        let skipping = said.compactMapValues { $0.isNot.isEmpty ? nil : $0.isNot }
+        var found = matcher.matches(faces.map(\.print), skipping: skipping)
+        for (place, said) in said {
+            if let people = said.is, let match = Self.confirmed(faces[place].print, as: people, by: matcher) {
+                found[place] = match
+            }
+        }
+        return found
+    }
+
+    /// A face you said is one of `people` (everyone of a name): the one whose faces in Photos it's nearest, at that
+    /// likeness; the first of them, at 0, when none of theirs is compared against.
+    private static func confirmed(_ print: [Float], as people: Set<Int64>, by matcher: FaceMatcher)
+        -> FaceMatcher.Match? {
+        guard let first = people.min() else { return nil }
+        let near = matcher.nearest(print, among: people)
+        return FaceMatcher.Match(person: near?.person ?? first, similarity: near?.similarity ?? 0, confirmed: true)
+    }
+
+    /// What `rulings` say of each of `faces`, by place: each is of the face of its file whose box overlaps its own most,
+    /// by at least half, and a later one has the last word (a face is one person: who it is replaces who it was said to
+    /// be, and who it is and who it isn't replace each other).
+    static func said(of faces: [Face], _ rulings: [Int64: [Ruling]]) -> [Int: Said] {
+        var said: [Int: Said] = [:]
+        for (file, places) in Dictionary(grouping: faces.indices, by: { faces[$0].file }) {
+            for ruling in rulings[file] ?? [] where !ruling.people.isEmpty {
+                let overlaps = places.map { (place: $0, overlap: faces[$0].box.overlap(ruling.box)) }
+                guard let best = overlaps.max(by: { $0.overlap < $1.overlap }), best.overlap >= Faces.sameFace
+                else { continue }
+                var what = said[best.place] ?? Said()
+                switch ruling.says {
+                case .is:
+                    what.is = ruling.people
+                    what.isNot.subtract(ruling.people)
+                case .isNot:
+                    if what.is?.isDisjoint(with: ruling.people) == false { what.is = nil }
+                    what.isNot.formUnion(ruling.people)
+                }
+                said[best.place] = what
+            }
+        }
+        return said
     }
 }
 

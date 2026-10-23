@@ -906,6 +906,37 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
+    /// The faces found in the picture at `path`, outside Photos, and who each is taken for (the search window's preview,
+    /// where you can say who they are).
+    func pictureFaces(of path: String) async -> [IndexStore.PictureFace] {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: (try? searchStore?.pictureFaces(ofPath: path)) ?? [])
+            }
+        }
+    }
+
+    /// `face_matches` made again with the corrections just saved (`FaceCorrections`), here rather than in the helper,
+    /// so the next search has them at once (it's quick: one multiplication of the faces' prints). Should the helper hold
+    /// the index too long for it, the helper makes them at the end of its next sync instead: the corrections file's
+    /// change is part of what it checks (`IndexStore.rebuildFaceMatchesIfChanged`).
+    func rebuildFaceMatches() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            searchQueue.async { [self] in
+                defer { continuation.resume() }
+                guard let searchStore else { return }
+                let started = Date()
+                do {
+                    let matched = try searchStore.rebuildFaceMatches()
+                    log("faces: matches made again with the corrections, \(matched) faces in \(ms(since: started))")
+                } catch {
+                    log("faces: matches not made again (the helper will): \(error)")
+                }
+                returnFreedMemory()
+            }
+        }
+    }
+
     private func searchCode(_ text: String, vector: QueryVector?, prefixLast: Bool, limit: Int) async -> [SearchHit] {
         await withCheckedContinuation { continuation in
             searchQueue.async { [self] in

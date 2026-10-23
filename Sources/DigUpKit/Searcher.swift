@@ -31,11 +31,14 @@ public struct SearchHit: Sendable {
 }
 
 /// A face in a picture outside Photos that the People filter took for one of its people (`SearchFilter.people`): who,
-/// by their name in Photos, where the face is, and how alike it is to theirs.
+/// by their name in Photos and their row, where the face is, how alike it is to theirs, and whether you said it's them
+/// (`FaceCorrections`).
 public struct FaceMatch: Sendable, Equatable {
     public let name: String
+    public let person: Int64
     public let box: Faces.Box
     public let similarity: Double
+    public let confirmed: Bool
 }
 
 /// A stretch of a recording that matches a query (`Searcher.moments(of:queryVector:zGate:)`): its segments that stand
@@ -86,8 +89,8 @@ public struct SearchFilter: Sendable, Equatable {
     /// People a file must show, every one of them (ids of `IndexStore.photosPeople`). An entry is one person, or the
     /// people who share a name, any of whom counts for it. An empty entry keeps nothing: a saved search's person who
     /// isn't in the indexed libraries any more (the app's saved searches never widen to everyone). A file shows a person
-    /// when Photos says so, or, outside Photos, when one of its faces matches theirs at `Faces.threshold`
-    /// (`face_matches`, or `faceMatches`).
+    /// when Photos says so, or, outside Photos, when one of its faces matches theirs at `Faces.threshold` or you said
+    /// it's them (`face_matches`, or `faceMatches`).
     public var people: [Set<Int64>]
     /// Albums a file must be in, any of them (ids of `IndexStore.photosAlbums`). Nil keeps every file; an empty set
     /// keeps none (a saved search's albums, none of them indexed any more).
@@ -208,16 +211,19 @@ public struct SearchFilter: Sendable, Equatable {
         return parts.isEmpty ? nil : (parts.joined(separator: " INTERSECT "), values)
     }
 
-    /// The files outside Photos with a face that matches one of `group` at `Faces.threshold`, as SQL (its values added to
-    /// `values`).
+    /// The files outside Photos with a face that matches one of `group` at `Faces.threshold`, or that you said is one of
+    /// them, as SQL (its values added to `values`).
     private func matched(_ group: Set<Int64>, values: inout [SQLValue]) -> String {
         guard let faceMatches else {
             return """
                 SELECT s.file FROM face_matches m JOIN faces f ON f.id = m.face JOIN segments s ON s.id = f.segment
-                WHERE m.person IN (\(group.map(String.init).joined(separator: ","))) AND m.similarity >= \(Faces.threshold)
+                WHERE m.person IN (\(group.map(String.init).joined(separator: ",")))
+                AND (m.similarity >= \(Faces.threshold) OR m.confirmed = 1)
                 """
         }
-        let faces = faceMatches.filter { group.contains($0.value.person) && $0.value.similarity >= Faces.threshold }
+        let faces = faceMatches.filter {
+            group.contains($0.value.person) && ($0.value.similarity >= Faces.threshold || $0.value.confirmed)
+        }
         values.append(.text("[" + faces.keys.map(String.init).joined(separator: ",") + "]"))
         return """
             SELECT s.file FROM faces f JOIN segments s ON s.id = f.segment WHERE f.id IN (SELECT value FROM json_each(?))
@@ -539,31 +545,37 @@ public final class Searcher {
     }
 
     /// The faces of a picture outside Photos that the filter's people were taken for (`SearchFilter.people`, at
-    /// `Faces.threshold`, by `face_matches` or the filter's own `faceMatches`): each person's likeliest, likeliest
-    /// first. None for a library's file, or without people to filter by.
+    /// `Faces.threshold` or because you said so, by `face_matches` or the filter's own `faceMatches`): each person's
+    /// likeliest (one you said is them first), likeliest first. None for a library's file, or without people to filter
+    /// by.
     private func faceMatches(ofFile file: Int64, path: String, filter: SearchFilter) throws -> [FaceMatch] {
         let people = filter.people.reduce(into: Set<Int64>()) { $0.formUnion($1) }
         guard !people.isEmpty, PhotosLibrary.library(containing: path) == nil else { return [] }
-        var best: [Int64: (similarity: Double, box: Faces.Box)] = [:]
+        var best: [Int64: (match: FaceMatcher.Match, box: Faces.Box)] = [:]
+        func rank(_ match: FaceMatcher.Match) -> (Int, Double) { (match.confirmed ? 1 : 0, match.similarity) }
         try store.db.query("""
-            SELECT f.id, f.x, f.y, f.width, f.height, m.person, m.similarity FROM faces f
+            SELECT f.id, f.x, f.y, f.width, f.height, m.person, m.similarity, m.confirmed FROM faces f
             JOIN segments s ON s.id = f.segment LEFT JOIN face_matches m ON m.face = f.id
             WHERE s.file = ? AND f.person IS NULL
             """, [.int(file)]) { row in
             let match: FaceMatcher.Match? = if let given = filter.faceMatches { given[row.int(0)] }
-                else { row.isNull(5) ? nil : FaceMatcher.Match(person: row.int(5), similarity: row.double(6)) }
-            guard let match, people.contains(match.person), match.similarity >= Faces.threshold,
-                  match.similarity > best[match.person]?.similarity ?? -1,
+                else if row.isNull(5) { nil }
+                else { FaceMatcher.Match(person: row.int(5), similarity: row.double(6), confirmed: row.int(7) == 1) }
+            guard let match, people.contains(match.person), match.similarity >= Faces.threshold || match.confirmed,
+                  best[match.person].map({ rank(match) > rank($0.match) }) ?? true,
                   let box = Faces.Box(x: row.double(1), y: row.double(2), width: row.double(3), height: row.double(4))
             else { return }
-            best[match.person] = (match.similarity, box)
+            best[match.person] = (match, box)
         }
         guard !best.isEmpty else { return [] }
         var names: [Int64: String] = [:]
         let ids = best.keys.map(String.init).joined(separator: ",")
         try store.db.query("SELECT id, name FROM photos_people WHERE id IN (\(ids))") { names[$0.int(0)] = $0.text(1) }
         return best.compactMap { person, face in
-            names[person].map { FaceMatch(name: $0, box: face.box, similarity: face.similarity) }
+            names[person].map {
+                FaceMatch(name: $0, person: person, box: face.box, similarity: face.match.similarity,
+                          confirmed: face.match.confirmed)
+            }
         }.sorted { $0.similarity > $1.similarity }
     }
 

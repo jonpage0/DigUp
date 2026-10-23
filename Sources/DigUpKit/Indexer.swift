@@ -54,9 +54,9 @@ public final class Indexer {
     private var triedNamed: [Int64: [Int64]] = [:]
     /// The pictures outside Photos the faces pass found away in this process: they wait for the next helper.
     private var triedAway = Set<Int64>()
-    /// The named faces that faces just read outside Photos are matched with (`IndexStore.faceMatcher`), loaded once a
-    /// run: named faces read in the same run join at its end, when `face_matches` is made again.
-    private var matcher: FaceMatcher?
+    /// How faces just read outside Photos are matched (`IndexStore.faceMatching`: the named faces and the corrections),
+    /// loaded once a run: named faces read in the same run join at its end, when `face_matches` is made again.
+    private var matching: FaceMatching?
 
     /// When set, an index built with another model or other settings is emptied and embedded again (the app: a new
     /// version may bring a new model), and this hears about it. When nil, indexing stops with `fingerprintMismatch`.
@@ -190,7 +190,7 @@ public final class Indexer {
             try store.deleteUnlinkedPeopleAndAlbums()
         }
         // Named faces gone with their pictures or people: the matches made with them go too.
-        if faces != nil { try store.rebuildFaceMatchesIfNamedChanged() }
+        if faces != nil { try store.rebuildFaceMatchesIfChanged() }
         return summary
     }
 
@@ -267,7 +267,7 @@ public final class Indexer {
                 file in namedFaces[file.id].map { (file.id, $0) }
             }))
         }
-        defer { matcher = nil }
+        defer { matching = nil }
         try process(jobs, shouldStop: shouldStop) { _, job, results, seconds in
             for (offset, file) in job.files.enumerated() {
                 let (state, note) = results[offset]
@@ -277,7 +277,7 @@ public final class Indexer {
             }
             done += job.files.count
         }
-        if faces != nil { try store.rebuildFaceMatchesIfNamedChanged() }
+        if faces != nil { try store.rebuildFaceMatchesIfChanged() }
         return states
     }
 
@@ -730,7 +730,7 @@ public final class Indexer {
                     continue
                 }
                 let picture = try store.addSegment(file: file.id, kind: .image, modality: .image, vector: vector)
-                if let faces = item.faces { try keep(faces.rows, ofSegment: picture) }
+                if let faces = item.faces { try keep(faces.rows, ofSegment: picture, of: file.id) }
                 for (frame, embedding) in itsFrames {
                     try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
                                          locEnd: frame.end, vector: embedding.vector)
@@ -760,15 +760,22 @@ public final class Indexer {
         }
     }
 
-    /// Writes the faces read in a picture (inside the caller's transaction), and matches the ones outside Photos with the
-    /// named faces, as the run found them when it first needed them (`matcher`).
-    private func keep(_ rows: [IndexStore.FaceRow], ofSegment segment: Int64) throws {
-        let ids = try store.setFaces(rows, ofSegment: segment)
-        let outside = zip(ids, rows).filter { $0.1.person == nil }.map { (id: $0.0, print: $0.1.print) }
+    /// Writes the faces read in a picture (inside the caller's transaction), and matches the ones outside Photos as the
+    /// run found the named faces and the corrections when it first needed them (`matching`).
+    private func keep(_ rows: [IndexStore.FaceRow], ofSegment segment: Int64, of file: Int64) throws {
+        let outside = Self.outside(rows, written: try store.setFaces(rows, ofSegment: segment), of: file)
         guard !outside.isEmpty else { return }
-        let matcher = try self.matcher ?? store.faceMatcher()
-        self.matcher = matcher
-        try store.matchFaces(outside, with: matcher)
+        let matching = try self.matching ?? store.faceMatching()
+        self.matching = matching
+        try store.matchFaces(outside, with: matching)
+    }
+
+    /// The faces outside Photos among `rows`, just written as the rows `ids`, in the picture that's `file`: to match.
+    private static func outside(_ rows: [IndexStore.FaceRow], written ids: [Int64], of file: Int64)
+        -> [FaceMatching.Face] {
+        zip(ids, rows).filter { $0.1.person == nil }.map { id, row in
+            FaceMatching.Face(id: id, file: file, box: row.box, print: row.print)
+        }
     }
 
     /// "2 faces in 31 ms": what reading a picture's faces found, and took.
@@ -1041,8 +1048,8 @@ public final class Indexer {
             if let rows { try store.db.transaction { try store.setFaces(rows, ofSegment: picture.segment) } }
             report(picture, rows, since: started)
         }
-        try store.rebuildFaceMatchesIfNamedChanged()
-        let matcher = try store.faceMatcher()
+        try store.rebuildFaceMatchesIfChanged()
+        let matching = try store.faceMatching()
         var read = work.read, finished = true
         for picture in work.outside {
             guard !shouldStop() else {
@@ -1061,7 +1068,7 @@ public final class Indexer {
             try store.db.transaction {
                 if let rows {
                     let ids = try store.setFaces(rows, ofSegment: picture.segment)
-                    try store.matchFaces(zip(ids, rows).map { (id: $0.0, print: $0.1.print) }, with: matcher)
+                    try store.matchFaces(Self.outside(rows, written: ids, of: id), with: matching)
                 }
                 try store.setFacesRead(read)
             }

@@ -339,9 +339,10 @@ public final class IndexStore {
     ///   The box is in the picture as it's shown, in fractions from its top-left corner; `print` is the recognizer's
     ///   description of the face, whose recognizer is `meta` "fork_faces_model" (`adoptFaceRecognizer`). Reading a
     ///   picture again replaces its segments, and the foreign key takes their faces with them.
-    /// - `face_matches`: one row a face outside Photos whose nearest named face is at least `Faces.matchFloor` alike:
-    ///   that face's person, and how alike. DigUp's guess, apart from Photos' word (`faces.person`), and made again
-    ///   rather than edited (`matchFaces`, `rebuildFaceMatches`).
+    /// - `face_matches`: one row a face outside Photos whose nearest named face is at least `Faces.matchFloor` alike, or
+    ///   that you said is someone (`confirmed`, from `face-corrections.json`: `FaceCorrections`): that face's person,
+    ///   and how alike. DigUp's guess, apart from Photos' word (`faces.person`), and made again rather than edited
+    ///   (`matchFaces`, `rebuildFaceMatches`).
     /// Indexing writes both when it reads a picture; an index made before this gets its faces once, from the faces
     /// pass (`Indexer.readFaces`).
     private func createFaces() throws {
@@ -361,7 +362,8 @@ public final class IndexStore {
             CREATE TABLE IF NOT EXISTS face_matches(
                 face INTEGER PRIMARY KEY REFERENCES faces(id) ON DELETE CASCADE,
                 person INTEGER NOT NULL REFERENCES photos_people(id) ON DELETE CASCADE,
-                similarity REAL NOT NULL CHECK (similarity BETWEEN -1 AND 1)
+                similarity REAL NOT NULL CHECK (similarity BETWEEN -1 AND 1),
+                confirmed INTEGER NOT NULL DEFAULT 0 CHECK (confirmed IN (0, 1))   -- 1: you said so (FaceCorrections)
             );
             """)
     }
@@ -1121,7 +1123,7 @@ public final class IndexStore {
     public static let facesModelKey = "fork_faces_model"
     /// `meta` "fork_faces_read": how far the faces pass has got through the pictures outside Photos (`FacesRead`).
     static let facesReadKey = "fork_faces_read"
-    /// `meta` "fork_faces_matched": the named faces `face_matches` was last made from (`namedFacesMark`).
+    /// `meta` "fork_faces_matched": what `face_matches` was last made from (`facesMark`).
     static let facesMatchedKey = "fork_faces_matched"
 
     /// A face read, as `setFaces` writes it: the row of the person Photos says it is, nil outside Photos.
@@ -1168,52 +1170,101 @@ public final class IndexStore {
                         face.person.map { .int($0) } ?? .null])
             ids.append(db.lastInsertID)
         }
-        // Named faces written: `face_matches` was made from others (one deleted shows in `namedFacesMark` by itself,
-        // but a new one can take a deleted one's id).
+        // Named faces written: `face_matches` was made from others (one deleted shows in `facesMark` by itself, but a
+        // new one can take a deleted one's id).
         if faces.contains(where: { $0.person != nil }) { try setMeta(Self.facesMatchedKey, nil) }
         return ids
     }
 
-    /// The faces Photos named, to compare the faces outside Photos with (`FaceMatcher`): only those in files `filter`
-    /// keeps (`digup mcp`: the ones an AI app may see).
-    func faceMatcher(referencesKeptBy filter: SearchFilter = SearchFilter()) throws -> FaceMatcher {
+    /// How the faces outside Photos are matched now (`FaceMatching`): with the faces Photos named and the corrections
+    /// beside the index (`faceRulings`), only those of files `filter` keeps (`digup mcp`: the ones an AI app may see).
+    func faceMatching(referencesKeptBy filter: SearchFilter = SearchFilter()) throws -> FaceMatching {
         let kept = filter.query
-        var references: [(person: Int64, print: [Float])] = []
+        var named: [(person: Int64, print: [Float])] = []
         try db.query("SELECT f.person, f.print FROM faces f JOIN segments s ON s.id = f.segment WHERE f.person IS NOT NULL"
                      + (kept.map { " AND s.file IN (\($0.sql))" } ?? ""), kept?.values ?? []) { row in
-            if let print = row.blob(1).flatMap(Faces.floats(fromBytes:)) { references.append((row.int(0), print)) }
+            if let print = row.blob(1).flatMap(Faces.floats(fromBytes:)) { named.append((row.int(0), print)) }
         }
-        return FaceMatcher(references: references)
+        let rulings = try faceRulings(keptBy: filter)
+        return FaceMatching(named: named, rulings: rulings, ruled: try outsideFaces(ofFiles: Set(rulings.keys)))
     }
 
-    /// The faces outside Photos (no person), with their prints.
-    private func outsideFaces() throws -> [(id: Int64, print: [Float])] {
-        var faces: [(id: Int64, print: [Float])] = []
-        try db.query("SELECT id, print FROM faces WHERE person IS NULL") { row in
-            if let print = row.blob(1).flatMap(Faces.floats(fromBytes:)) { faces.append((row.int(0), print)) }
+    /// The corrections beside the index (`FaceCorrections`): none when there are none, or when the file isn't their
+    /// shape (the app says so, and leaves it as it is).
+    public func faceCorrections() -> FaceCorrections {
+        (try? FaceCorrections(contentsOf: FaceCorrections.url(beside: directory))) ?? FaceCorrections()
+    }
+
+    /// The corrections as they apply to the index now, by the file they're of, in the order they were made: each file
+    /// where its bookmark finds it (else where it last was) among the pictures outside Photos `filter` keeps, each
+    /// person every row of their Photos ids. One whose file or person isn't indexed applies to nothing.
+    func faceRulings(keptBy filter: SearchFilter = SearchFilter()) throws -> [Int64: [FaceMatching.Ruling]] {
+        let corrections = faceCorrections().corrections
+        guard !corrections.isEmpty else { return [:] }
+        var rows: [String: Set<Int64>] = [:]
+        try db.query("SELECT id, uuid FROM photos_people") { rows[$0.text(1) ?? "", default: []].insert($0.int(0)) }
+        let kept = filter.query
+        var files: [String: Int64?] = [:]
+        func file(at path: String) throws -> Int64? {
+            if let known = files[path] { return known }
+            var found: Int64?
+            try db.query("SELECT id FROM files WHERE path = ? AND path NOT LIKE ?"
+                         + (kept.map { " AND id IN (\($0.sql))" } ?? ""),
+                         [.text(path), .text(PhotosLibrary.filesPattern)] + (kept?.values ?? [])) { found = $0.int(0) }
+            files[path] = found
+            return found
+        }
+        var rulings: [Int64: [FaceMatching.Ruling]] = [:]
+        for correction in corrections {
+            let people = correction.person.photos.reduce(into: Set<Int64>()) { $0.formUnion(rows[$1.uuid] ?? []) }
+            let now = correction.file.whereItIs
+            guard !people.isEmpty,
+                  let id = try file(at: now) ?? (now == correction.file.path ? nil : file(at: correction.file.path))
+            else { continue }
+            rulings[id, default: []].append(FaceMatching.Ruling(box: correction.face, people: people,
+                                                                says: correction.says))
+        }
+        return rulings
+    }
+
+    /// The faces outside Photos (no person), with their files, boxes and prints: every one, or those of `files`.
+    private func outsideFaces(ofFiles files: Set<Int64>? = nil) throws -> [FaceMatching.Face] {
+        var values: [SQLValue] = []
+        if let files {
+            guard !files.isEmpty else { return [] }
+            values.append(.text(String(decoding: try JSONEncoder().encode(Array(files)), as: UTF8.self)))
+        }
+        var faces: [FaceMatching.Face] = []
+        try db.query("""
+            SELECT f.id, s.file, f.x, f.y, f.width, f.height, f.print FROM faces f JOIN segments s ON s.id = f.segment
+            WHERE f.person IS NULL\(files == nil ? "" : " AND s.file IN (SELECT value FROM json_each(?))")
+            """, values) { row in
+            guard let box = Faces.Box(x: row.double(2), y: row.double(3), width: row.double(4), height: row.double(5)),
+                  let print = row.blob(6).flatMap(Faces.floats(fromBytes:)) else { return }
+            faces.append(FaceMatching.Face(id: row.int(0), file: row.int(1), box: box, print: print))
         }
         return faces
     }
 
-    /// Writes the matches of faces outside Photos just read (by row), as `matcher` finds them.
-    func matchFaces(_ faces: [(id: Int64, print: [Float])], with matcher: FaceMatcher) throws {
-        for (face, match) in zip(faces, matcher.matches(faces.map { $0.print })) {
+    /// Writes the matches of faces outside Photos just read (a picture's, all together), as `matching` finds them.
+    func matchFaces(_ faces: [FaceMatching.Face], with matching: FaceMatching) throws {
+        for (face, match) in zip(faces, matching.matches(faces)) {
             try db.run("DELETE FROM face_matches WHERE face = ?", [.int(face.id)])
             if let match { try insert(match, of: face.id) }
         }
     }
 
     private func insert(_ match: FaceMatcher.Match, of face: Int64) throws {
-        try db.run("INSERT INTO face_matches(face, person, similarity) VALUES(?, ?, ?)",
-                   [.int(face), .int(match.person), .double(match.similarity)])
+        try db.run("INSERT INTO face_matches(face, person, similarity, confirmed) VALUES(?, ?, ?, ?)",
+                   [.int(face), .int(match.person), .double(match.similarity), .int(match.confirmed ? 1 : 0)])
     }
 
-    /// `face_matches` made again: every face outside Photos matched with every named face (`FaceMatcher`). Returns how
-    /// many faces it matched.
+    /// `face_matches` made again: every face outside Photos matched as the faces Photos named and the corrections
+    /// beside the index have it now (`faceMatching`). Returns how many faces it matched.
     @discardableResult
     public func rebuildFaceMatches() throws -> Int {
-        let (matcher, faces, mark) = (try faceMatcher(), try outsideFaces(), try namedFacesMark())
-        let matches = matcher.matches(faces.map { $0.print })
+        let (matching, faces, mark) = (try faceMatching(), try outsideFaces(), try facesMark())
+        let matches = matching.matches(faces)
         return try db.transaction {
             try db.run("DELETE FROM face_matches")
             var count = 0
@@ -1226,28 +1277,31 @@ public final class IndexStore {
         }
     }
 
-    /// `rebuildFaceMatches`, when the named faces aren't the ones `face_matches` was made from (a sync took some away, or
-    /// a picture's named faces were read). Returns whether it was made again.
+    /// `rebuildFaceMatches`, when what `face_matches` was made from changed: the named faces (a sync took some away, or a
+    /// picture's were read), or the corrections (the app saved them). Returns whether it was made again.
     @discardableResult
-    public func rebuildFaceMatchesIfNamedChanged() throws -> Bool {
-        guard try meta(Self.facesMatchedKey) != namedFacesMark() else { return false }
+    public func rebuildFaceMatchesIfChanged() throws -> Bool {
+        guard try meta(Self.facesMatchedKey) != facesMark() else { return false }
         try rebuildFaceMatches()
         return true
     }
 
-    /// The named faces as a mark that changes when one goes: how many there are and the sum of their ids. Writing named
-    /// faces forgets the mark kept (`setFaces`), since a new one can take a deleted one's id.
-    private func namedFacesMark() throws -> String {
-        var mark = ""
+    /// What `face_matches` is made from, as a mark that changes with it: the named faces (how many there are and the
+    /// sum of their ids; writing named faces forgets the mark kept, `setFaces`, since a new one can take a deleted one's
+    /// id), and when the corrections were last saved and how long their file is.
+    private func facesMark() throws -> String {
+        var named = ""
         try db.query("SELECT COUNT(*), coalesce(SUM(id), 0) FROM faces WHERE person IS NOT NULL") {
-            mark = "\($0.int(0)) \($0.int(1))"
+            named = "\($0.int(0)) \($0.int(1))"
         }
-        return mark
+        let file = try? FileManager.default.attributesOfItem(atPath: FaceCorrections.url(beside: directory).path)
+        let saved = (file?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return "\(named) \(saved) \((file?[.size] as? NSNumber)?.intValue ?? 0)"
     }
 
-    /// The faces outside Photos matched with only the named faces in files `filter` keeps, at the floor, as
-    /// `face_matches` would hold them were those all the named faces (`digup mcp`: a face an AI app may not see never
-    /// decides a match it's told of); nil when they are all of them, and `face_matches` holds just that.
+    /// The faces outside Photos matched with only the named faces and the corrections of files `filter` keeps, at the
+    /// floor, as `face_matches` would hold them were those all there are (`digup mcp`: a face an AI app may not see
+    /// never decides a match it's told of); nil when they are all of them, and `face_matches` holds just that.
     public func faceMatches(referencesKeptBy filter: SearchFilter) throws -> [Int64: FaceMatcher.Match]? {
         guard let kept = filter.query else { return nil }
         var unseen = 0
@@ -1255,13 +1309,42 @@ public final class IndexStore {
             SELECT COUNT(*) FROM faces f JOIN segments s ON s.id = f.segment
             WHERE f.person IS NOT NULL AND s.file NOT IN (\(kept.sql))
             """, kept.values) { unseen = Int($0.int(0)) }
-        guard unseen > 0 else { return nil }
+        let ruled = try faceRulings().count
+        if unseen == 0, try ruled == 0 || faceRulings(keptBy: filter).count == ruled { return nil }
         let faces = try outsideFaces()
         var found: [Int64: FaceMatcher.Match] = [:]
-        for (face, match) in zip(faces, try faceMatcher(referencesKeptBy: filter).matches(faces.map { $0.print })) {
+        for (face, match) in zip(faces, try faceMatching(referencesKeptBy: filter).matches(faces)) {
             found[face.id] = match
         }
         return found
+    }
+
+    /// A face found in a picture outside Photos: where it is, and who it's taken for when the People filter would keep
+    /// the picture for them (at `Faces.threshold`, or because you said so).
+    public struct PictureFace: Sendable, Equatable {
+        public let box: Faces.Box
+        public let match: FaceMatch?
+    }
+
+    /// The faces found in the picture at `path` (the search window's preview, where you can say who they are), left to
+    /// right; none for a picture in Photos.
+    public func pictureFaces(ofPath path: String) throws -> [PictureFace] {
+        var faces: [PictureFace] = []
+        try db.query("""
+            SELECT f.x, f.y, f.width, f.height, m.person, p.name, m.similarity, m.confirmed FROM files fi
+            JOIN segments s ON s.file = fi.id JOIN faces f ON f.segment = s.id
+            LEFT JOIN face_matches m ON m.face = f.id LEFT JOIN photos_people p ON p.id = m.person
+            WHERE fi.path = ? AND f.person IS NULL ORDER BY f.x
+            """, [.text(path)]) { row in
+            guard let box = Faces.Box(x: row.double(0), y: row.double(1), width: row.double(2), height: row.double(3))
+            else { return }
+            let confirmed = row.int(7) == 1
+            let kept = !row.isNull(4) && (row.double(6) >= Faces.threshold || confirmed)
+            let match = kept ? FaceMatch(name: row.text(5) ?? "", person: row.int(4), box: box,
+                                         similarity: row.double(6), confirmed: confirmed) : nil
+            faces.append(PictureFace(box: box, match: match))
+        }
+        return faces
     }
 
     /// How far the faces pass has got through the pictures outside Photos that were read before their faces were
@@ -1336,14 +1419,15 @@ public final class IndexStore {
 
     /// What the index knows of faces (Settings → Photos, `digup status`): the recognizer its prints are from (nil: none
     /// yet), the faces Photos named that it compares with, the faces found outside Photos and the pictures they're in,
-    /// and the pictures outside Photos with a face that matches someone at `Faces.threshold` (what the People filter
-    /// keeps).
+    /// the pictures outside Photos with a face that matches someone at `Faces.threshold` or that you said is someone
+    /// (what the People filter keeps), and the faces you said are someone (`FaceCorrections`).
     public struct FaceCounts: Sendable, Equatable {
         public var recognizer: String?
         public var named = 0
         public var outside = 0
         public var outsidePictures = 0
         public var matchedPictures = 0
+        public var confirmed = 0
     }
 
     public func faceCounts() throws -> FaceCounts {
@@ -1355,9 +1439,9 @@ public final class IndexStore {
             (counts.named, counts.outside, counts.outsidePictures) = (Int($0.int(0)), Int($0.int(1)), Int($0.int(2)))
         }
         try db.query("""
-            SELECT COUNT(DISTINCT f.segment) FROM face_matches m JOIN faces f ON f.id = m.face
-            WHERE m.similarity >= \(Faces.threshold)
-            """) { counts.matchedPictures = Int($0.int(0)) }
+            SELECT COUNT(DISTINCT f.segment), coalesce(SUM(m.confirmed), 0) FROM face_matches m
+            JOIN faces f ON f.id = m.face WHERE m.similarity >= \(Faces.threshold) OR m.confirmed = 1
+            """) { (counts.matchedPictures, counts.confirmed) = (Int($0.int(0)), Int($0.int(1))) }
         return counts
     }
 
