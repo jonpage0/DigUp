@@ -122,22 +122,38 @@ final class QuickLookItem: NSObject, QLPreviewItem {
 }
 
 extension ResultRow {
-    /// What Space shows, and which of it first. A video in iCloud read from Photos' filmstrip: every still of it, from
-    /// the one that matched (Quick Look's arrows and its index sheet go through them; they're all this Mac has of the
-    /// video), and a poster video its poster. Anything else: the file.
+    /// What Space shows, and which of it first. A video in iCloud (read from Photos' filmstrip or poster): once Space
+    /// has downloaded it, the video itself (`QuickLookSource.showInQuickLook`); until then every still of it, from the
+    /// one that matched (Quick Look's arrows and its index sheet go through them), or its poster. Anything else: the
+    /// file.
     var quickLook: (items: [QuickLookItem], start: Int) {
         if kind == .video, let photos, let still = photos.still {
+            if let video = PhotosDownloads.shared.video(of: photos.uuid) {
+                return ([QuickLookItem(url: video, title: name)], 0)
+            }
+            let note: String
+            if case .failed(let why) = PhotosDownloads.shared.state(of: photos.uuid) {
+                note = "the video is in iCloud: \(why)"
+            } else {
+                note = "downloading the video from iCloud…"
+            }
             let stills = photos.reading == .stills ? PhotosLibrary.filmstrip(startingAt: url.path) : []
             if stills.count > 1 {
                 let items = stills.enumerated().map { index, path in
                     QuickLookItem(url: URL(fileURLWithPath: path),
-                                  title: "\(name) · still \(index + 1) of \(stills.count) (the video is in iCloud)")
+                                  title: "\(name) · still \(index + 1) of \(stills.count) (\(note))")
                 }
                 return (items, stills.firstIndex(of: still) ?? 0)
             }
-            return ([QuickLookItem(url: URL(fileURLWithPath: still), title: "\(name) (the video is in iCloud)")], 0)
+            return ([QuickLookItem(url: URL(fileURLWithPath: still), title: "\(name) (\(note))")], 0)
         }
         return ([QuickLookItem(url: url, title: name)], 0)
+    }
+
+    /// A video of the Photos library that's only in iCloud and that Space hasn't downloaded yet.
+    var needsVideoDownload: Bool {
+        guard kind == .video, let photos, photos.reading?.isStandIn == true else { return false }
+        return PhotosDownloads.shared.video(of: photos.uuid) == nil
     }
 }
 
@@ -158,6 +174,7 @@ extension QuickLookSource {
         let samePlace = place == previewPlace
         previewItems = items
         previewPlace = place
+        if let row, row.needsVideoDownload { downloadVideo(of: row, showing: items) }
         if sameFiles, panel.isVisible {
             // The same files showing (a key that didn't move the selection, or the same file matching elsewhere):
             // reloading them would restart a movie, so only a new place in them moves Quick Look.
@@ -169,6 +186,21 @@ extension QuickLookSource {
         panel.reloadData()
         if start > 0 { panel.currentPreviewItemIndex = start }
         QuickLookMoment.show(row, in: panel)
+    }
+
+    /// Space on a video in iCloud: Photos downloads it (as Download Original does, and keeps it in the library), and
+    /// Quick Look then plays it in place of its stills, if it's still showing them. Only once Quick Look has shown the
+    /// video for 0.6 s: arrowing past results with Quick Look open doesn't download every video on the way.
+    private func downloadVideo(of row: ResultRow, showing items: [QuickLookItem]) {
+        guard let uuid = row.photos?.uuid else { return }
+        let urls = items.map(\.previewItemURL)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, QLPreviewPanel.shared().isVisible, previewItems.map(\.previewItemURL) == urls else { return }
+            PhotosDownloads.shared.start(uuid) { [weak self] in
+                guard let self, QLPreviewPanel.shared().isVisible, previewItems.map(\.previewItemURL) == urls else { return }
+                showInQuickLook(row)
+            }
+        }
     }
 }
 

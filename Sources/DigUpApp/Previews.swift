@@ -211,8 +211,9 @@ struct PreviewPane: View {
         .task(id: foundKey) { await find() }
     }
 
-    /// One result's: the meaning results that follow a search's first, keyword-only ones count its moments.
-    private var foundKey: String { "\(row.id)|\(row.query)|\(row.momentCount)" }
+    /// One result's: the meaning results that follow a search's first, keyword-only ones count its moments, and a video
+    /// in iCloud read while it's selected gets its stills (`info["frames"]`), which bring its strip.
+    private var foundKey: String { "\(row.id)|\(row.query)|\(row.momentCount)|\(row.info["frames"] ?? "")" }
 
     /// What was found for this result (nothing yet, while it's being looked for).
     private var current: Found? { found?.key == foundKey ? found : nil }

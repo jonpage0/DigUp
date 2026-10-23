@@ -1,3 +1,4 @@
+import AVFoundation
 import Observation
 import Photos
 
@@ -5,8 +6,9 @@ import Photos
 /// Photos' preview, stills or poster of it). Photos fetches the original from iCloud and keeps it in the library, as it
 /// does when the item is opened in Photos; the library's folders change, the next sync's listing finds the original,
 /// and the same record is read again from it (`photos_assets.reading` becomes original or edited). DigUp keeps no
-/// copy: what PhotoKit hands over is dropped. It asks for the version Photos shows (an edit's render, else the
-/// original), which is the one DigUp reads first.
+/// copy: what PhotoKit hands over is dropped, except a video's file URL, which Quick Look plays until the app quits
+/// (Space on a video in iCloud downloads it and then shows the video, Jon 2026-10-22). It asks for the version Photos
+/// shows (an edit's render, else the original), which is the one DigUp reads first.
 ///
 /// PhotoKit reaches only the System Photo Library, so an item of another library isn't found. Photos may remove the
 /// original again later ("Optimize Mac Storage"); the record then goes back to the preview it has.
@@ -22,10 +24,20 @@ final class PhotosDownloads {
 
     /// By asset uuid, for as long as the app runs.
     private(set) var states: [String: State] = [:]
+    /// A downloaded video's file, by asset uuid (PhotoKit's URL for it: the library's original, or a render of it).
+    private var videos: [String: URL] = [:]
+    /// What to do when a download ends, by asset uuid (Quick Look waiting to show the video).
+    private var waiting: [String: [() -> Void]] = [:]
 
     func state(of uuid: String) -> State? { states[uuid] }
 
-    func start(_ uuid: String) {
+    /// The file of a video downloaded since the app started, if PhotoKit gave one (a slow-motion video comes as a
+    /// composition with no single file).
+    func video(of uuid: String) -> URL? { videos[uuid] }
+
+    /// Starts the download (once at a time per item); `then` runs when it ends, however it ends.
+    func start(_ uuid: String, then: (() -> Void)? = nil) {
+        if let then { waiting[uuid, default: []].append(then) }
         if case .downloading = states[uuid] { return }
         states[uuid] = .downloading(0)
         Task {
@@ -44,14 +56,20 @@ final class PhotosDownloads {
                     }
                 }
             }
-            let outcome = await (asset.mediaType == .video ? Self.video(asset, progress) : Self.picture(asset, progress))
-            finish(uuid, outcome)
+            if asset.mediaType == .video {
+                let (state, url) = await Self.video(asset, progress)
+                if let url { videos[uuid] = url }
+                finish(uuid, state)
+            } else {
+                finish(uuid, await Self.picture(asset, progress))
+            }
         }
     }
 
     private func finish(_ uuid: String, _ state: State) {
         states[uuid] = state
         if case .failed(let why) = state { log("photos: download failed: \(why)") } else { log("photos: downloaded") }
+        for then in waiting.removeValue(forKey: uuid) ?? [] { then() }
     }
 
     private nonisolated static func picture(_ asset: PHAsset, _ progress: @escaping @Sendable (Double) -> Void) async -> State {
@@ -67,7 +85,8 @@ final class PhotosDownloads {
         }
     }
 
-    private nonisolated static func video(_ asset: PHAsset, _ progress: @escaping @Sendable (Double) -> Void) async -> State {
+    private nonisolated static func video(_ asset: PHAsset, _ progress: @escaping @Sendable (Double) -> Void) async
+        -> (State, URL?) {
         let options = PHVideoRequestOptions()
         options.version = .current
         options.deliveryMode = .highQualityFormat
@@ -75,7 +94,8 @@ final class PhotosDownloads {
         options.progressHandler = { value, _, _, _ in progress(value) }
         return await withCheckedContinuation { continuation in
             PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { video, _, info in
-                continuation.resume(returning: video != nil ? .done : .failed(Self.reason(info)))
+                continuation.resume(returning: video != nil ? (.done, (video as? AVURLAsset)?.url)
+                                                            : (.failed(Self.reason(info)), nil))
             }
         }
     }
