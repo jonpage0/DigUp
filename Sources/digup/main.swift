@@ -37,6 +37,12 @@ let usage = """
       digup mcp [--defaults-suite NAME]       DigUp for AI apps: an MCP server on stdin and stdout (see MCPServer),
                                               answering only as far as Settings → AI apps allows (in the app's
                                               settings, or the suite a dev run of the app was started with)
+      digup faces-eval --library <path> [--catalog <Photos.sqlite>] [--engine vision|sface] [--model <path>]...
+                                              how well face recognizers know the people named in a Photos
+                                              library, from the faces Photos found (macOS; see FacesEval):
+                                              --catalog reads a copy of its catalog, --model is a Core ML
+                                              engine's model (repeatable: one engine each; default: SFace, by
+                                              scripts/face-model.py)
 
     Options:
       --index DIR          index folder (default: DigUp's Application Support folder; see `digup status`)
@@ -89,17 +95,20 @@ struct Arguments {
     static let valued: Set<String> = ["--index", "--limit", "--kind", "-n", "--zgate", "--word-weight", "--new-limit",
                                       "--linger", "--shot-tokens", "--code-stretch", "--encoder-idle", "--to",
                                       "--memory-limit", "--time-limit", "--tries", "--when-quiet", "--within",
-                                      "--defaults-suite"]
+                                      "--defaults-suite", "--library", "--catalog", "--engine"]
     static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude", "--with",
                                         "--album", "--origin", "--camera", "--shot-on"]
 
-    init(_ raw: ArraySlice<String>) throws {
+    /// `valued` and `repeated` name the options that take a value in every command; `alsoRepeated`, more in this one
+    /// (`--model` is faces-eval's models, and a switch of `digup speed`).
+    init(_ raw: ArraySlice<String>, alsoRepeated: Set<String>) throws {
         var index = raw.startIndex
         while index < raw.endIndex {
             let argument = raw[index]
-            if Self.valued.contains(argument) || Self.repeated.contains(argument) {
+            let repeated = Self.repeated.contains(argument) || alsoRepeated.contains(argument)
+            if repeated || Self.valued.contains(argument) {
                 guard index + 1 < raw.endIndex else { throw CLIError("\(argument) needs a value") }
-                if Self.repeated.contains(argument) {
+                if repeated {
                     lists[argument, default: []].append(raw[index + 1])
                 } else {
                     values[argument] = raw[index + 1]
@@ -812,7 +821,7 @@ do {
         print(usage)
         exit(0)
     }
-    let args = try Arguments(raw.dropFirst())
+    let args = try Arguments(raw.dropFirst(), alsoRepeated: command == "faces-eval" ? ["--model"] : [])
     if ["index-service", "worker", "search-service", "download-model"].contains(command)
         || command == "estimate" && args.flags.contains("--json") {
         ParentWatch.start()   // an app's helper goes when the app does
@@ -848,6 +857,7 @@ do {
     case "search-service": exit(try searchService(args))
     case "download-model": exit(try downloadModel(args))
     case "mcp": exit(mcpServer(args))
+    case "faces-eval": try facesEval(args)
     default:
         print(usage)
         exit(2)
