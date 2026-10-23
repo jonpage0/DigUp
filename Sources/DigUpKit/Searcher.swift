@@ -159,6 +159,8 @@ public struct SearchFilter: Sendable, Equatable {
     public var shape: Shape?
     /// Only files from this time, by their date (`FileDate`): the When filter.
     public var when: When?
+    /// Only files taken near this place (`digup mcp`'s `near`; beside `area`, both keep what's in both).
+    public var near: Near?
     /// The faces outside Photos matched to people, by face, to go by instead of the index's own (`face_matches`): what an
     /// AI app is told is matched only with the named faces it may see (`IndexStore.faceMatches(referencesKeptBy:)`,
     /// `digup mcp`). Nil goes by the index's.
@@ -289,16 +291,16 @@ public struct SearchFilter: Sendable, Equatable {
     public init(people: [Set<Int64>] = [], albums: Set<Int64>? = nil, favorites: Bool = false,
                 origins: Set<String> = [], cameras: Set<String> = [], shotOn: Set<String>? = nil,
                 paths: Set<String>? = nil, area: Area? = nil, length: Length? = nil, shape: Shape? = nil,
-                when: When? = nil) {
+                when: When? = nil, near: Near? = nil) {
         (self.people, self.albums, self.favorites, self.area) = (people, albums, favorites, area)
         (self.origins, self.cameras, self.shotOn, self.paths) = (origins, cameras, shotOn, paths)
-        (self.length, self.shape, self.when) = (length, shape, when)
+        (self.length, self.shape, self.when, self.near) = (length, shape, when, near)
     }
 
     public var isEmpty: Bool {
         people.isEmpty && albums == nil && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
             && paths == nil && area == nil && photosOnly == nil && sensitive == nil && leavingOutSensitive == nil
-            && length == nil && shape == nil && when == nil
+            && length == nil && shape == nil && when == nil && near == nil
     }
 
     /// What of it leaves files out of an AI app's sight (`photosOnly`, `leavingOutSensitive`); empty for DigUp's own
@@ -371,10 +373,9 @@ public struct SearchFilter: Sendable, Equatable {
         if let shape {
             parts.append("SELECT file FROM media_dimensions WHERE \(shape.condition)")   // a recording's has no size
         }
-        if let when {
-            let query = when.query
-            parts.append(query.sql)
-            values += query.values
+        for part in [when?.query, near?.query].compactMap({ $0 }) {
+            parts.append(part.sql)
+            values += part.values
         }
         if let photosOnly {
             // As `PhotosLibrary.library(containing:)`; the paths kept go as one value (a library has thousands).

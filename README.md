@@ -377,9 +377,10 @@ They get four tools, all read-only:
 
 - `search_files`: what the search window does, with its kinds and filters (people, albums, Photos favorites, DigUp's
   favorites, From, an area on the map, a length, a shape, when: `{after, before}` days or `{last_days}`) and its
-  required words (`+beach`). With no words, a kind or a filter lists what it keeps, newest first, so "screenshots
-  from June" is a kind and a when. Each result says where the file is, why it's there ("Matches the text on page
-  3"), the words that matched, and when and where it was taken.
+  required words (`+beach`), plus `near`: what was taken within so many km of a place (`{latitude, longitude,
+  radius_km}`). With no words, a kind or a filter lists what it keeps, newest first, so "screenshots from June" is a
+  kind and a when. Each result says where the file is, why it's there ("Matches the text on page 3"), the words that
+  matched, and when and where it was taken.
 - `read_text`: the words DigUp read from a file it returned (a document, a PDF's page, the text in a screenshot, what
   Photos knows about a picture, a stretch of code, what's said in a recording; with a `moment`, what's said within
   30 seconds of it), up to 20,000 characters.

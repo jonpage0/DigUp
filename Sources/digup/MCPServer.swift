@@ -422,7 +422,7 @@ final class MCPServer {
     private func searchFiles(_ arguments: [String: Any], access: AIAccess) throws -> Outcome {
         let input = try Input(arguments, allowed: ["query", "kind", "people", "albums", "photos_favorites",
                                                    "digup_favorites", "from", "taken_within", "length", "shape",
-                                                   "when", "limit"])
+                                                   "when", "near", "limit"])
         var query = try input.string("query")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let kind = try input.choice("kind", of: Self.kindNames.values.sorted())
         let limit = try input.integer("limit", in: 1...Self.maxLimit) ?? Self.defaultLimit
@@ -432,14 +432,14 @@ final class MCPServer {
         let from = try input.choice("from", of: ["mine", "saved", "imported"])
         let area = try input.area("taken_within")
         let length = try input.length("length"), shape = try input.shape("shape")
-        let when = try input.when("when")
+        let when = try input.when("when"), near = try input.near("near")
 
         let codeWords = CodeQuery.text(of: query)
         if kind == Self.kindNames[.code] || codeWords != nil {
             guard access.code else { return .refused(.code) }
             guard people == nil, albums == nil, !photosFavorites, !digupFavorites, from == nil, area == nil,
-                  length == nil, shape == nil, when == nil else {
-                throw InputError("Code search takes no Photos, favorites, map, length, shape or when filters.")
+                  length == nil, shape == nil, when == nil, near == nil else {
+                throw InputError("Code search takes no Photos, favorites, map, length, shape, when or near filters.")
             }
             query = codeWords ?? query   // none ("code:" alone, or the kind alone): the newest code files
             guard let code = try codeIndex() else {
@@ -452,7 +452,7 @@ final class MCPServer {
         let photosOnly = people != nil || albums != nil || photosFavorites || from != nil
         if photosOnly, !access.photos { return .refused(.photos) }
         guard !query.isEmpty || photosOnly || digupFavorites || area != nil || length != nil || shape != nil
-                || when != nil || kind != nil else {
+                || when != nil || near != nil || kind != nil else {
             throw InputError("Say what to look for (query), or give a kind or a filter to list what it keeps.")
         }
         let main = try mainIndex()
@@ -494,7 +494,7 @@ final class MCPServer {
         if digupFavorites { filter.paths = try favoritePaths(in: store) }
         filter.area = area
         (filter.length, filter.shape) = (length, shape)
-        filter.when = when
+        (filter.when, filter.near) = (when, near)
         let kinds = kind.flatMap { name in Self.kindNames.first { $0.value == name }?.key }.map { Set([$0]) }
         return try search(query, in: main, kinds: kinds, filter: filter, limit: limit, prompt: Prompts.query)
     }
@@ -880,6 +880,24 @@ final class MCPServer {
                   let when = SearchFilter.When(after: try day("after"), before: try day("before")) else { throw wrong }
             return when
         }
+
+        /// Near a place: {latitude, longitude} in degrees and `radius_km`, how far from it along the earth.
+        func near(_ key: String) throws -> SearchFilter.Near? {
+            guard let value = value(key) else { return nil }
+            let point = value as? [String: Any] ?? [:]
+            let numbers = point.compactMapValues { ($0 as? NSNumber).flatMap { MCPServer.isBoolean($0) ? nil : $0 } }
+            guard value is [String: Any], Set(point.keys) == ["latitude", "longitude", "radius_km"], numbers.count == 3,
+                  let latitude = numbers["latitude"]?.doubleValue, let longitude = numbers["longitude"]?.doubleValue,
+                  let radius = numbers["radius_km"]?.doubleValue,
+                  let near = SearchFilter.Near(latitude: latitude, longitude: longitude, radiusKm: radius) else {
+                let radii = SearchFilter.Near.radii
+                throw InputError("\(key) is {latitude, longitude, radius_km}: a place in degrees (latitude -90 to 90, "
+                                 + "longitude -180 to 180) and how far from it, in km along the earth, from "
+                                 + "\(radii.lowerBound) to \(Int(radii.upperBound)) ({latitude: 48.8584, longitude: "
+                                 + "2.2945, radius_km: 2}: within 2 km of the Eiffel Tower).")
+            }
+            return near
+        }
     }
 
     // MARK: The tools' descriptions
@@ -962,6 +980,17 @@ final class MCPServer {
                         + "it if nothing fits. With no query, when and a kind list that time newest first (screenshots "
                         + "from June: kind screenshot, when {after: \"2026-06-01\", before: \"2026-07-01\"}), and "
                         + "get_picture can look at them."],
+            "near": ["type": "object",
+                     "properties": ["latitude": ["type": "number", "minimum": -90, "maximum": 90],
+                                    "longitude": ["type": "number", "minimum": -180, "maximum": 180],
+                                    "radius_km": ["type": "number", "minimum": SearchFilter.Near.radii.lowerBound,
+                                                  "maximum": SearchFilter.Near.radii.upperBound]],
+                     "required": ["latitude", "longitude", "radius_km"], "additionalProperties": false,
+                     "description": "Only what was taken within radius_km of this place, along the earth, by where "
+                        + "Photos or the camera says it was taken (files with no location are left out). The place in "
+                        + "degrees (for a place's name, find its coordinates yourself); radius_km from 0.01 to 20000: "
+                        + "a building about 0.2, a neighbourhood 2, a city 20, a region 200. With taken_within too, "
+                        + "both must hold."],
             "limit": ["type": "integer", "minimum": 1, "maximum": maxLimit, "default": defaultLimit,
                       "description": "How many results at most."],
         ]

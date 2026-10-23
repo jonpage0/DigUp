@@ -94,10 +94,15 @@ public final class IndexStore {
     }
 
     /// The functions the filters' SQL calls, which SQLite doesn't have: a camera's date read in this Mac's time zone
-    /// (`FileDate`).
+    /// (`FileDate`), and how far apart two places are (`SearchFilter.Near`).
     private func defineFunctions() throws {
         try db.define(FileDate.exifFunction, arguments: 1, deterministic: false) { arguments in
             arguments[0].text.flatMap { FileDate.seconds(exif: $0) }.map { .double($0) } ?? .null
+        }
+        try db.define(SearchFilter.Near.distanceFunction, arguments: 4, deterministic: true) { arguments in
+            guard !arguments.contains(where: \.isNull) else { return .null }
+            return .double(SearchFilter.Near.kilometers((arguments[0].double, arguments[1].double),
+                                                        (arguments[2].double, arguments[3].double)))
         }
     }
 
