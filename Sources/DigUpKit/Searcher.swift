@@ -98,8 +98,8 @@ public struct PhotosHit: Sendable, Equatable {
     public var still: String? = nil
 }
 
-/// What a search keeps besides its kinds: Photos' facts about a library's files, and where files were taken. The
-/// parts combine with AND; an empty filter keeps every file.
+/// What a search keeps besides its kinds: Photos' facts about a library's files, where files were taken, and how long
+/// and what shape they are. The parts combine with AND; an empty filter keeps every file.
 public struct SearchFilter: Sendable, Equatable {
     /// People a file must show, every one of them (ids of `IndexStore.photosPeople`). An entry is one person, or the
     /// people who share a name, any of whom counts for it. An empty entry keeps nothing: a saved search's person who
@@ -138,6 +138,10 @@ public struct SearchFilter: Sendable, Equatable {
     /// app doesn't see while "Pictures rated sensitive" is off (`AIAccess.sensitive`), fail-safe as hidden Photos items
     /// are. Left out before anything is matched, counted or cut to the best, as `photosOnly` is.
     public var leavingOutSensitive: SensitivePosition?
+    /// Only videos and recordings this long (`media_dimensions.duration`): the Length filter.
+    public var length: Length?
+    /// Only pictures and videos of this shape as they're shown (`media_dimensions.width`, `height`): the Shape filter.
+    public var shape: Shape?
 
     /// A box on the map, in degrees: south to north, west to east.
     public struct Area: Sendable, Equatable {
@@ -149,16 +153,125 @@ public struct SearchFilter: Sendable, Equatable {
         }
     }
 
+    /// How long a video or a recording is, in seconds: `atLeast` or longer, and shorter than `under`; either may be
+    /// left out, not both (approved 2026-10-22). The Length menu offers `buckets`; a saved search keeps one as
+    /// `{"atLeast": 15, "under": 60}` (its `Codable`), `digup mcp` takes `{at_least, under}`.
+    public struct Length: Sendable, Hashable {
+        public let atLeast: Double?
+        public let under: Double?
+
+        /// Nil with no bound, a bound below 0 (`under` above it) or that isn't a number, or `atLeast` not below `under`.
+        public init?(atLeast: Double? = nil, under: Double? = nil) {
+            guard atLeast != nil || under != nil, atLeast.map({ $0.isFinite && $0 >= 0 }) ?? true,
+                  under.map({ $0.isFinite && $0 > 0 }) ?? true else { return nil }
+            if let atLeast, let under, atLeast >= under { return nil }
+            (self.atLeast, self.under) = (atLeast, under)
+        }
+
+        /// The Length menu's: under 15 s, 15 s – 1 min, 1 – 5 min, over 5 min.
+        public static let buckets: [Length] = {
+            let bounds: [(atLeast: Double?, under: Double?)] = [(nil, 15), (15, 60), (60, 300), (300, nil)]
+            return bounds.compactMap { Length(atLeast: $0.atLeast, under: $0.under) }
+        }()
+
+        /// As `digup search --length` and the app's debug flags write it, in seconds: "15..60", "..15", "300..".
+        public init?(_ text: String) {
+            let bounds = text.components(separatedBy: "..")
+            guard bounds.count == 2, bounds.allSatisfy({ $0.isEmpty || Double($0) != nil }) else { return nil }
+            self.init(atLeast: Double(bounds[0]), under: Double(bounds[1]))
+        }
+
+        public var text: String {
+            func seconds(_ value: Double?) -> String {
+                guard let value else { return "" }
+                return value == value.rounded() && abs(value) < 1e15 ? String(Int(value)) : String(value)
+            }
+            return seconds(atLeast) + ".." + seconds(under)
+        }
+
+        /// The files this long, as a condition on a `media_dimensions` row (a still picture's has no duration, which
+        /// no bound holds), and the values it takes.
+        var condition: (sql: String, values: [SQLValue]) {
+            let bounds = [atLeast.map { ("duration >= ?", $0) }, under.map { ("duration < ?", $0) }].compactMap { $0 }
+            return (bounds.map(\.0).joined(separator: " AND "), bounds.map { .double($0.1) })
+        }
+    }
+
+    /// What shape a picture or a video is as it's shown (approved 2026-10-22): taller than wide, wider than tall, square
+    /// (its sides within 5 %), wide (2:1 or wider: panoramas and cinema), or an exact ratio, width to height in whole
+    /// numbers from 1 to 99, its orientation included ("16:9" is landscape, "9:16" portrait), matched within 2 %. Square
+    /// is apart from portrait and landscape; wide is among landscape. Written as a saved search and `digup mcp` keep it:
+    /// "portrait", "landscape", "square", "wide" or "W:H" (`text`).
+    public enum Shape: Sendable, Hashable {
+        case portrait, landscape, square, wide
+        case ratio(width: Int, height: Int)
+
+        /// Square: the long side at most this many times the short one (5 %).
+        public static let squareTolerance = 1.05
+        /// Wide: at least this many times as wide as tall (2:1).
+        public static let wideRatio = 2.0
+        /// An exact ratio: a shape at most this many times wider or narrower than it (2 %), the same either way, so a
+        /// picture and the same picture turned match "16:9" and "9:16" alike.
+        public static let ratioTolerance = 1.02
+        /// The whole numbers an exact ratio is written in.
+        public static let ratioTerms = 1...99
+        /// The Shape menu's exact ratios.
+        public static let ratios: [Shape] = [.ratio(width: 16, height: 9), .ratio(width: 9, height: 16),
+                                             .ratio(width: 4, height: 3), .ratio(width: 3, height: 4),
+                                             .ratio(width: 3, height: 2), .ratio(width: 2, height: 3)]
+
+        /// From `text`: one of the four names, or "W:H" written plainly (no sign, no leading zero), each from 1 to 99.
+        public init?(_ text: String) {
+            switch text {
+            case "portrait": self = .portrait
+            case "landscape": self = .landscape
+            case "square": self = .square
+            case "wide": self = .wide
+            default:
+                let terms = text.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+                guard terms.count == 2, let width = Int(terms[0]), let height = Int(terms[1]),
+                      terms == [String(width), String(height)], Self.ratioTerms.contains(width),
+                      Self.ratioTerms.contains(height) else { return nil }
+                self = .ratio(width: width, height: height)
+            }
+        }
+
+        public var text: String {
+            switch self {
+            case .portrait: "portrait"
+            case .landscape: "landscape"
+            case .square: "square"
+            case .wide: "wide"
+            case .ratio(let width, let height): "\(width):\(height)"
+            }
+        }
+
+        /// Whether a `media_dimensions` row's width and height are this shape, in SQL.
+        var condition: String {
+            switch self {
+            case .portrait: "height > width * \(Self.squareTolerance)"
+            case .landscape: "width > height * \(Self.squareTolerance)"
+            case .square: "MAX(width, height) <= MIN(width, height) * \(Self.squareTolerance)"
+            case .wide: "width >= height * \(Self.wideRatio)"
+            case .ratio(let width, let height):
+                "width * \(height) BETWEEN height * \(width) / \(Self.ratioTolerance) "
+                    + "AND height * \(width) * \(Self.ratioTolerance)"
+            }
+        }
+    }
+
     public init(people: [Set<Int64>] = [], albums: Set<Int64>? = nil, favorites: Bool = false,
                 origins: Set<String> = [], cameras: Set<String> = [], shotOn: Set<String>? = nil,
-                paths: Set<String>? = nil, area: Area? = nil) {
+                paths: Set<String>? = nil, area: Area? = nil, length: Length? = nil, shape: Shape? = nil) {
         (self.people, self.albums, self.favorites, self.area) = (people, albums, favorites, area)
         (self.origins, self.cameras, self.shotOn, self.paths) = (origins, cameras, shotOn, paths)
+        (self.length, self.shape) = (length, shape)
     }
 
     public var isEmpty: Bool {
         people.isEmpty && albums == nil && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
             && paths == nil && area == nil && photosOnly == nil && sensitive == nil && leavingOutSensitive == nil
+            && length == nil && shape == nil
     }
 
     /// What of it leaves files out of an AI app's sight (`photosOnly`, `leavingOutSensitive`); empty for DigUp's own
@@ -218,6 +331,14 @@ public struct SearchFilter: Sendable, Equatable {
             values += [.double(area.latitudes.lowerBound), .double(area.latitudes.upperBound),
                        .double(area.longitudes.lowerBound), .double(area.longitudes.upperBound)]
         }
+        if let length {
+            let condition = length.condition
+            parts.append("SELECT file FROM media_dimensions WHERE \(condition.sql)")
+            values += condition.values
+        }
+        if let shape {
+            parts.append("SELECT file FROM media_dimensions WHERE \(shape.condition)")   // a recording's has no size
+        }
         if let photosOnly {
             // As `PhotosLibrary.library(containing:)`; the paths kept go as one value (a library has thousands).
             parts.append("SELECT id FROM files WHERE path NOT LIKE ?"
@@ -244,6 +365,65 @@ public struct SearchFilter: Sendable, Equatable {
                 """)
         }
         return parts.isEmpty ? nil : (parts.joined(separator: " INTERSECT "), values)
+    }
+}
+
+/// Any key of a JSON object, to see which keys it has.
+private struct JSONKey: CodingKey {
+    let stringValue: String
+    init(stringValue: String) { self.stringValue = stringValue }
+    var intValue: Int? { nil }
+    init?(intValue: Int) { nil }
+}
+
+/// A length as a saved search keeps it (`saved-searches.json`'s `{"length": …}`, approved 2026-10-22): `{"atLeast": 15,
+/// "under": 60}`, in seconds, an open bound left out. Read strictly, as the app reads the file: another key, a bound
+/// that's null or not a number, or bounds `init(atLeast:under:)` turns down aren't this shape.
+extension SearchFilter.Length: Codable {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case atLeast, under
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: JSONKey.self).allKeys.map(\.stringValue)
+        let known = Set(CodingKeys.allCases.map(\.rawValue))
+        guard keys.allSatisfy(known.contains) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                    debugDescription: "a length has atLeast and under, not \(keys)"))
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func bound(_ key: CodingKeys) throws -> Double? {
+            container.contains(key) ? try container.decode(Double.self, forKey: key) : nil
+        }
+        guard let length = Self(atLeast: try bound(.atLeast), under: try bound(.under)) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription:
+                "a length has a bound or two, 0 or more seconds, atLeast below under"))
+        }
+        self = length
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(atLeast, forKey: .atLeast)
+        try container.encodeIfPresent(under, forKey: .under)
+    }
+}
+
+/// A shape as a saved search keeps it (`saved-searches.json`'s `{"shape": …}`, approved 2026-10-22): its `text`, read
+/// strictly (`init(_:)`).
+extension SearchFilter.Shape: Codable {
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        guard let shape = Self(try container.decode(String.self)) else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription:
+                "a shape is portrait, landscape, square, wide or W:H in whole numbers from 1 to 99")
+        }
+        self = shape
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(text)
     }
 }
 

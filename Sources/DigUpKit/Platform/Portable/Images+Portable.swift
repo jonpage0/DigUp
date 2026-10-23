@@ -31,6 +31,8 @@ extension ImageExtractor {
             (width, height) = (image.width, image.height)
             guard max(width, height) >= minSide else { throw ExtractError.tooSmall(width, height) }
         }
+        // Turned the way the camera held it: its size as it's shown, before it's scaled for the model.
+        let dimensions = shown(width: image.width, height: image.height, orientation: 1)
         let longest = max(image.width, image.height)
         if longest > maxPixel {
             let scale = Double(maxPixel) / Double(longest)
@@ -39,7 +41,16 @@ extension ImageExtractor {
         }
         let out = folder.appendingPathComponent(UUID().uuidString + (png ? ".png" : ".jpg"))
         try image.write(to: out, png: png)
-        return Prepared(path: out.path, width: width, height: height, taken: exif?.dateTimeOriginal, location: nil)
+        return Prepared(path: out.path, width: width, height: height, taken: exif?.dateTimeOriginal, location: nil,
+                        dimensions: dimensions)
+    }
+
+    /// A picture's size as it's shown, from its header (and its EXIF orientation) where stb reads it; nil for the
+    /// kinds that go through ffmpeg (HEIC, WebP, TIFF, AVIF), whose size isn't read here without decoding them all.
+    static func dimensions(of url: URL) -> MediaDimensions? {
+        var width: Int32 = 0, height: Int32 = 0, channels: Int32 = 0
+        guard stbi_info(url.path, &width, &height, &channels) != 0 else { return nil }
+        return shown(width: Int(width), height: Int(height), orientation: EXIF.read(url)?.orientation ?? 1)
     }
 
     /// A picture's GPS tags aren't read here yet (`EXIF` reads the orientation and the date taken, not the GPS

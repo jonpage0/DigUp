@@ -636,6 +636,64 @@ import Testing
         #expect(adelaide.source == .photos && adelaide.latitude == -34.9)
     }
 
+    @Test func aLibrarysSizeAndLengthArePhotosNeverItsFiles() throws {
+        // Both files are 400 × 300 JPEGs as stored. Photos says the photo is 3312 × 4416 upright (an iPhone portrait
+        // stored turned), and the video in iCloud, read from its poster, 1280 × 720 and 12.6 s long.
+        let (library, listed) = try library(2, in: folder)
+        for asset in listed { try ImageTests.writeJPEG(URL(fileURLWithPath: asset.path)) }
+        @Sendable func listing(photo: (Int, Int)?) -> PhotosLibrary.Listing {
+            PhotosLibrary.Listing(assets: [
+                PhotosLibrary.Asset(uuid: listed[0].uuid, path: listed[0].path, movie: false, screenshot: false,
+                                    title: listed[0].title, date: listed[0].date, words: listed[0].words,
+                                    width: photo?.0, height: photo?.1),
+                PhotosLibrary.Asset(uuid: listed[1].uuid, path: listed[1].path, movie: true, screenshot: false,
+                                    title: listed[1].title, date: listed[1].date, words: listed[1].words,
+                                    reading: .poster, width: 1280, height: 720, duration: 12.6),
+            ])
+        }
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        func indexer(_ photo: (Int, Int)?) throws -> Indexer {
+            var options = IndexOptions()
+            options.photos = PhotosLibrary.Reader { _, _ in listing(photo: photo) }
+            return try Indexer(store: store, options: options, makeEmbedder: { FakeEmbedder() })
+        }
+        func rows() throws -> [String] {
+            var rows: [String] = []
+            try store.db.query("""
+                SELECT m.width, m.height, coalesce(m.duration, -1), m.source FROM media_dimensions m
+                JOIN files f ON f.id = m.file ORDER BY f.path = ?
+                """, [.text(listed[1].path)]) { row in
+                rows.append("\(row.int(0)) \(row.int(1)) \(row.double(2)) \(row.text(3) ?? "")")
+            }
+            return rows
+        }
+        let portrait = try indexer((3312, 4416))
+        #expect(try portrait.sync([library]).described == 2)
+        #expect(try rows() == ["3312 4416 -1.0 photos", "1280 720 12.6 photos"])
+        // Read, as a picture and Photos' still of a video: what's read never takes Photos' place.
+        #expect(try portrait.run()["done"] == 2)
+        #expect(try rows() == ["3312 4416 -1.0 photos", "1280 720 12.6 photos"])
+        let searcher = try Searcher(store: store, loadVectors: false)
+        func kept(_ filter: SearchFilter) throws -> [String] {
+            try searcher.search("", queryVector: nil, filter: filter).map(\.path)
+        }
+        #expect(try kept(SearchFilter(shape: .portrait)) == [listed[0].path])
+        #expect(try kept(SearchFilter(length: SearchFilter.Length(under: 15), shape: .ratio(width: 16, height: 9)))
+            == [listed[1].path])
+        // Unchanged: nothing is written. Read again (the file changed): Photos' stay, as the crawl owns them.
+        let before = try writes(store)
+        #expect(try portrait.sync([library]).described == 0)
+        #expect(try writes(store) == before)
+        try Data("edited".utf8).write(to: URL(fileURLWithPath: listed[0].path))
+        #expect(try portrait.sync([library]).changed == 1)
+        #expect(try rows() == ["3312 4416 -1.0 photos", "1280 720 12.6 photos"])
+        // Cropped square in Photos: the same row, Photos' new size; then a size Photos doesn't say: no row.
+        #expect(try indexer((3000, 3000)).sync([library]).described == 1)
+        #expect(try rows() == ["3000 3000 -1.0 photos", "1280 720 12.6 photos"])
+        #expect(try indexer(nil).sync([library]).described == 1)
+        #expect(try rows() == ["1280 720 12.6 photos"])
+    }
+
     @Test func aVideoInICloudIsReadFromWhatPhotosKeepsOfIt() throws {
         let (library, listed) = try library(2, in: folder)
         // The first: Photos' filmstrip of it, three stills (written out of order), beside a file that isn't one.

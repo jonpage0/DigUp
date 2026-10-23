@@ -93,6 +93,7 @@ public enum SQLValue {
 
     static func optional(_ text: String?) -> SQLValue { text.map { .text($0) } ?? .null }
     static func optional(_ number: Double?) -> SQLValue { number.map { .double($0) } ?? .null }
+    static func optional(_ number: Int?) -> SQLValue { number.map { .int(Int64($0)) } ?? .null }
 }
 
 public final class Statement {

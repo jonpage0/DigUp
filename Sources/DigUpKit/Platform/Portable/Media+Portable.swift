@@ -193,5 +193,11 @@ extension VideoExtractor {
     static let readsLocations = false
 
     static func location(of url: URL) -> Location? { nil }
+
+    /// A video's length (ffprobe). Its size isn't read here yet (ffprobe has it, with its rotation in the stream's side
+    /// data): off the Mac a video has a length but no shape.
+    static func dimensions(of url: URL) -> MediaDimensions? {
+        MediaDimensions(width: nil, height: nil, duration: MediaInfo.duration(of: url), source: .file)
+    }
 }
 #endif
