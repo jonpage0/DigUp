@@ -702,11 +702,11 @@ public final class Indexer {
                     continue
                 }
                 let picture = try store.addSegment(file: file.id, kind: .image, modality: .image, vector: vector)
-                if let rating = levels[position] { try store.setSensitive(rating, ofSegment: picture) }
+                try record(levels[position], of: picture)
                 for ((frame, embedding), rating) in itsFrames {
                     let segment = try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
                                                        locEnd: frame.end, vector: embedding.vector)
-                    if let rating { try store.setSensitive(rating, ofSegment: segment) }
+                    try record(rating, of: segment)
                 }
                 // The words on screen, or the ones Photos read in a picture, are for keyword search: codes, names and
                 // errors typed exactly. Meaning comes from the picture alone; a vector of the words made screenshots
@@ -881,7 +881,7 @@ public final class Indexer {
             for ((frame, embedding), rating) in zip(zip(frames, frameVectors), levels) {
                 let segment = try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
                                                    locEnd: frame.end, vector: embedding.vector)
-                if let rating { try store.setSensitive(rating, ofSegment: segment) }
+                try record(rating, of: segment)
             }
             for (piece, embedding) in zip(sound, soundVectors) {
                 try store.addSegment(file: file.id, kind: .audio, modality: .audio, loc: piece.start,
@@ -905,7 +905,7 @@ public final class Indexer {
             for (embedding, rating) in zip(vectors, levels) {
                 let segment = try store.addSegment(file: file.id, kind: .frame, modality: .image,
                                                    vector: embedding.vector)
-                if let rating { try store.setSensitive(rating, ofSegment: segment) }
+                try record(rating, of: segment)
             }
             try store.finish(file.id, state: "done", info: ["frames": "\(stills.count)"])
         }
@@ -933,6 +933,12 @@ public final class Indexer {
         return paths.map { try? rater.levels(ofPictureAt: URL(fileURLWithPath: $0)) }
     }
 
+    /// Writes a picture's rating (none: it couldn't be read) as the detector's model's (`IndexStore.setSensitive`).
+    private func record(_ rating: SensitiveLevels?, of segment: Int64) throws {
+        guard let rating, let rater else { return }
+        try store.setSensitive(rating, ofSegment: segment, model: rater.model)
+    }
+
     /// One step of the rating pass: `done` of the `total` pictures it set out to rate, and the file whose pictures it
     /// just rated (`rated` of them; the rest it couldn't read now).
     public struct Rating: Sendable {
@@ -944,15 +950,29 @@ public final class Indexer {
         public let seconds: Double
     }
 
+    /// The rating pass has pictures to rate: ones without a rating it hasn't tried in this process. None without a
+    /// detector, or once another model has the ratings (`ownsRatings`).
+    public func hasPicturesToRate() throws -> Bool {
+        guard try ownsRatings() else { return false }
+        return try store.unratedPictures().contains { $0.pictures.contains { !triedRating.contains($0.segment) } }
+    }
+
+    /// The ratings are this indexer's detector's: no other model took them over since it began (`adoptSensitiveModel`,
+    /// an indexer of another version still at work alongside this one).
+    private func ownsRatings() throws -> Bool {
+        guard let rater else { return false }
+        return try store.meta(IndexStore.sensitiveModelKey) == rater.model
+    }
+
     /// The rating pass: each picture read before DigUp rated pictures (or before the model changed, which took every
     /// rating) is read again from its file, as it was read for the model, and rated; nothing is embedded. A file
     /// that's away (gone, on a drive that's unplugged, or only in iCloud, where reading it would download it) is passed
     /// over, and so is a picture that can't be read now: they wait for a later pass. Each file's ratings are one
     /// transaction, so stopping between files (`shouldStop`) loses nothing. Returns how many pictures it rated; none
-    /// without a detector.
+    /// without a detector, and it stops once another model has the ratings.
     @discardableResult
     public func ratePictures(shouldStop: () -> Bool = { false }, onStep: (Rating) -> Void = { _ in }) throws -> Int {
-        guard let rater else { return 0 }
+        guard let rater, try ownsRatings() else { return 0 }
         let waiting = try store.unratedPictures().compactMap { file, pictures in
             // Each picture once a process: one that couldn't be read waits for the next helper.
             let untried = pictures.filter { !triedRating.contains($0.segment) }
@@ -974,9 +994,14 @@ public final class Indexer {
                 return Self.rate(pictures, of: file, reading: standIns[file.id], with: rater, in: folder)
             }
             try? FileManager.default.removeItem(at: folder)
-            try store.db.transaction {
-                for (segment, rating) in levels { try store.setSensitive(rating, ofSegment: segment) }
+            let written = try store.db.transaction { () -> Bool in
+                guard try ownsRatings() else { return false }
+                for (segment, rating) in levels {
+                    try store.setSensitive(rating, ofSegment: segment, model: rater.model)
+                }
+                return true
             }
+            guard written else { break }
             done += pictures.count
             count += levels.count
             onStep(Rating(done: done, total: total, path: file.path, kind: file.kind, rated: levels.count,

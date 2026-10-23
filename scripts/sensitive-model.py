@@ -13,7 +13,9 @@ filter), and checks it against the PyTorch model it came from.
                                                                  folder, sensitive/)
     scripts/sensitive-model.py check <picture or folder>...      the Core ML model against PyTorch on these pictures
                 [--most N] [--digup PATH]                        (300 or more): each level's probability within 0.01,
-                                                                 and the three settings' decisions the same on 99.5 %
+                                                                 and the three settings' decisions the same on 99.5 %;
+                                                                 with --digup the app's own path too, its decisions
+                                                                 the same on 99.5 %
 
 The model is Freepik's nsfw_image_detector (https://huggingface.co/Freepik/nsfw_image_detector, MIT): an EVA02-base
 at 448 x 448 pixels, fine-tuned from timm's eva02_base_patch14_448.mim_in22k_ft_in22k_in1k to say how revealing a
@@ -30,9 +32,13 @@ model that isn't this conversion of this commit isn't used.
 The conversion goes PyTorch (timm) -> Core ML (coremltools) at `PRECISION`, checked on random input before it's kept,
 and kept compiled (.mlmodelc, what DigUp loads). `check` reads each picture upright (its EXIF orientation applied),
 squashes it with the model's own transform, and gives the same pixels to PyTorch (float32, on the processor) and to the
-kept Core ML model; with `--digup`, the app's own path too (`digup sensitive`: ImageIO, Core Graphics and Core ML), told
-apart. A file that's only in iCloud (dataless) is never opened. Run with uv (the versions above are pinned); the
-downloads go to a temporary folder, deleted after. Prints counts and numbers, never file names.
+kept Core ML model: the conversion, held to each level within `MAX_DIFFERENCE` and each setting's decision the same on
+`AGREEMENT`. With `--digup`, the app's own path too, told apart (`digup sensitive`: the picture as indexing writes it
+for the model, a JPEG of 1,024 pixels at most, a screenshot a PNG of 1,536, read by ImageIO, squashed by Core Graphics
+and rated by Core ML). It doesn't start from the same pixels, so its levels can move more than the conversion's: it's
+held to each setting's decision the same on `AGREEMENT`, and its largest differences are said. Either one short of its
+bar fails the check. A file that's only in iCloud (dataless) is never opened. Run with uv (the versions above are
+pinned); the downloads go to a temporary folder, deleted after. Prints counts and numbers, never file names.
 """
 import argparse
 import hashlib
@@ -242,12 +248,13 @@ def app_levels(digup, paths):
     return rated, times
 
 
-def report(name, reference, other):
-    """Each level's largest difference and each setting's agreement; whether they're within the bar."""
+def report(name, reference, other, max_difference=None):
+    """Each level's largest difference and each setting's agreement; whether they're within the bar: each setting the
+    same on `AGREEMENT` or more and, with `max_difference`, each level within it."""
     difference = np.abs(reference - other).max(axis=0)
     print(f"{name}: {len(reference)} pictures; largest difference "
           + ", ".join(f"{level} {difference[i]:.5f}" for i, level in enumerate(LEVELS)))
-    good = bool(difference.max() <= MAX_DIFFERENCE)
+    good = max_difference is None or bool(difference.max() <= max_difference)
     for rule, lowest, threshold in RULES:
         torch_says = reference[:, lowest:].sum(axis=1) >= threshold
         other_says = other[:, lowest:].sum(axis=1) >= threshold
@@ -256,6 +263,9 @@ def report(name, reference, other):
         print(f"  {rule} (≥ {threshold} from {LEVELS[lowest]}): flagged {int(torch_says.sum())} by PyTorch, "
               f"{int(other_says.sum())} here; the same on {agreement:.2%} ({int((torch_says != other_says).sum())} "
               "differ)")
+    bar = (f"each level within {max_difference}, " if max_difference is not None else "") + \
+        f"each setting the same on {AGREEMENT:.1%} or more"
+    print(f"  {'within' if good else 'NOT within'} its bar: {bar}")
     return good
 
 
@@ -284,17 +294,22 @@ def check(args):
     if not read:
         sys.exit("no pictures")
     reference, ours = np.array(reference), np.array(ours)
-    good = report(f"Core ML ({PRECISION}, {COMPUTE})", reference, ours)
+    checks = [("the conversion", report(f"Core ML ({PRECISION}, {COMPUTE}), the same pixels as PyTorch", reference,
+                                        ours, MAX_DIFFERENCE))]
     if args.digup:
         rated, times = app_levels(args.digup, read)
         both = [i for i, path in enumerate(read) if str(path) in rated]
         print(f"digup sensitive (the app's path): {len(both)} of them rated, {np.median(times):.0f} ms a picture "
               f"(median; p90 {np.percentile(times, 90):.0f} ms), reading it included")
-        report("the app's path", reference[both], np.array([rated[str(read[i])] for i in both]))
-    if len(read) < PICTURES_NEEDED or not good:
-        sys.exit(f"not checked: needs {PICTURES_NEEDED} pictures or more, each level within {MAX_DIFFERENCE}, and "
-                 f"each setting the same on {AGREEMENT:.1%} or more")
-    print("checked")
+        checks.append(("the app's path", bool(both) and report(
+            "the app's path, from the picture as indexing writes it", reference[both],
+            np.array([rated[str(read[i])] for i in both]))))
+    short = [name for name, good in checks if not good]
+    if len(read) < PICTURES_NEEDED or short:
+        sys.exit("not checked: " + "; ".join(
+            ([f"needs {PICTURES_NEEDED} pictures or more"] if len(read) < PICTURES_NEEDED else [])
+            + [f"{name} isn't within its bar" for name in short]))
+    print("checked: " + " and ".join(name for name, _ in checks))
 
 
 def main():

@@ -31,7 +31,7 @@ struct ResultRow: Identifiable, Equatable {
     private(set) var photos: PhotosHit?
     /// A video or audio file: how many moments of it match (`SearchHit.momentCount`).
     let momentCount: Int
-    /// What the sensitive-picture detector said of the file's pictures (`SearchHit.pictures`; `shownLevels`).
+    /// What the sensitive-picture detector said of the file's pictures (`SearchHit.pictures`; `shownPicture`).
     let pictures: SensitivePictures?
     /// A video in iCloud showing another of Photos' stills of it, picked under the preview: the still's place in its
     /// filmstrip.

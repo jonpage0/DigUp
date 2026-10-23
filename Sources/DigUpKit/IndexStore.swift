@@ -1120,10 +1120,15 @@ public final class IndexStore {
         }
     }
 
-    /// Sets what the detector said of a picture segment, in place of what it had.
-    func setSensitive(_ levels: SensitiveLevels, ofSegment segment: Int64) throws {
-        try db.run("INSERT OR REPLACE INTO sensitive_scores(segment, low, medium, high) VALUES(?, ?, ?, ?)",
-                   [.int(segment), .double(levels.low), .double(levels.medium), .double(levels.high)])
+    /// Sets what `model` said of a picture segment, in place of what it had, while `model` is the one the ratings are
+    /// from: an indexer still at work after another model took them over (`adoptSensitiveModel`) writes nothing, so
+    /// two models' ratings are never kept together. The check and the write are one statement.
+    func setSensitive(_ levels: SensitiveLevels, ofSegment segment: Int64, model: String) throws {
+        try db.run("""
+            INSERT OR REPLACE INTO sensitive_scores(segment, low, medium, high)
+            SELECT ?, ?, ?, ? WHERE (SELECT value FROM meta WHERE key = ?) = ?
+            """, [.int(segment), .double(levels.low), .double(levels.medium), .double(levels.high),
+                  .text(Self.sensitiveModelKey), .text(model)])
     }
 
     /// A picture segment without a rating, of a file that was read: what the rating pass reads again.

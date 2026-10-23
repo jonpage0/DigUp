@@ -176,13 +176,13 @@ public struct SensitivePictures: Sendable, Equatable {
     }
 
     /// The picture of this segment.
-    public func levels(ofSegment segment: Int64) -> SensitiveLevels? {
-        image?.segment == segment ? image?.levels : frames.first { $0.segment == segment }?.levels
+    public func picture(ofSegment segment: Int64) -> Picture? {
+        image?.segment == segment ? image : frames.first { $0.segment == segment }
     }
 
     /// The frame at this place among them, from 0 (a stills video's: its filmstrip's still at that place).
-    public func levels(ofFrame place: Int) -> SensitiveLevels? {
-        frames.indices.contains(place) ? frames[place].levels : nil
+    public func frame(atPlace place: Int) -> Picture? {
+        frames.indices.contains(place) ? frames[place] : nil
     }
 
     /// The frame shown at `seconds`: the last one that starts by then (a kept keyframe stands for the stretch until the
@@ -190,7 +190,49 @@ public struct SensitivePictures: Sendable, Equatable {
     public func frame(at seconds: Double) -> Picture? {
         frames.last { ($0.loc ?? 0) <= seconds } ?? frames.first
     }
+}
 
-    /// Every picture's rating, the ones rated.
-    public var rated: [SensitiveLevels] { ([image].compactMap { $0 } + frames).compactMap(\.levels) }
+/// The blurred pictures clicked to show ("Blur sensitive pictures"; the app keeps one for as long as it runs): a click
+/// shows the picture clicked, never another of its file's, so a video's other frames and stills stay blurred.
+public struct SensitiveReveal: Sendable, Equatable {
+    /// What a place in the results shows, as blurring goes by it.
+    public struct Shown: Sendable, Equatable {
+        /// What a click shows it by.
+        enum Key: Hashable, Sendable {
+            case segment(Int64)
+            /// Quick Look's picture of the file at this path, which could be any of its frames.
+            case anyFrame(String)
+        }
+        let key: Key
+        let levels: SensitiveLevels?
+
+        /// One picture of a file (nil: there's none to blur).
+        public static func picture(_ picture: SensitivePictures.Picture?) -> Shown? {
+            picture.map { Shown(key: .segment($0.segment), levels: $0.levels) }
+        }
+
+        /// Quick Look's picture of the video at `path`, which could be any of its frames: it goes by the most revealing
+        /// one (`SensitiveLevels.most`), and showing it shows none of them.
+        public static func anyFrame(of path: String, _ pictures: SensitivePictures) -> Shown {
+            Shown(key: .anyFrame(path), levels: SensitiveLevels.most(of: pictures.frames.compactMap(\.levels)))
+        }
+    }
+
+    private var shown: Set<Shown.Key> = []
+
+    public init() {}
+
+    /// Whether `picture` is blurred at `position`: rated sensitive there (one not rated yet isn't), and not clicked.
+    public func hides(_ picture: Shown, at position: SensitivePosition) -> Bool {
+        guard let levels = picture.levels, position.flags(levels) else { return false }
+        return !shown.contains(picture.key)
+    }
+
+    /// A click on `picture`: it shows from now on. False when it wasn't blurred.
+    @discardableResult
+    public mutating func reveal(_ picture: Shown, at position: SensitivePosition) -> Bool {
+        guard hides(picture, at: position) else { return false }
+        shown.insert(picture.key)
+        return true
+    }
 }

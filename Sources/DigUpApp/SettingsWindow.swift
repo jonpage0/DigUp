@@ -387,9 +387,10 @@ private struct SensitiveSettings: View {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                         Text("The detector isn't installed").font(.system(size: 13, weight: .medium))
                     }
-                    Text("No picture is rated, so none is blurred or kept by the Sensitive filter, and AI apps see no "
-                         + "pictures unless you let them see pictures rated sensitive. To install it, run this in "
-                         + "Terminal from DigUp's source folder; it goes into \(folder):")
+                    Text("Pictures read from now on aren't rated: they aren't blurred or kept by the Sensitive "
+                         + "filter, and AI apps don't see them unless you let them see pictures rated sensitive. "
+                         + "Pictures rated before keep their ratings. To install it, run this in Terminal from DigUp's "
+                         + "source folder; it goes into \(folder):")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

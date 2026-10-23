@@ -567,7 +567,7 @@ struct MomentsSection: View {
                     StillsStrip(filmstrip: filmstrip, matched: Set(moments.compactMap(\.still)),
                                 showing: shown.photos?.still, width: width,
                                 hidden: { index in
-                                    SensitiveBlur.shared.hides(row.pictures?.levels(ofFrame: index), of: row.id)
+                                    SensitiveBlur.shared.hides(.picture(row.pictures?.frame(atPlace: index)))
                                 }, pick: pick(still:))
                 }
             } else if let duration {
@@ -593,16 +593,17 @@ struct MomentsSection: View {
 
     private func isAt(_ moment: Moment) -> Bool { shown.isAt(moment, filmstrip: filmstrip) }
 
-    /// A click on a moment or a still shows it: blurred, it shows from then on (`SensitiveBlur`).
+    /// A click on a moment or a still shows it: blurred, that picture shows from then on (`SensitiveBlur`).
     private func pick(_ moment: Moment) {
-        SensitiveBlur.shared.show(row)
+        SensitiveBlur.shared.show(row.at(moment, filmstrip: filmstrip))
         PreviewPlayback.shared.pick(moment, of: row, filmstrip: filmstrip)
         picked()
     }
 
     private func pick(still: String) {
-        SensitiveBlur.shared.show(row)
-        PreviewPlayback.shared.pick(still: still, at: filmstrip.firstIndex(of: still) ?? 0, of: row)
+        let index = filmstrip.firstIndex(of: still) ?? 0
+        SensitiveBlur.shared.show(row.showing(still: still, at: index))
+        PreviewPlayback.shared.pick(still: still, at: index, of: row)
         picked()
     }
 }
@@ -714,8 +715,7 @@ struct MomentStrip: View {
                 ZStack {
                     Color.black.opacity(0.85)
                     if let frame {
-                        let hidden = SensitiveBlur.shared.hides(row.pictures?.frame(at: pointer.seconds)?.levels,
-                                                                of: row.id)
+                        let hidden = SensitiveBlur.shared.hides(.picture(row.pictures?.frame(at: pointer.seconds)))
                         Image(nsImage: frame.veiled(hidden)).resizable().interpolation(.high)
                             .aspectRatio(contentMode: .fit)
                             .sensitiveCover(hidden, iconSize: 14)

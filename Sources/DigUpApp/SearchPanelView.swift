@@ -198,7 +198,7 @@ private struct ResultList: View {
                                 .id(row.id)
                                 .overlay(FileDragArea(url: row.url, openTitle: row.openTitle,
                                                       onClick: {
-                                                          SensitiveBlur.shared.show(row)
+                                                          SensitiveBlur.shared.show(row.filePicture)
                                                           controller.select(row)
                                                       },
                                                       onOpen: {
@@ -233,7 +233,7 @@ private struct ResultList: View {
                                     .opacity(0.85)
                                     .overlay(FileDragArea(url: row.url, openTitle: row.openTitle,
                                                           onClick: {
-                                                              SensitiveBlur.shared.show(row)
+                                                              SensitiveBlur.shared.show(row.filePicture)
                                                               controller.select(row)
                                                           },
                                                           onOpen: {
@@ -278,7 +278,7 @@ private struct PanelRow: View {
     var body: some View {
         HStack(spacing: 10) {
             // Code's thumbnail would be a page of tiny text: its file type's icon says more.
-            let hidden = SensitiveBlur.shared.hides(row.fileLevels, of: row.id)
+            let hidden = SensitiveBlur.shared.hides(row.filePicture)
             ThumbnailView(url: row.url, side: 36, iconOnly: row.kind == .code, veiled: hidden)
                 .sensitiveCover(hidden, iconSize: 11)
             VStack(alignment: .leading, spacing: 2) {

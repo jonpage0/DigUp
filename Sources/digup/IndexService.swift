@@ -148,11 +148,11 @@ final class IndexService: @unchecked Sendable {
                 }
             }
             // Once nothing is waiting: the pictures read before they were rated, then the rest of long PDFs and
-            // documents, the same way.
+            // documents, the same way. The pass rates each picture once a process, so with none left it's done.
             if lock.withLock({ backfillAllowed }), (try? main.store.pendingCount()) ?? 1 == 0,
-               (try? code?.store.pendingCount() ?? 0) ?? 1 == 0 {
+               (try? code?.store.pendingCount() ?? 0) ?? 1 == 0, (try? main.indexer.hasPicturesToRate()) ?? false {
                 guard ratePictures() else { break }
-                if lock.withLock({ syncRequested || codeSyncRequested }) { continue }
+                if lock.withLock({ syncRequested || codeSyncRequested && code != nil }) { continue }
             }
             if lock.withLock({ backfillAllowed }), (try? main.store.pendingCount()) ?? 1 == 0,
                (try? code?.store.pendingCount() ?? 0) ?? 1 == 0, (try? main.store.unfinishedCount().files) ?? 0 > 0 {
@@ -325,7 +325,8 @@ final class IndexService: @unchecked Sendable {
             if stop { return false }
             if sync || codeSync && code != nil { return true }
             if backfill, parts.contains(where: { (try? $0.store.pendingCount()) ?? 0 > 0 })
-                || (try? main.store.unfinishedCount().files) ?? 0 > 0 {
+                || (try? main.store.unfinishedCount().files) ?? 0 > 0
+                || (try? main.indexer.hasPicturesToRate()) ?? false {
                 return true
             }
         }

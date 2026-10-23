@@ -128,16 +128,43 @@ final class FakeRater: PictureRater {
         #expect(try ratings(in: store) == [paths[0]: [Self.neutral], paths[1]: [Self.neutral]])
     }
 
-    /// A picture file read, with an image segment rated `levels` (nil: not rated), or a video with frames rated so.
+    @Test func anIndexerWhoseModelWasReplacedWritesNoRating() throws {
+        let paths = try makePictures(["a.jpg", "b.jpg"])
+        let store = try IndexStore(directory: index)
+        let old = try makeIndexer(store, rater: FakeRater(model: "detector 1", levels: Self.revealing))
+        _ = try old.sync([pictures])
+        try old.run()
+        // Another model takes the ratings over while the first indexer is still at work (the app's helper and
+        // `digup index`, say): its ratings all go, and the first one's later ratings aren't written.
+        let newer = try makeIndexer(try IndexStore(directory: index),
+                                    rater: FakeRater(model: "detector 2", levels: Self.neutral))
+        #expect(try ratings(in: store).isEmpty)
+        #expect(try old.ratePictures() == 0)
+        let third = try makePictures(["c.jpg"])[0]
+        _ = try old.sync([pictures])
+        try old.run()
+        #expect(try ratings(in: store).isEmpty)
+        #expect(try store.meta(IndexStore.sensitiveModelKey) == "detector 2")
+        // The model that has them rates every picture.
+        #expect(try newer.ratePictures() == 3)
+        #expect(try ratings(in: store) == [paths[0]: [Self.neutral], paths[1]: [Self.neutral], third: [Self.neutral]])
+    }
+
+    /// The model `add` writes ratings as.
+    static let model = "test detector"
+
+    /// A picture file read, with an image segment rated `levels` (nil: not rated) by `model`, or a video with frames
+    /// rated so.
     @discardableResult
     func add(_ path: String, kind: FileKind = .image, state: String = "done", levels: [SensitiveLevels?],
              text: String? = nil, in store: IndexStore) throws -> Int64 {
+        try store.adoptSensitiveModel(Self.model)
         let id = try store.insert(Candidate(path: path, kind: kind, size: 1, mtime: 1,
                                             inode: UInt64(abs(path.hashValue) % 1_000_000), device: 1))
         for (place, rating) in levels.enumerated() {
             let segment = try store.addSegment(file: id, kind: kind == .video ? .frame : .image, modality: .image,
                                                loc: kind == .video ? Double(place * 3) : nil)
-            if let rating { try store.setSensitive(rating, ofSegment: segment) }
+            if let rating { try store.setSensitive(rating, ofSegment: segment, model: Self.model) }
         }
         if let text { try store.addSegment(file: id, kind: kind == .doc ? .chunk : .ocr, modality: .text, text: text) }
         if state != "pending" { try store.finish(id, state: state) }
@@ -178,6 +205,32 @@ final class FakeRater: PictureRater {
         #expect(abs(most.lowOrHigher - 0.5) < 1e-9 && abs(most.mediumOrHigher - 0.4) < 1e-9 && most.high == 0.3)
     }
 
+    @Test func aClickShowsThePictureClickedAndNoOtherOfItsFile() throws {
+        // A video with an ordinary still and a revealing one, as blurring at Revealing sees them.
+        let ordinary = SensitivePictures.Picture(segment: 1, loc: nil, levels: Self.neutral)
+        let revealing = SensitivePictures.Picture(segment: 2, loc: nil,
+                                                  levels: SensitiveLevels(low: 0.6, medium: 0, high: 0))
+        let unrated = SensitivePictures.Picture(segment: 3, loc: nil, levels: nil)
+        let video = SensitivePictures(frames: [ordinary, revealing, unrated])
+        let (still, other, thumbnail) = (try #require(SensitiveReveal.Shown.picture(ordinary)),
+                                         try #require(SensitiveReveal.Shown.picture(revealing)),
+                                         SensitiveReveal.Shown.anyFrame(of: "/v/clip.mov", video))
+        var reveal = SensitiveReveal()
+        #expect(!reveal.hides(still, at: .revealing) && reveal.hides(other, at: .revealing))
+        #expect(!reveal.hides(try #require(SensitiveReveal.Shown.picture(unrated)), at: .revealing))
+        // Quick Look's picture of it could be either still: blurred, as the revealing one is.
+        #expect(reveal.hides(thumbnail, at: .revealing))
+        // Clicking the ordinary still, or Quick Look's picture, shows the revealing still no more than before.
+        let clicks = (still: reveal.reveal(still, at: .revealing), thumbnail: reveal.reveal(thumbnail, at: .revealing))
+        #expect(!clicks.still && clicks.thumbnail)
+        #expect(!reveal.hides(thumbnail, at: .revealing) && reveal.hides(other, at: .revealing))
+        // Only its own click shows it.
+        let shown = reveal.reveal(other, at: .revealing)
+        #expect(shown && !reveal.hides(other, at: .revealing))
+        // Off, nothing is blurred.
+        #expect(!SensitiveReveal().hides(other, at: .off))
+    }
+
     @Test func aiAppsSeeNoPictureRatedSensitiveNorOneNotRatedYet() throws {
         let store = try IndexStore(directory: index)
         try add("/f/beach notes.txt", kind: .doc, levels: [], text: "beach day", in: store)
@@ -206,5 +259,29 @@ final class FakeRater: PictureRater {
         // picture is seen.
         seen.leavingOutSensitive = .nudityOnly
         #expect(try store.file(at: "/f/beach revealing.jpg", keptBy: seen)?.path == "/f/beach revealing.jpg")
+    }
+
+    @Test func theWordsOfFilesLeftOutOfAnAIAppsSightDontBearOnItsSearch() throws {
+        // A word that's in no file an AI app may see matches as the start of longer words, as one in no file at all
+        // does: one left out (rated sensitive, or a hidden Photos item) having it as typed changes nothing.
+        let store = try IndexStore(directory: index)
+        try add("/f/notes.txt", kind: .doc, levels: [], text: "reviewtokenextended", in: store)
+        try add("/f/revealing.jpg", levels: [Self.revealing], text: "reviewtoken", in: store)
+        try add("/f/more notes.txt", kind: .doc, levels: [], text: "hiddentokenextended", in: store)
+        try add("/f/Library.photoslibrary/originals/A/hidden.jpg", levels: [Self.neutral], text: "hiddentoken",
+                in: store)
+        let searcher = try Searcher(store: store, loadVectors: false)
+        func found(_ text: String, _ filter: SearchFilter) throws -> Set<String> {
+            Set(try searcher.search(text, queryVector: nil, filter: filter, limit: 20).map(\.path))
+        }
+        var sensitive = SearchFilter()
+        sensitive.leavingOutSensitive = .revealing
+        #expect(try found("reviewtoken", sensitive) == ["/f/notes.txt"])
+        var photos = SearchFilter()
+        photos.photosOnly = []
+        #expect(try found("hiddentoken", photos) == ["/f/more notes.txt"])
+        // Where nothing is left out (DigUp's own window), a word in a file stays whole, as before.
+        #expect(try found("reviewtoken", SearchFilter()) == ["/f/revealing.jpg"])
+        #expect(try found("hiddentoken", SearchFilter()) == ["/f/Library.photoslibrary/originals/A/hidden.jpg"])
     }
 }

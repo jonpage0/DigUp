@@ -271,14 +271,16 @@ shows it as it is). Its positions, with what they caught on a real library of 55
 - Nudity only (medium or higher, 0.5 or more): close to 9 in 10 (about 1 in 11 blurred)
 
 The Sensitive filter beside the kinds (and `digup search --sensitive`) keeps the pictures and videos rated sensitive at
-that position, or at Revealing while blurring is off; a video counts by any of its frames. AI apps don't see them, nor
-any picture not rated yet, unless you allow it (AI apps, below). Known limits: tiny nudes inside screenshots and
-figures far away are missed, and skin-toned close-ups and shirtless men are sometimes rated sensitive.
+that position, or at Revealing while blurring is off; a video counts by any of its frames. A search with it can't be
+saved yet. AI apps don't see them, nor any picture not rated yet, unless you allow it (AI apps, below). Known limits:
+tiny nudes inside screenshots and figures far away are missed, and skin-toned close-ups and shirtless men are
+sometimes rated sensitive.
 
 The detector isn't downloaded yet: make it once with `scripts/sensitive-model.py convert` (uv runs it; it downloads
 the pinned model, converts it to Core ML in `~/Library/Application Support/DigUp/Models/sensitive/`, 330 MB, and
-`scripts/sensitive-model.py check <pictures>` compares it with the original). Until it's there, Settings says so and
-nothing is rated or blurred. `digup sensitive <picture>…` rates pictures as indexing does.
+`scripts/sensitive-model.py check <pictures>` compares it with the original). Until it's there, Settings says so, and
+pictures read meanwhile aren't rated: not blurred, not kept by the Sensitive filter, and kept from AI apps unless you
+allow them. Pictures rated before keep their ratings. `digup sensitive <picture>…` rates pictures as indexing does.
 
 ## AI apps
 

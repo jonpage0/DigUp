@@ -4,32 +4,34 @@ import SwiftUI
 
 /// "Blur sensitive pictures" (Settings → General) as the results show it ("Keep it discreet", Jon, 2026-10-21): a
 /// picture rated sensitive at the setting's position (`SensitivePosition.flags`) is blurred in the window's grid, the
-/// panel's rows, the preview and the moments' strips until it's clicked, and then shows, with the rest of its file's,
-/// for as long as the app runs. Quick Look shows it as it is: opening it is the click. A picture not rated yet isn't
-/// blurred (Settings says how many wait for the rating pass).
+/// panel's rows, the preview and the moments' strips until it's clicked, and then that picture shows, for as long as the
+/// app runs; another of its file's (a video's other stills) stays blurred until it's clicked too (`SensitiveReveal`).
+/// Quick Look shows the file as it is: opening it is the click. A picture not rated yet isn't blurred (Settings says how
+/// many wait for the rating pass).
 @Observable
 final class SensitiveBlur {
     static let shared = SensitiveBlur()
 
     var position = SensitivePosition.off
-    /// The files clicked to show (their paths), this run of the app.
-    private(set) var shown: Set<String> = []
+    /// The pictures clicked to show, this run of the app.
+    private(set) var reveal = SensitiveReveal()
 
-    /// Whether a picture of these levels, of the file at `path`, is blurred now.
-    func hides(_ levels: SensitiveLevels?, of path: String) -> Bool {
-        guard let levels, !shown.contains(path) else { return false }
-        return position.flags(levels)
+    /// Whether `picture` is blurred now (nil: there's no picture to blur).
+    func hides(_ picture: SensitiveReveal.Shown?) -> Bool {
+        picture.map { reveal.hides($0, at: position) } ?? false
     }
 
-    /// Whether the picture `row` shows is blurred now (`ResultRow.shownLevels`).
-    func hides(_ row: ResultRow) -> Bool { hides(row.shownLevels, of: row.id) }
+    /// Whether the picture `row` shows is blurred now (`ResultRow.shownPicture`).
+    func hides(_ row: ResultRow) -> Bool { hides(row.shownPicture) }
 
-    /// A click on `row`'s picture: its file's pictures show from now on (when there's one to blur).
-    func show(_ row: ResultRow) {
-        guard !shown.contains(row.id), row.pictures?.rated.contains(where: position.flags) == true else { return }
-        shown.insert(row.id)
+    /// A click on `picture`: it shows from now on (when it's blurred).
+    func show(_ picture: SensitiveReveal.Shown?) {
+        guard let picture, reveal.reveal(picture, at: position) else { return }
         log("blur: a sensitive picture shown on a click")
     }
+
+    /// A click on the picture `row` shows.
+    func show(_ row: ResultRow) { show(row.shownPicture) }
 
     /// Pictures as `veil` made them, by the picture: a grid redrawn doesn't make them again.
     @ObservationIgnored private let veils = NSCache<NSImage, NSImage>()
@@ -77,32 +79,32 @@ extension NSImage {
 }
 
 extension ResultRow {
-    /// What the detector said of the picture this result shows (as `Previews.load` draws it): the frame or the still it's
+    /// The picture this result shows (as `Previews.load` draws it), as blurring goes by it: the frame or the still it's
     /// at, else the picture itself; a video shown by Quick Look's picture of it, which could be any of its frames, by its
-    /// most revealing one (`SensitiveLevels.most`). Nil when that picture isn't rated, or there's none.
-    var shownLevels: SensitiveLevels? {
+    /// most revealing one. Nil when there's none.
+    var shownPicture: SensitiveReveal.Shown? {
         guard let pictures else { return nil }
-        if let stillIndex { return pictures.levels(ofFrame: stillIndex) }
+        if let stillIndex { return .picture(pictures.frame(atPlace: stillIndex)) }
         switch kind {
         case .video where photos?.still != nil:
             // Photos' stills or poster of a video in iCloud: the one that matched, else the first.
-            return segment == .frame ? pictures.levels(ofSegment: segmentID) : pictures.frames.first?.levels
+            return .picture(segment == .frame ? pictures.picture(ofSegment: segmentID) : pictures.frames.first)
         case .video:
-            guard let loc else { return SensitiveLevels.most(of: pictures.rated) }
-            return segment == .frame ? pictures.levels(ofSegment: segmentID) : pictures.frame(at: loc)?.levels
+            guard let loc else { return .anyFrame(of: id, pictures) }
+            return .picture(segment == .frame ? pictures.picture(ofSegment: segmentID) : pictures.frame(at: loc))
         default:
             // A GIF's later frame that matched, else the picture.
-            return segment == .frame && loc != nil ? pictures.levels(ofSegment: segmentID) : pictures.image?.levels
+            return .picture(segment == .frame && loc != nil ? pictures.picture(ofSegment: segmentID) : pictures.image)
         }
     }
 
-    /// What the detector said of Quick Look's own picture of the file, which the panel's rows show: the picture itself;
-    /// of a video read from Photos' stills or poster, the first of them (its file); of any other video, which frame it
-    /// is isn't known, so its most revealing one.
-    var fileLevels: SensitiveLevels? {
+    /// Quick Look's own picture of the file, which the panel's rows show: the picture itself; of a video read from
+    /// Photos' stills or poster, the first of them (its file); of any other video, which frame it is isn't known, so it
+    /// goes by its most revealing one.
+    var filePicture: SensitiveReveal.Shown? {
         guard let pictures else { return nil }
-        guard kind == .video else { return pictures.image?.levels }
-        return photos?.reading?.isStandIn == true ? pictures.levels(ofFrame: 0) : SensitiveLevels.most(of: pictures.rated)
+        guard kind == .video else { return .picture(pictures.image) }
+        return photos?.reading?.isStandIn == true ? .picture(pictures.frame(atPlace: 0)) : .anyFrame(of: id, pictures)
     }
 }
 

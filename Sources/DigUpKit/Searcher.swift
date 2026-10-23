@@ -136,6 +136,15 @@ public struct SearchFilter: Sendable, Equatable {
             && paths == nil && area == nil && photosOnly == nil && sensitive == nil && leavingOutSensitive == nil
     }
 
+    /// What of it leaves files out of an AI app's sight (`photosOnly`, `leavingOutSensitive`); empty for DigUp's own
+    /// searches. A file it leaves out bears on nothing a search does, not even on whether a word counts as indexed
+    /// (`Searcher.search`'s prefix matching).
+    var exclusions: SearchFilter {
+        var exclusions = SearchFilter()
+        (exclusions.photosOnly, exclusions.leavingOutSensitive) = (photosOnly, leavingOutSensitive)
+        return exclusions
+    }
+
     /// A part of the query that keeps no file (`IN ()` isn't SQL).
     private static let keepsNothing = "SELECT id FROM files WHERE 0"
 
@@ -350,10 +359,12 @@ public final class Searcher {
         // being typed: "grok" finds "Grok4" and "Grokipedia" (stemming only covers endings, as in "grokking").
         // Otherwise a file the panel showed while you typed dropped out once you stopped. A word that is in the index
         // as typed stays whole, so "cat" doesn't bring in "category"; so does a word of two letters, the start of too
-        // many words to stand for one.
+        // many words to stand for one. Only the files an AI app may see count (`SearchFilter.exclusions`): one left out
+        // having the word must not make it stay whole, nor show that it's there.
         if identifier == nil {
+            let seeable = filter.exclusions.query
             for index in terms.indices where terms[index].count >= 3 && !patterns[index].hasSuffix("*") {
-                if try !isIndexed(patterns[index]) { patterns[index] += "*" }
+                if try !isIndexed(patterns[index], within: seeable) { patterns[index] += "*" }
             }
         }
         if !patterns.isEmpty {
@@ -786,10 +797,16 @@ public final class Searcher {
         }
     }
 
-    /// Whether keyword search finds `pattern` in any file.
-    private func isIndexed(_ pattern: String) throws -> Bool {
+    /// Whether keyword search finds `pattern` in any file, or in any of the files `within` keeps.
+    private func isIndexed(_ pattern: String, within kept: (sql: String, values: [SQLValue])?) throws -> Bool {
         var found = false
-        try store.db.query("SELECT 1 FROM fts WHERE fts MATCH ? LIMIT 1", [.text(pattern)]) { _ in found = true }
+        guard let kept else {
+            try store.db.query("SELECT 1 FROM fts WHERE fts MATCH ? LIMIT 1", [.text(pattern)]) { _ in found = true }
+            return found
+        }
+        try store.db.query("""
+            SELECT 1 FROM fts JOIN segments s ON s.id = fts.rowid WHERE fts MATCH ? AND s.file IN (\(kept.sql)) LIMIT 1
+            """, [.text(pattern)] + kept.values) { _ in found = true }
         return found
     }
 
