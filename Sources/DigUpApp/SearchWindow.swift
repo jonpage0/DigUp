@@ -52,10 +52,9 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         Task { await search.open(saved) }
     }
 
-    /// Save This Search… (⌘S): asks for the name, the suggested one filled in. Only with something to save, and never
-    /// with the Sensitive filter on (`SearchModel.canSave`).
+    /// Save This Search… (⌘S): asks for the name, the suggested one filled in. Only with something to save.
     func saveSearch() {
-        guard search.canSave, !app.savedSearches.unreadable else { return }
+        guard search.isSearching, !app.savedSearches.unreadable else { return }
         savedSheet.beginSave(search.saved(named: search.suggestedName), describing: search.savedSummary, on: window)
     }
 
@@ -167,7 +166,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             search.filter = kinds[index]
         case 26 where modifiers == .command && app.model.hasCode:   // ⌘7: code
             search.filter = .code
-        case 1 where modifiers == .command && search.canSave && !app.savedSearches.unreadable:   // ⌘S
+        case 1 where modifiers == .command && search.isSearching && !app.savedSearches.unreadable:   // ⌘S
             saveSearch()
         case 8 where modifiers == .command:   // ⌘C
             // The selected file, as in the panel, except right after you selected some of the query's words (then
@@ -353,13 +352,6 @@ final class SearchModel {
     }
     /// There's something to show: words typed, or a filter that lists files by itself.
     var isSearching: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !searchFilter.isEmpty }
-    /// Save This Search… can save it: there's something to show, and no Sensitive filter (`saveNote`).
-    var canSave: Bool { isSearching && !has(.sensitive) }
-    /// Why the Saved menu can't save what's shown: the saved searches' shape (PHOTOS-FACTS-SCHEMA.md) has no key for
-    /// the Sensitive filter yet, and one saved without it would keep more than this search does.
-    var saveNote: String? {
-        isSearching && has(.sensitive) ? "Searches with the Sensitive filter can't be saved yet" : nil
-    }
 
     /// A search of code: the Code filter, or "code:" typed.
     var isCode: Bool { filter == .code || CodeQuery.text(of: query) != nil }
@@ -446,7 +438,7 @@ final class SearchModel {
         // The window's From offers these two origins (`PhotosFilterMenus`).
         case .origin(let origin): SavedSearch.From(rawValue: origin.rawValue).map { .from($0) }
         case .area: area.map { .area(SavedSearch.Area($0)) }
-        case .sensitive: nil   // never saved: Save is off while it's on (`canSave`)
+        case .sensitive: .sensitive
         }
     }
 
@@ -489,6 +481,7 @@ final class SearchModel {
             case .from(.saved): tokens.append(.origin(.saved))
             case .from(.imported): tokens.append(.origin(.imported))
             case .area(let box): area = box.searchArea
+            case .sensitive: tokens.append(.sensitive)
             }
         }
         runsHeld = true
@@ -689,7 +682,7 @@ struct SearchWindowView: View {
                             .offset(x: 30, y: 44)   // just under the field, below the magnifier
                     }
                 }
-                SavedSearchesMenu(saved: app.savedSearches, canSave: search.canSave, saveNote: search.saveNote,
+                SavedSearchesMenu(saved: app.savedSearches, canSave: search.isSearching,
                                   open: { app.searchWindow.open($0) }, save: { app.searchWindow.saveSearch() },
                                   edit: { app.searchWindow.editSavedSearches() })
                 Button {

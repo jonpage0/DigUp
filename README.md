@@ -101,12 +101,12 @@ With the .deb, DigUp tells you when there's a new version and opens its release 
 On a Mac, Settings → Shortcuts lists every key, in the panel and the window, and sets the one that opens the panel.
 
 On a Mac, the search window's Saved menu (the bookmark beside the field) keeps the searches you come back to. Save This
-Search… (⌘S) keeps the words, the kind and the filters (people, albums, favorites, From, the map's area) under a name,
-and choosing it searches again, so new files show up; Edit Saved Searches… renames, reorders and deletes them. Typing
-the start of one's name in the panel offers it, and Tab opens it in the window. They're kept in `saved-searches.json`
-beside the index, so rebuilding the index keeps them, with Photos' people and albums by Photos' own ids: someone
-renamed in Photos is still found, and someone who's gone from Photos shows struck through, and the search keeps
-nothing for them rather than everyone.
+Search… (⌘S) keeps the words, the kind and the filters (people, albums, favorites, From, the map's area, Sensitive)
+under a name, and choosing it searches again, so new files show up; Edit Saved Searches… renames, reorders and deletes
+them. Typing the start of one's name in the panel offers it, and Tab opens it in the window. They're kept in
+`saved-searches.json` beside the index, so rebuilding the index keeps them, with Photos' people and albums by Photos'
+own ids: someone renamed in Photos is still found, and someone who's gone from Photos shows struck through, and the
+search keeps nothing for them rather than everyone.
 
 DigUp lives in the menu bar on a Mac and in the tray on Windows and Linux, where you can see how indexing is going,
 pause it, or open Settings. Opening it from the Start menu or your app list shows the search window.
@@ -304,10 +304,10 @@ shows it as it is). Its positions, with what they caught on a real library of 55
 - Nudity only (medium or higher, 0.5 or more): close to 9 in 10 (about 1 in 11 blurred)
 
 The Sensitive filter beside the kinds (and `digup search --sensitive`) keeps the pictures and videos rated sensitive at
-that position, or at Revealing while blurring is off; a video counts by any of its frames. A search with it can't be
-saved yet. AI apps don't see them, nor any picture not rated yet, unless you allow it (AI apps, below). Known limits:
-tiny nudes inside screenshots and figures far away are missed, and skin-toned close-ups and shirtless men are
-sometimes rated sensitive.
+that position, or at Revealing while blurring is off; a video counts by any of its frames. A search saved with it keeps
+it, at the position blurring has when the search runs. AI apps don't see them, nor any picture not rated yet, unless
+you allow it (AI apps, below). Known limits: tiny nudes inside screenshots and figures far away are missed, and
+skin-toned close-ups and shirtless men are sometimes rated sensitive.
 
 The detector isn't downloaded yet: make it once with `scripts/sensitive-model.py convert` (uv runs it; it downloads
 the pinned model, converts it to Core ML in `~/Library/Application Support/DigUp/Models/sensitive/`, 330 MB, and

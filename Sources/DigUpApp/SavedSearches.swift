@@ -66,6 +66,9 @@ struct SavedSearch: Equatable, Identifiable {
         case digupFavorites
         case from(From)
         case area(Area)
+        /// The Sensitive filter, at the position "Blur sensitive pictures" has when the search runs (as `from: "mine"`
+        /// is the devices list as it is then, not a copy of it). `{ "sensitive": true }`, approved 2026-10-22.
+        case sensitive
     }
 
     /// A person by Photos' ids, one per library that has them (everyone of the name, as the People filter joins
@@ -108,20 +111,21 @@ struct SavedSearch: Equatable, Identifiable {
         var searchArea: SearchFilter.Area { SearchFilter.Area(latitudes: south...north, longitudes: west...east) }
     }
 
-    /// What the file's shape asks of a search beyond its keys: a name, at most one From and one area, and an area
-    /// that's a box.
+    /// What the file's shape asks of a search beyond its keys: a name, at most one From, one area and one Sensitive,
+    /// and an area that's a box.
     var isWellFormed: Bool {
-        var froms = 0, areas = 0
+        var froms = 0, areas = 0, sensitives = 0
         for filter in filters {
             switch filter {
             case .from: froms += 1
             case .area(let area):
                 guard area.isBox else { return false }
                 areas += 1
+            case .sensitive: sensitives += 1
             default: break
             }
         }
-        return !name.isEmpty && froms <= 1 && areas <= 1
+        return !name.isEmpty && froms <= 1 && areas <= 1 && sensitives <= 1
     }
 }
 
@@ -195,10 +199,10 @@ extension SavedSearch.Area {
     }
 }
 
-/// A filter is an object with exactly one key, one of these six; anything else isn't this shape.
+/// A filter is an object with exactly one key, one of these seven; anything else isn't this shape.
 extension SavedSearch.Filter: Codable {
     private enum Key: String, CodingKey, CaseIterable {
-        case person, album, photosFavorites, digupFavorites, from, area
+        case person, album, photosFavorites, digupFavorites, from, area, sensitive
     }
 
     init(from decoder: any Decoder) throws {
@@ -211,11 +215,15 @@ extension SavedSearch.Filter: Codable {
         switch key {
         case .person: self = .person(try container.decode(SavedSearch.Person.self, forKey: key))
         case .album: self = .album(try container.decode(SavedSearch.Album.self, forKey: key))
-        case .photosFavorites, .digupFavorites:
+        case .photosFavorites, .digupFavorites, .sensitive:
             guard try container.decode(Bool.self, forKey: key) else {
                 throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: "is always true")
             }
-            self = key == .photosFavorites ? .photosFavorites : .digupFavorites
+            self = switch key {
+            case .photosFavorites: .photosFavorites
+            case .digupFavorites: .digupFavorites
+            default: .sensitive
+            }
         case .from: self = .from(try container.decode(SavedSearch.From.self, forKey: key))
         case .area: self = .area(try container.decode(SavedSearch.Area.self, forKey: key))
         }
@@ -230,6 +238,7 @@ extension SavedSearch.Filter: Codable {
         case .digupFavorites: try container.encode(true, forKey: .digupFavorites)
         case .from(let from): try container.encode(from, forKey: .from)
         case .area(let area): try container.encode(area, forKey: .area)
+        case .sensitive: try container.encode(true, forKey: .sensitive)
         }
     }
 }
@@ -239,19 +248,20 @@ extension SavedSearch.Filter: Codable {
 /// `favorites.json` is, read once and written whole on each change (to a temporary file, then renamed over the old
 /// one).
 ///
-/// The shape (approved 2026-10-22):
+/// The shape (approved 2026-10-22; `{ "sensitive": true }` with it, the same evening):
 ///
 ///     { "version": 1,
 ///       "searches": [ { "id": "<UUID>", "name": "Tati at the beach", "query": "beach", "kind": "images",
 ///                       "filters": [ { "person": { "name": "…", "photos": [ { "library": "…", "uuid": "…" } ] } },
 ///                                    { "album": { "title": "…", "folders": ["…"], "photos": [ … ] } },
 ///                                    { "photosFavorites": true }, { "digupFavorites": true }, { "from": "mine" },
-///                                    { "area": { "south": 25.1, "west": -80.9, "north": 26.2, "east": -79.8 } } ],
+///                                    { "area": { "south": 25.1, "west": -80.9, "north": 26.2, "east": -79.8 } },
+///                                    { "sensitive": true } ],
 ///                       "saved": "<ISO 8601>" } ] }
 ///
 /// In the user's order, which the menu shows. A file DigUp can't read as exactly this shape (a newer version, damaged,
-/// a key anywhere that the shape doesn't have, a filter with two keys or none, two From or two areas in one search) is
-/// left as it is and never written over: nothing can be saved, renamed or deleted until it's fixed.
+/// a key anywhere that the shape doesn't have, a filter with two keys or none, two From, two areas or two Sensitive in
+/// one search) is left as it is and never written over: nothing can be saved, renamed or deleted until it's fixed.
 @MainActor @Observable
 final class SavedSearches {
     private struct Stored: Codable {
@@ -359,8 +369,8 @@ final class SavedSearches {
             guard stored.searches.allSatisfy(\.isWellFormed),
                   Set(stored.searches.map(\.id)).count == stored.searches.count else {
                 unreadable = true
-                log("saved searches: \(url.lastPathComponent) has a search without a name, with two From or two areas, "
-                    + "an area that isn't a box, or an id twice; it's left as it is")
+                log("saved searches: \(url.lastPathComponent) has a search without a name, with two From, two areas or "
+                    + "two Sensitive, an area that isn't a box, or an id twice; it's left as it is")
                 return
             }
             searches = stored.searches
@@ -387,7 +397,7 @@ final class SavedSearches {
 /// The Saved menu's items, in order: the saved searches, then Save This Search… (⌘S) and Edit Saved Searches….
 enum SavedMenuItem: Identifiable {
     case search(SavedSearch)
-    /// A line that can't be chosen: none saved yet, a file that can't be read, or why this search can't be saved.
+    /// A line that can't be chosen: none saved yet, or a file that can't be read.
     case note(String)
     case divider
     case save(enabled: Bool)
@@ -406,17 +416,16 @@ enum SavedMenuItem: Identifiable {
     static let saveTitle = "Save This Search…"
     static let editTitle = "Edit Saved Searches…"
 
-    /// `canSave`: the window has something to save (words, or a filter). `saveNote`: why it can't be saved, said under
-    /// Save This Search….
-    static func items(_ saved: SavedSearches, canSave: Bool, saveNote: String? = nil) -> [SavedMenuItem] {
+    /// `canSave`: the window has something to save (words, or a filter).
+    static func items(_ saved: SavedSearches, canSave: Bool) -> [SavedMenuItem] {
         var items: [SavedMenuItem] = saved.searches.map { .search($0) }
         if saved.unreadable {
             items = [.note("\(saved.url.lastPathComponent) can't be read")]
         } else if items.isEmpty {
             items = [.note("No saved searches yet")]
         }
-        return items + [.divider, .save(enabled: canSave && !saved.unreadable)] + (saveNote.map { [.note($0)] } ?? [])
-            + [.edit(enabled: !saved.unreadable && !saved.searches.isEmpty)]
+        return items + [.divider, .save(enabled: canSave && !saved.unreadable),
+                        .edit(enabled: !saved.unreadable && !saved.searches.isEmpty)]
     }
 }
 
@@ -425,14 +434,13 @@ enum SavedMenuItem: Identifiable {
 struct SavedSearchesMenu: View {
     let saved: SavedSearches
     let canSave: Bool
-    var saveNote: String?
     let open: (SavedSearch) -> Void
     let save: () -> Void
     let edit: () -> Void
 
     var body: some View {
         Menu {
-            ForEach(SavedMenuItem.items(saved, canSave: canSave, saveNote: saveNote)) { item in
+            ForEach(SavedMenuItem.items(saved, canSave: canSave)) { item in
                 switch item {
                 case .search(let search): Button(search.name) { open(search) }
                 case .note(let text): Text(text)

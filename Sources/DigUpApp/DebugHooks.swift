@@ -461,8 +461,7 @@ enum DebugHooks {
         let defaults = UserDefaults.standard
         let window = app.searchWindow!
         if defaults.bool(forKey: "debugSavedMenu") {
-            let items = SavedMenuItem.items(app.savedSearches, canSave: window.search.canSave,
-                                            saveNote: window.search.saveNote)
+            let items = SavedMenuItem.items(app.savedSearches, canSave: window.search.isSearching)
             log("saved menu: " + items.map { item in
                 switch item {
                 case .search(let search): search.name
