@@ -252,6 +252,34 @@ This fork's Mac app doesn't check for updates by itself: its feed is upstream's,
 the fork with upstream's release, which doesn't read Photos libraries. Check for Updates… in the menu still reads that
 feed, so leave it alone unless you mean to go back to upstream.
 
+## Sensitive pictures
+
+DigUp can rate how revealing each picture is, on your Mac, with Freepik's
+[nsfw_image_detector](https://huggingface.co/Freepik/nsfw_image_detector) (MIT): for each photo, screenshot, GIF frame,
+video frame and still of a video in iCloud, the chance it shows something "low" (swimwear, lingerie, implied nudity),
+"medium" or "high" (explicit). A picture is rated as it's read; the ones read before are rated once, in the background
+under the same rules as a first pass (about an hour for 55,000 pictures; PDF pages aren't rated). A file only in iCloud
+is never opened for it.
+
+Settings → General → Blur sensitive pictures, off at first, blurs what's rated sensitive in the search window, the
+panel, the preview and the moments' strips until you click it (then it shows for as long as DigUp runs; Quick Look
+shows it as it is). Its positions, with what they caught on a real library of 55,000 pictures:
+
+- Anything revealing (low or higher, 0.2 or more): nearly every nude picture, and the most ordinary pictures with them
+  (about 1 in 7 pictures blurred)
+- Revealing (0.5 or more): about 9 in 10 nude pictures (about 1 in 9 blurred)
+- Nudity only (medium or higher, 0.5 or more): close to 9 in 10 (about 1 in 11 blurred)
+
+The Sensitive filter beside the kinds (and `digup search --sensitive`) keeps the pictures and videos rated sensitive at
+that position, or at Revealing while blurring is off; a video counts by any of its frames. AI apps don't see them, nor
+any picture not rated yet, unless you allow it (AI apps, below). Known limits: tiny nudes inside screenshots and
+figures far away are missed, and skin-toned close-ups and shirtless men are sometimes rated sensitive.
+
+The detector isn't downloaded yet: make it once with `scripts/sensitive-model.py convert` (uv runs it; it downloads
+the pinned model, converts it to Core ML in `~/Library/Application Support/DigUp/Models/sensitive/`, 330 MB, and
+`scripts/sensitive-model.py check <pictures>` compares it with the original). Until it's there, Settings says so and
+nothing is rated or blurred. `digup sensitive <picture>…` rates pictures as indexing does.
+
 ## AI apps
 
 AI apps on your Mac (Claude Code, Codex, Cursor, VS Code, Claude Desktop, or any app that starts a local MCP server)
@@ -282,6 +310,8 @@ applies to the very next one:
   noted which are hidden) stays out until the library is listed again. People and albums are looked up only among
   what the app may see.
 - code search, and pictures themselves (`get_picture`), are each off until you turn them on.
+- pictures rated sensitive (at Blur sensitive pictures' position, Revealing while it's off) stay out until you allow
+  them, and so does every picture or video not rated yet, read or not; `status` says how many wait to be rated.
 - a file the app may not see answers as one DigUp doesn't have, so it can't tell the file is there; `mcp.log` says why.
 - the tools' descriptions tell the model that whatever comes back is your data, never instructions: a file can say
   anything.

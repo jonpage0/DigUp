@@ -16,6 +16,8 @@ public enum IndexerError: Error, CustomStringConvertible {
 ///
 /// Model work goes to an `Embedder` (made on first use, freed by `closeWorker`). Extraction (ImageIO, Vision, PDFKit,
 /// AVFoundation) runs on a second thread one batch ahead, so reading files and embedding them overlap (see `run`).
+/// Given a `PictureRater`, each picture read for the model is rated too, and pictures read before are rated once
+/// (`ratePictures`): `sensitive_scores`.
 public final class Indexer {
     public struct SyncSummary: Sendable {
         public var added = 0, changed = 0, moved = 0, removed = 0, unchanged = 0
@@ -41,6 +43,12 @@ public final class Indexer {
     private let makeEmbedder: () throws -> any Embedder
     private var worker: (any Embedder)?
     private let scratch: URL
+    /// The sensitive-picture detector (`SensitiveModel.rater`), when it's there.
+    private let rater: (any PictureRater)?
+    /// The pictures the job being committed had rated, and how long that took (`MeasuredCosts` keeps it apart).
+    private var rated = (pictures: 0, seconds: 0.0)
+    /// The pictures the rating pass has tried in this process (`ratePictures`).
+    private var triedRating = Set<Int64>()
 
     /// When set, an index built with another model or other settings is emptied and embedded again (the app: a new
     /// version may bring a new model), and this hears about it. When nil, indexing stops with `fingerprintMismatch`.
@@ -54,10 +62,14 @@ public final class Indexer {
     public var costsFolder: URL?
     private var measured = MeasuredCosts()
 
-    public init(store: IndexStore, options: IndexOptions, makeEmbedder: @escaping () throws -> any Embedder) throws {
+    /// `rater`: the ratings already in the index are another model's, or nobody's, and go (`adoptSensitiveModel`).
+    public init(store: IndexStore, options: IndexOptions, rater: (any PictureRater)? = nil,
+                makeEmbedder: @escaping () throws -> any Embedder) throws {
         self.store = store
         self.options = options
+        self.rater = rater
         self.makeEmbedder = makeEmbedder
+        if let rater { try store.adoptSensitiveModel(rater.model) }
         // One folder per process ($TMPDIR/DigUp-<pid>, which the helper clears up after a process that died), and one
         // in it per indexer: the helper runs two (the main index and the code index), and each clears its own away.
         scratch = FileManager.default.temporaryDirectory
@@ -325,9 +337,14 @@ public final class Indexer {
             // The helper's and the CLI's main thread has no run loop to drain what Foundation autoreleases while a job
             // commits: without a pool per job it all stayed until the process exited (~30 KB a text chunk).
             let modelWasRunning = worker != nil
+            rated = (0, 0)
             let results = try autoreleasepool { try commit(prepared) }
             let seconds = Date().timeIntervalSince(started)
-            if modelWasRunning { measure(prepared, seconds: seconds) }   // else it's seconds of the model starting
+            if modelWasRunning {   // else it's seconds of the model starting
+                // Rating pictures is measured apart: an estimate counts it only where pictures are rated.
+                measure(prepared, seconds: seconds - rated.seconds)
+                measured.add("sensitivePicture", units: Double(rated.pictures), seconds: rated.seconds)
+            }
             committed(index, job, results, seconds / Double(job.files.count))
         }
     }
@@ -511,7 +528,7 @@ public final class Indexer {
                     let url = URL(fileURLWithPath: file.path)
                     startReading(file.path)
                     do {
-                        let maxPixel = screenshot ? 1536 : 1024
+                        let maxPixel = Self.pictureSide(screenshot: screenshot)
                         let image = try ImageExtractor.prepare(url, maxPixel: maxPixel, minSide: options.minImageSide,
                                                                to: folder, png: screenshot)
                         // An animated GIF: a few of its later frames too, each at the moment it's shown.
@@ -669,20 +686,27 @@ public final class Indexer {
         let frames = ready.flatMap(\.frames)
         var frameVectors = frames.isEmpty ? []
             : try worker.embedImages(frames.map(\.path), budget: options.frameBudget)[...]
+        // How revealing each picture and frame is, from the same files the model just read.
+        let levels = rate(ready.map(\.image.path))
+        var frameLevels = rate(frames.map(\.path))[...]
         try store.db.transaction {
             for (position, item) in ready.enumerated() {
                 let file = batch[item.slot]
-                let itsFrames = zip(item.frames, frameVectors.prefix(item.frames.count))
+                let itsFrames = zip(zip(item.frames, frameVectors.prefix(item.frames.count)),
+                                    frameLevels.prefix(item.frames.count))
                 frameVectors = frameVectors.dropFirst(item.frames.count)
+                frameLevels = frameLevels.dropFirst(item.frames.count)
                 guard let vector = vectors[position].vector else {
                     try store.finish(file.id, state: "failed", detail: vectors[position].error)
                     results[item.slot] = ("failed", vectors[position].error)
                     continue
                 }
-                try store.addSegment(file: file.id, kind: .image, modality: .image, vector: vector)
-                for (frame, embedding) in itsFrames {
-                    try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
-                                         locEnd: frame.end, vector: embedding.vector)
+                let picture = try store.addSegment(file: file.id, kind: .image, modality: .image, vector: vector)
+                if let rating = levels[position] { try store.setSensitive(rating, ofSegment: picture) }
+                for ((frame, embedding), rating) in itsFrames {
+                    let segment = try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
+                                                       locEnd: frame.end, vector: embedding.vector)
+                    if let rating { try store.setSensitive(rating, ofSegment: segment) }
                 }
                 // The words on screen, or the ones Photos read in a picture, are for keyword search: codes, names and
                 // errors typed exactly. Meaning comes from the picture alone; a vector of the words made screenshots
@@ -852,10 +876,12 @@ public final class Indexer {
         let worker = try fullWorker()
         let frameVectors = try worker.embedImages(frames.map(\.path), budget: options.frameBudget)
         let soundVectors = try worker.embedAudio(sound.map(\.path))
+        let levels = rate(frames.map(\.path))
         try store.db.transaction {
-            for (frame, embedding) in zip(frames, frameVectors) {
-                try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
-                                     locEnd: frame.end, vector: embedding.vector)
+            for ((frame, embedding), rating) in zip(zip(frames, frameVectors), levels) {
+                let segment = try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
+                                                   locEnd: frame.end, vector: embedding.vector)
+                if let rating { try store.setSensitive(rating, ofSegment: segment) }
             }
             for (piece, embedding) in zip(sound, soundVectors) {
                 try store.addSegment(file: file.id, kind: .audio, modality: .audio, loc: piece.start,
@@ -874,12 +900,147 @@ public final class Indexer {
     /// is Photos' (the sync's).
     private func stills(_ file: FileRecord, _ stills: [String]) throws -> (String, String?) {
         let vectors = try fullWorker().embedImages(stills, budget: options.frameBudget)
+        let levels = rate(stills)
         try store.db.transaction {
-            for embedding in vectors {
-                try store.addSegment(file: file.id, kind: .frame, modality: .image, vector: embedding.vector)
+            for (embedding, rating) in zip(vectors, levels) {
+                let segment = try store.addSegment(file: file.id, kind: .frame, modality: .image,
+                                                   vector: embedding.vector)
+                if let rating { try store.setSensitive(rating, ofSegment: segment) }
             }
             try store.finish(file.id, state: "done", info: ["frames": "\(stills.count)"])
         }
         return ("done", "\(stills.count) of Photos' stills (the video is in iCloud)")
+    }
+
+    // MARK: Sensitive pictures
+
+    /// How big a picture is read for the model, on its long side: a screenshot bigger, for its small text.
+    static func pictureSide(screenshot: Bool) -> Int { screenshot ? 1536 : 1024 }
+
+    /// What the detector says of the picture at `url`, read as indexing reads a picture for the model (its thumbnail,
+    /// upright, into `folder`): what `digup sensitive` times and checks against PyTorch.
+    public static func rate(pictureAt url: URL, screenshot: Bool, with rater: any PictureRater, in folder: URL) throws
+        -> SensitiveLevels {
+        try rater.levels(ofPictureAt: URL(fileURLWithPath: readForModel(url, screenshot: screenshot, into: folder)))
+    }
+
+    /// What the detector says of each of these pictures (files written for the model: a picture's thumbnail, a frame, a
+    /// still), nil for one it couldn't read; none without a detector. The time it takes is the job's `rated`.
+    private func rate(_ paths: [String]) -> [SensitiveLevels?] {
+        guard let rater, !paths.isEmpty else { return paths.map { _ in nil } }
+        let started = Date()
+        defer { rated = (rated.pictures + paths.count, rated.seconds + Date().timeIntervalSince(started)) }
+        return paths.map { try? rater.levels(ofPictureAt: URL(fileURLWithPath: $0)) }
+    }
+
+    /// One step of the rating pass: `done` of the `total` pictures it set out to rate, and the file whose pictures it
+    /// just rated (`rated` of them; the rest it couldn't read now).
+    public struct Rating: Sendable {
+        public let done: Int
+        public let total: Int
+        public let path: String
+        public let kind: FileKind
+        public let rated: Int
+        public let seconds: Double
+    }
+
+    /// The rating pass: each picture read before DigUp rated pictures (or before the model changed, which took every
+    /// rating) is read again from its file, as it was read for the model, and rated; nothing is embedded. A file
+    /// that's away (gone, on a drive that's unplugged, or only in iCloud, where reading it would download it) is passed
+    /// over, and so is a picture that can't be read now: they wait for a later pass. Each file's ratings are one
+    /// transaction, so stopping between files (`shouldStop`) loses nothing. Returns how many pictures it rated; none
+    /// without a detector.
+    @discardableResult
+    public func ratePictures(shouldStop: () -> Bool = { false }, onStep: (Rating) -> Void = { _ in }) throws -> Int {
+        guard let rater else { return 0 }
+        let waiting = try store.unratedPictures().compactMap { file, pictures in
+            // Each picture once a process: one that couldn't be read waits for the next helper.
+            let untried = pictures.filter { !triedRating.contains($0.segment) }
+            return untried.isEmpty ? nil : (file: file, pictures: untried)
+        }
+        guard !waiting.isEmpty else { return 0 }
+        let standIns = try store.photosStandIns()
+        let total = waiting.reduce(0) { $0 + $1.pictures.count }
+        var done = 0, count = 0, passes = 0
+        for (file, pictures) in waiting {
+            guard !shouldStop() else { break }
+            triedRating.formUnion(pictures.map(\.segment))
+            let started = Date()
+            passes += 1
+            let folder = scratch.appendingPathComponent("rating-\(passes)")
+            let levels = autoreleasepool {
+                Self.startReading(file.path)
+                defer { Self.readingLock.withLock { Self.reading = nil } }
+                return Self.rate(pictures, of: file, reading: standIns[file.id], with: rater, in: folder)
+            }
+            try? FileManager.default.removeItem(at: folder)
+            try store.db.transaction {
+                for (segment, rating) in levels { try store.setSensitive(rating, ofSegment: segment) }
+            }
+            done += pictures.count
+            count += levels.count
+            onStep(Rating(done: done, total: total, path: file.path, kind: file.kind, rated: levels.count,
+                          seconds: Date().timeIntervalSince(started)))
+        }
+        return count
+    }
+
+    /// The ratings of a file's pictures that could be read now, by segment: each read as indexing read it for the
+    /// model (a picture's thumbnail, a GIF's frame, a video's frame at its moment, one of Photos' stills of a video in
+    /// iCloud) into `folder`, and rated. None when the file is away; a picture that can't be read has none.
+    private static func rate(_ pictures: [IndexStore.UnratedPicture], of file: FileRecord,
+                             reading: PhotosLibrary.Reading?, with rater: any PictureRater, in folder: URL)
+        -> [Int64: SensitiveLevels] {
+        guard Self.isHere(file.path),
+              (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)) != nil
+        else { return [:] }
+        let url = URL(fileURLWithPath: file.path)
+        let side = pictureSide(screenshot: file.kind == .screenshot)
+        var animation: [MediaPiece]?, filmstrip: [String]?
+        var levels: [Int64: SensitiveLevels] = [:]
+        for picture in pictures {
+            // The picture as indexing wrote it for the model.
+            let path: String?
+            switch (picture.kind, file.kind) {
+            case (.image, _):
+                path = try? readForModel(url, screenshot: file.kind == .screenshot, into: folder)
+            case (.frame, .image), (.frame, .screenshot):
+                // One of an animated GIF's later frames, read again as `prepare` read them (in their order).
+                animation = animation ?? ImageExtractor.animationFrames(of: url, maxPixel: side, to: folder)
+                path = animation.flatMap { $0.indices.contains(picture.place) ? $0[picture.place].path : nil }
+            case (.frame, .video) where reading?.isStandIn == true:
+                // One of Photos' stills of a video in iCloud (in the filmstrip's order), or its poster.
+                filmstrip = filmstrip ?? (reading == .stills ? PhotosLibrary.filmstrip(startingAt: file.path)
+                                                             : [file.path])
+                let still = filmstrip.flatMap { $0.indices.contains(picture.place) ? $0[picture.place] : nil }
+                path = still.flatMap { still in
+                    Self.isHere(still) ? try? readForModel(URL(fileURLWithPath: still), screenshot: false, into: folder)
+                        : nil
+                }
+            case (.frame, _):
+                // A video's keyframe, at its moment.
+                let (out, seconds) = (folder.appendingPathComponent(UUID().uuidString + ".jpg"), picture.loc ?? 0)
+                path = (try? runBlocking { try await VideoExtractor.frame(at: seconds, of: url, pixels: side, to: out) })
+                    .map { out.path }
+            default:
+                path = nil
+            }
+            if let path, let rating = try? rater.levels(ofPictureAt: URL(fileURLWithPath: path)) {
+                levels[picture.segment] = rating
+            }
+        }
+        return levels
+    }
+
+    /// A picture as `prepare` reads it for the model (its thumbnail, upright), written into `folder`: its path.
+    private static func readForModel(_ url: URL, screenshot: Bool, into folder: URL) throws -> String {
+        try ImageExtractor.prepare(url, maxPixel: pictureSide(screenshot: screenshot), minSide: 0, to: folder,
+                                   png: screenshot).path
+    }
+
+    /// The file is on this Mac to read: there, a regular file, and not only in iCloud (reading it would download it).
+    private static func isHere(_ path: String) -> Bool {
+        guard let info = FileSystem.info(of: path) else { return false }
+        return info.isRegular && !info.dataless
     }
 }

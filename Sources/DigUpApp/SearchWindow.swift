@@ -312,6 +312,11 @@ final class SearchModel {
         if has(.shotOnMyDevices) { run() }
     }
 
+    /// "Blur sensitive pictures" moved: a search with the Sensitive filter on runs again at the new position.
+    func sensitivePositionChanged() {
+        if has(.sensitive) { run() }
+    }
+
     /// Every result shown, in order (strong ones, then the weaker ones once they're unfolded).
     var rows: [ResultRow] { results.ranked + (showWeaker ? results.weaker : []) }
 
@@ -328,6 +333,7 @@ final class SearchModel {
             case .shotOnMyDevices: filter.shotOn = Set(myDevices)   // empty: still filtering (`SearchFilter.shotOn`)
             case .origin(let origin): filter.origins = [origin.rawValue]
             case .area: break
+            case .sensitive: filter.sensitive = model.settings.blurSensitive.filterPosition
             }
         }
         return filter
@@ -432,6 +438,7 @@ final class SearchModel {
         // The window's From offers these two origins (`PhotosFilterMenus`).
         case .origin(let origin): SavedSearch.From(rawValue: origin.rawValue).map { .from($0) }
         case .area: area.map { .area(SavedSearch.Area($0)) }
+        case .sensitive: .sensitive
         }
     }
 
@@ -474,6 +481,7 @@ final class SearchModel {
             case .from(.saved): tokens.append(.origin(.saved))
             case .from(.imported): tokens.append(.origin(.imported))
             case .area(let box): area = box.searchArea
+            case .sensitive: tokens.append(.sensitive)
             }
         }
         runsHeld = true
@@ -725,6 +733,14 @@ struct SearchWindowView: View {
                         .buttonStyle(.plain)
                         .help("Favorites: only what you've marked ♥ in DigUp (\(search.favorites.count))")
                         .accessibilityAddTraits(search.has(.digupFavorites) ? .isSelected : [])
+                        Button {
+                            search.toggle(.sensitive)
+                        } label: {
+                            FilterChipLabel(title: "Sensitive", symbol: "eye.slash", selected: search.has(.sensitive))
+                        }
+                        .buttonStyle(.plain)
+                        .help(FilterToken.sensitive.help)
+                        .accessibilityAddTraits(search.has(.sensitive) ? .isSelected : [])
                     }
                     if search.searchesPhotos, !search.isCode {
                         Divider().frame(height: 16).padding(.horizontal, 2)
@@ -983,8 +999,10 @@ private struct ResultsGrid: View {
     private func cell(_ row: ResultRow) -> some View {
         GridCell(row: row, selected: row.id == search.selectedRow?.id, favorite: search.favorites.contains(row))
             .id(row.id)
-            .overlay(FileDragArea(url: row.url, openTitle: row.openTitle, onClick: { search.select(row) },
-                                  onOpen: { search.open(row) }))
+            .overlay(FileDragArea(url: row.url, openTitle: row.openTitle, onClick: {
+                SensitiveBlur.shared.show(row)   // a click shows a blurred picture
+                search.select(row)
+            }, onOpen: { search.open(row) }))
     }
 }
 
@@ -1006,7 +1024,9 @@ private struct GridCell: View {
                             .font(.system(size: 34, weight: .light))
                             .foregroundStyle(Brand.gradient)
                     } else {
-                        MomentThumbnail(row: row)
+                        let hidden = SensitiveBlur.shared.hides(row)
+                        MomentThumbnail(row: row, hidden: hidden)
+                            .sensitiveCover(hidden, iconSize: 20)
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -1168,9 +1188,11 @@ private struct CodeOffOrHint: View {
     }
 }
 
-/// A grid cell's picture: the video frame or PDF page that matched (from the preview cache), else Quick Look's.
+/// A grid cell's picture: the video frame or PDF page that matched (from the preview cache), else Quick Look's; veiled
+/// while it's `hidden` (`SensitiveBlur`).
 private struct MomentThumbnail: View {
     let row: ResultRow
+    var hidden = false
     @State private var image: NSImage?
     @Environment(\.displayScale) private var scale
 
@@ -1178,7 +1200,7 @@ private struct MomentThumbnail: View {
         Group {
             if let image {
                 // A page shows its top (its title), anything else its middle.
-                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                Image(nsImage: image.veiled(hidden)).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: row.page == nil ? .center : .top)
             } else {
                 Image(nsImage: NSWorkspace.shared.icon(forFile: row.url.path))

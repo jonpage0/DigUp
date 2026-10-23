@@ -11,6 +11,9 @@ nonisolated struct EngineStatus: Sendable, Equatable {
         /// The rest of long PDFs and documents (`Indexer.finishLongFiles`): `done` of the `total` pages and chunks this
         /// pass set out to read, `files` long files still unfinished.
         case finishing(done: Int, total: Int, files: Int)
+        /// Rating the pictures read before they were rated (`Indexer.ratePictures`): `done` of the `total` this pass set
+        /// out to rate.
+        case rating(done: Int, total: Int)
         case failed(String)
     }
 
@@ -622,9 +625,15 @@ nonisolated final class Engine: @unchecked Sendable {
         case "rest":
             update { $0.activity = .finishing(done: int("done"), total: int("total"), files: int("files")) }
             refreshSearcher(force: false)
+        case "rate":
+            update { $0.activity = .rating(done: int("done"), total: int("total")) }
         case "located":
             log("index: where \(int("files")) files already indexed were taken, read from their metadata")
         case "summary":
+            if event["rated"] != nil {
+                log("index: rated \(int("rated")) pictures read before in \(int("ms")) ms")
+                return
+            }
             let states = (event["states"] as? [String: Int] ?? [:]).sorted { $0.key < $1.key }
                 .map { "\($0.value) \($0.key)" }.joined(separator: " · ")
             let what = event["rest"] as? Bool == true ? "the rest of long files"
@@ -735,6 +744,7 @@ nonisolated final class Engine: @unchecked Sendable {
         update {
             if case .indexing = $0.activity { $0.activity = .idle }
             if case .finishing = $0.activity { $0.activity = .idle }
+            if case .rating = $0.activity { $0.activity = .idle }
             if case .starting = $0.activity { $0.activity = .idle }
             $0.code.indexing = nil
         }
@@ -889,6 +899,15 @@ nonisolated final class Engine: @unchecked Sendable {
                 continuation.resume(returning: PhotosChoices(people: (try? searchStore?.photosPeople()) ?? [],
                                                              albums: (try? searchStore?.photosAlbums()) ?? [],
                                                              cameras: (try? searchStore?.photosCameras()) ?? []))
+            }
+        }
+    }
+
+    /// How many of the index's pictures are rated, and how many wait for the rating pass (Settings → General).
+    func sensitiveCounts() async -> (rated: Int, waiting: Int) {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: (try? searchStore?.sensitiveCounts()) ?? (0, 0))
             }
         }
     }

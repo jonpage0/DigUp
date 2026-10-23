@@ -135,6 +135,9 @@ final class SettingsState {
     var checksForUpdates = false
     /// The last calls AI apps made through `digup mcp` (AI apps), oldest first.
     private(set) var aiCalls: [AICall] = []
+    /// How many of the index's pictures are rated and how many wait (General), and whether the detector is installed.
+    private(set) var ratings = (rated: 0, waiting: 0)
+    private(set) var detectorInstalled = false
     @ObservationIgnored let app: AppController
     @ObservationIgnored var selectTab: (SettingsTab) -> Void = { _ in }
     @ObservationIgnored var addFolders: () -> Void = {}
@@ -155,6 +158,8 @@ final class SettingsState {
         checksForUpdates = app.updates.automaticallyChecks
         indexSize = app.engine.indexSize
         refreshAICalls()
+        detectorInstalled = SensitiveModel.isInstalled(in: model.settings.modelsDirectory)
+        ratings = await app.engine.sensitiveCounts()
         codeIndexSize = app.engine.codeIndexSize
         codeSummaries = await app.engine.rootSummaries(code: true)
         summaries = await app.engine.rootSummaries()
@@ -344,9 +349,91 @@ private struct GeneralSettings: View {
                          ?? "DigUp \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
                 }
             }
+            SensitiveSettings(state: state)
         }
         .formStyle(.grouped)
         .scrollDisabled(true)
+    }
+}
+
+/// General → Sensitive pictures: "Blur sensitive pictures" (approved with `sensitive_scores`, 2026-10-22), and how far
+/// the detector has got, or how to make it while it isn't installed.
+private struct SensitiveSettings: View {
+    @Bindable var state: SettingsState
+
+    var body: some View {
+        Section {
+            Picker(selection: Binding(get: { state.model.settings.blurSensitive },
+                                      set: { state.app.setBlurSensitive($0) })) {
+                ForEach(SensitivePosition.allCases, id: \.self) { Text($0.title).tag($0) }
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Blur sensitive pictures")
+                    Text(Self.detail(state.model.settings.blurSensitive))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if state.detectorInstalled {
+                LabeledContent("Pictures rated") {
+                    Text(state.ratings.rated.formatted()
+                         + (state.ratings.waiting > 0 ? " · \(state.ratings.waiting.formatted()) waiting" : ""))
+                        .monospacedDigit()
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text("The detector isn't installed").font(.system(size: 13, weight: .medium))
+                    }
+                    Text("No picture is rated, so none is blurred or kept by the Sensitive filter, and AI apps see no "
+                         + "pictures unless you let them see pictures rated sensitive. To install it, run this in "
+                         + "Terminal from DigUp's source folder; it goes into \(folder):")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(command)
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+        } header: {
+            Text("Sensitive pictures")
+        } footer: {
+            Text("Each picture is rated as it's read, on this Mac (Freepik's detector), and the ones read before once. "
+                 + "A blurred picture shows when you click it; Quick Look shows it as it is. Pictures not rated yet "
+                 + "aren't blurred. It misses tiny nudes inside screenshots and figures far away, and sometimes flags "
+                 + "skin-toned close-ups and shirtless men.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Where the detector goes: the models folder's sensitive/.
+    private var folder: String { tildePath(SensitiveModel.folder(in: state.model.settings.modelsDirectory).path) }
+
+    /// The command that makes it, told the models folder when it isn't the usual one (as the script reads it).
+    private var command: String {
+        let models = state.model.settings.modelsDirectory
+        guard models.standardizedFileURL != ModelFiles.installed.standardizedFileURL else {
+            return SensitiveModel.makeCommand
+        }
+        return "DIGUP_MODELS=\(AIClientSetup.shellQuoted(models.path)) \(SensitiveModel.makeCommand)"
+    }
+
+    /// What each position blurs, with what ADULT-CONTENT-EVAL.md measured it catches.
+    static func detail(_ position: SensitivePosition) -> String {
+        switch position {
+        case .off: "Pictures show as they are. The Sensitive filter, beside the kinds, keeps the revealing ones."
+        case .anythingRevealing: "Swimwear, lingerie and anything more, even when the detector isn't sure: nearly "
+            + "every nude picture, and the most ordinary pictures blurred with them."
+        case .revealing: "Revealing pictures the detector is fairly sure of: about 9 in 10 nude pictures."
+        case .nudityOnly: "Nudity and explicit pictures: most nude pictures, and the fewest ordinary ones blurred."
+        }
     }
 }
 

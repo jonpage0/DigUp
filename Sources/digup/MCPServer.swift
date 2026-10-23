@@ -12,8 +12,9 @@ import Foundation
 /// Read-only: the index is opened only to be read (`IndexStore(readingOnly:)`), and no tool changes, moves, opens or
 /// uploads a file. What AI apps may see is the user's to say in the app (Settings → AI apps, `AIAccess`), read from its
 /// settings at every call and enforced here, not left to the client: with access off every call fails; Photos
-/// libraries, Photos' hidden items, code and pictures each stay out until allowed, and what's out is never returned,
-/// counted or read. Each tool call is a line of `<index>/mcp.log` (`AICall`), never with what was searched for.
+/// libraries, Photos' hidden items, code, pictures and pictures rated sensitive (or not rated yet) each stay out until
+/// allowed, and what's out is never returned, counted or read. Each tool call is a line of `<index>/mcp.log`
+/// (`AICall`), never with what was searched for.
 final class MCPServer {
     /// The revision named in each request's `_meta`.
     static let statelessVersions = ["2026-07-28"]
@@ -47,13 +48,15 @@ final class MCPServer {
         case hidden = "hidden in Photos, or not known not to be"
         case code = "code off"
         case pictures = "pictures off"
+        /// A picture or video rated sensitive, or not rated yet, while "Pictures rated sensitive" is off.
+        case sensitive = "rated sensitive, or not rated yet"
 
         var message: String {
             switch self {
             case .off: "DigUp's AI access is off. Turn it on in DigUp's Settings → AI apps."
             case .photos: "Photos libraries are off for AI apps. The user can turn them on in DigUp's "
                 + "Settings → AI apps."
-            case .hidden: MCPServer.notFound
+            case .hidden, .sensitive: MCPServer.notFound
             case .code: "Code search is off for AI apps. The user can turn it on in DigUp's Settings → AI apps."
             case .pictures: "Pictures are off for AI apps. The user can turn on “Pictures themselves” in DigUp's "
                 + "Settings → AI apps."
@@ -372,7 +375,8 @@ final class MCPServer {
     /// What AI apps may see of the main index, as the filter every search, count and lookup starts from: no Photos
     /// library's file until Photos is allowed, then, until hidden items are too, only the files whose assets their
     /// library's last listing vouches for (`PhotosLibrary.visibleAssets`), found by path: one the listing doesn't
-    /// name, or of a library with no listing, stays out.
+    /// name, or of a library with no listing, stays out. Until pictures rated sensitive are allowed, no picture or
+    /// video rated sensitive at the position the app's Sensitive filter goes by, and none not rated yet.
     private func visible(to access: AIAccess, in store: IndexStore) throws -> SearchFilter {
         var filter = SearchFilter()
         if !access.photos {
@@ -380,6 +384,7 @@ final class MCPServer {
         } else if !access.hiddenPhotos {
             filter.photosOnly = try store.photosFiles(shownBy: visibleAssets(of:))
         }
+        if !access.sensitive { filter.leavingOutSensitive = SensitivePosition(settings).filterPosition }
         return filter
     }
 
@@ -398,7 +403,11 @@ final class MCPServer {
     private func unseen(_ path: String, access: AIAccess) throws -> Outcome {
         let ofPhotos = PhotosLibrary.library(containing: path) != nil
         if ofPhotos, !access.photos { return .refused(.photos) }
-        if ofPhotos, try mainIndex().store.file(at: path, keptBy: SearchFilter()) != nil { return .unseen(.hidden) }
+        let store = try mainIndex().store
+        var withSensitive = try visible(to: access, in: store)
+        withSensitive.leavingOutSensitive = nil
+        if !access.sensitive, try store.file(at: path, keptBy: withSensitive) != nil { return .unseen(.sensitive) }
+        if ofPhotos, try store.file(at: path, keptBy: SearchFilter()) != nil { return .unseen(.hidden) }
         if !access.code, try codeIndex()?.store.file(at: path, keptBy: SearchFilter()) != nil {
             return .unseen(.code)
         }
@@ -670,14 +679,20 @@ final class MCPServer {
 
     // MARK: status
 
+    /// The index as AI apps may see it, and how many of the pictures and videos they could otherwise see wait to be
+    /// rated (kept from them until then, while pictures rated sensitive are off).
     private func status(access: AIAccess) throws -> Outcome {
         let store = try mainIndex().store
-        var fields = Self.summary(try store.counts(keeping: try visible(to: access, in: store)))
+        let allowed = try visible(to: access, in: store)
+        var fields = Self.summary(try store.counts(keeping: allowed))
         if access.code, let code = try codeIndex() {
             fields["code"] = Self.summary(try code.store.counts(keeping: SearchFilter()))
         }
+        var unrated = allowed
+        unrated.leavingOutSensitive = nil
+        fields["pictures_waiting_to_be_rated"] = try store.unratedFiles(keptBy: unrated)
         fields["access"] = ["photos": access.photos, "hidden_photos": access.hiddenPhotos, "code": access.code,
-                            "pictures": access.pictures]
+                            "pictures": access.pictures, "sensitive_pictures": access.sensitive]
         return .data(fields, results: 1)
     }
 
@@ -852,7 +867,8 @@ final class MCPServer {
                  properties: pathAndPlaceProperties, required: ["path"]),
             tool("status", title: "DigUp's index",
                  description: "How many of the user's files DigUp has indexed, of which kinds, whether it's still "
-                    + "reading some, and what the user lets AI apps see.",
+                    + "reading some, how many pictures wait to be rated (unseen until then, unless the user lets AI "
+                    + "apps see pictures rated sensitive), and what the user lets AI apps see.",
                  properties: [:]),
         ]
     }

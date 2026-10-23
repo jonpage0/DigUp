@@ -12,13 +12,14 @@ import WinSDK
 ///
 /// Protocol: one command per line on stdin, one JSON event per line on stdout.
 ///   stdin:  sync | sync code | stop | backfill on | backfill off      (EOF = stop)
-///   stdout: {"event": "missing" | "pruned" | "sync" | "file" | "rest" | "summary" | "waiting" | "idle" | "error" |
-///            "exit", ...}; events about the code index say "code": true
+///   stdout: {"event": "missing" | "pruned" | "sync" | "file" | "rate" | "rest" | "summary" | "waiting" | "idle" |
+///            "error" | "exit", ...}; events about the code index say "code": true
 ///
 /// The loop: sync, index what the sync just queued (if it's a few files: new files go first, on any power source),
 /// then the backfill if allowed; then the code index the same way (`--code-root`: its own sync, asked for with
-/// "sync code"; its folders are crawled with the first sync, so their counts show at once); then the rest of long
-/// files (`Indexer.finishLongFiles`) under the same rules. Between batches it yields to stop and to "backfill off" at
+/// "sync code"; its folders are crawled with the first sync, so their counts show at once); then, under the same
+/// rules, the pictures read before they were rated (`Indexer.ratePictures`), and the rest of long files
+/// (`Indexer.finishLongFiles`). Between batches it yields to stop and to "backfill off" at
 /// once, and to a new sync once indexing has had about as long as the last sync took (`yieldAt`). When it's done it
 /// keeps a warm worker for `linger` seconds (screenshots come in bursts), then exits.
 ///
@@ -146,7 +147,13 @@ final class IndexService: @unchecked Sendable {
                     if lock.withLock({ syncRequested || codeSyncRequested }) { continue }
                 }
             }
-            // Once nothing is waiting: the rest of long PDFs and documents, the same way.
+            // Once nothing is waiting: the pictures read before they were rated, then the rest of long PDFs and
+            // documents, the same way.
+            if lock.withLock({ backfillAllowed }), (try? main.store.pendingCount()) ?? 1 == 0,
+               (try? code?.store.pendingCount() ?? 0) ?? 1 == 0 {
+                guard ratePictures() else { break }
+                if lock.withLock({ syncRequested || codeSyncRequested }) { continue }
+            }
             if lock.withLock({ backfillAllowed }), (try? main.store.pendingCount()) ?? 1 == 0,
                (try? code?.store.pendingCount() ?? 0) ?? 1 == 0, (try? main.store.unfinishedCount().files) ?? 0 > 0 {
                 guard finishLongFiles() else { break }
@@ -255,6 +262,30 @@ final class IndexService: @unchecked Sendable {
             return true
         } catch {
             emit(["event": "error", "message": "\(error)", "fatal": true, "code": part.code])
+            return false
+        }
+    }
+
+    /// The pictures read before they were rated (`Indexer.ratePictures`), yielding as the backfill does. False when
+    /// indexing has to stop.
+    private func ratePictures() -> Bool {
+        let started = Date()
+        do {
+            let rated = try main.indexer.ratePictures(shouldStop: { [self] in
+                lock.withLock {
+                    stopRequested || !backfillAllowed
+                        || Date() >= yieldAt && (syncRequested || codeSyncRequested && code != nil)
+                }
+            }, onStep: { step in
+                emit(["event": "rate", "done": step.done, "total": step.total, "path": step.path,
+                      "kind": step.kind.rawValue, "rated": step.rated, "seconds": step.seconds])
+            })
+            if rated > 0 {
+                emit(["event": "summary", "rated": rated, "ms": Int(Date().timeIntervalSince(started) * 1000)])
+            }
+            return true
+        } catch {
+            emit(["event": "error", "message": "rating pictures: \(error)", "fatal": true])
             return false
         }
     }

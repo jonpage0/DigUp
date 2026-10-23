@@ -52,6 +52,9 @@ nonisolated struct AppSettings: Sendable {
     /// What AI apps may see through `digup mcp` (Settings → AI apps), all off at first. The helper reads it from these
     /// settings at every call.
     var aiAccess: AIAccess
+    /// "Blur sensitive pictures" (Settings → General): off at first ("optional blurring", Jon, 2026-10-21). Where it's
+    /// set is also what the Sensitive filter keeps (Revealing while it's off) and what AI apps are kept from.
+    var blurSensitive: SensitivePosition
 
     static let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/DigUp")
@@ -97,7 +100,8 @@ nonisolated struct AppSettings: Sendable {
             includeHiddenPhotos: defaults.bool(forKey: "includeHiddenPhotos"),
             myDevicesAdded: defaults.stringArray(forKey: AppDefaults.myDevicesAdded) ?? [],
             myDevicesRemoved: defaults.stringArray(forKey: AppDefaults.myDevicesRemoved) ?? [],
-            aiAccess: AIAccess(defaults))
+            aiAccess: AIAccess(defaults),
+            blurSensitive: SensitivePosition(defaults))
     }
 
     /// A list of folders: a plist array, or paths joined with ":" (the form launch arguments use).
@@ -164,6 +168,10 @@ nonisolated struct AppSettings: Sendable {
 
     static func save(aiAccess: AIAccess) {
         aiAccess.save(to: defaults)
+    }
+
+    static func save(blurSensitive: SensitivePosition) {
+        defaults.set(blurSensitive.rawValue, forKey: AppDefaults.blurSensitive)
     }
 
     /// The defaults suite this run keeps its settings in (`-defaultsSuite`), nil for the app's own domain: an AI app's

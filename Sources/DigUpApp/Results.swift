@@ -31,6 +31,11 @@ struct ResultRow: Identifiable, Equatable {
     private(set) var photos: PhotosHit?
     /// A video or audio file: how many moments of it match (`SearchHit.momentCount`).
     let momentCount: Int
+    /// What the sensitive-picture detector said of the file's pictures (`SearchHit.pictures`; `shownLevels`).
+    let pictures: SensitivePictures?
+    /// A video in iCloud showing another of Photos' stills of it, picked under the preview: the still's place in its
+    /// filmstrip.
+    private(set) var stillIndex: Int?
 
     init(_ hit: SearchHit, query: String = "", terms: [String] = []) {
         id = hit.path
@@ -66,6 +71,7 @@ struct ResultRow: Identifiable, Equatable {
         size = hit.size
         info = hit.info
         momentCount = hit.momentCount
+        pictures = hit.pictures
         self.query = query
         self.terms = terms
     }
@@ -78,14 +84,17 @@ struct ResultRow: Identifiable, Equatable {
         placed.segment = moment.kind == .heard ? .audio : .frame
         placed.segmentID = moment.segmentID
         (placed.loc, placed.locEnd) = (moment.start, moment.end)
+        placed.stillIndex = nil
         if let still = moment.still, filmstrip.indices.contains(still) { placed.photos?.still = filmstrip[still] }
         return placed
     }
 
-    /// A video in iCloud showing another of Photos' stills of it, picked under the preview.
-    func showing(still: String) -> ResultRow {
+    /// A video in iCloud showing another of Photos' stills of it (`still`, the `index`th of its filmstrip), picked
+    /// under the preview.
+    func showing(still: String, at index: Int) -> ResultRow {
         var placed = self
         placed.photos?.still = still
+        placed.stillIndex = index
         return placed
     }
 

@@ -26,6 +26,9 @@ public struct SearchHit: Sendable {
     /// A video or audio file: how many moments of it match the query (`Searcher.moments(of:queryVector:zGate:)`),
     /// counted from the scores the search has anyway. 0 when none does (it's here by its name, say).
     public var momentCount = 0
+    /// A picture or a video: what the sensitive-picture detector said of each of its pictures (`SensitivePictures`).
+    /// Nil for any other file.
+    public var pictures: SensitivePictures? = nil
 }
 
 /// A stretch of a recording that matches a query (`Searcher.moments(of:queryVector:zGate:)`): its segments that stand
@@ -102,6 +105,14 @@ public struct SearchFilter: Sendable, Equatable {
     /// before anything is matched, counted or cut to the best, so it's never in a result or a count, and found by path,
     /// whatever the index knows of the file yet.
     public var photosOnly: Set<String>?
+    /// Only files with a picture rated sensitive at this position (the Sensitive filter): a picture, or a frame or a
+    /// still of a video (`sensitive_scores`).
+    public var sensitive: SensitivePosition?
+    /// Leaves out every file with a picture rated sensitive at this position, and every picture or video not rated yet
+    /// (not read, or with a picture the rating pass hasn't got to, or never read: too small, or unreadable): what an AI
+    /// app doesn't see while "Pictures rated sensitive" is off (`AIAccess.sensitive`), fail-safe as hidden Photos items
+    /// are. Left out before anything is matched, counted or cut to the best, as `photosOnly` is.
+    public var leavingOutSensitive: SensitivePosition?
 
     /// A box on the map, in degrees: south to north, west to east.
     public struct Area: Sendable, Equatable {
@@ -122,7 +133,7 @@ public struct SearchFilter: Sendable, Equatable {
 
     public var isEmpty: Bool {
         people.isEmpty && albums == nil && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
-            && paths == nil && area == nil && photosOnly == nil
+            && paths == nil && area == nil && photosOnly == nil && sensitive == nil && leavingOutSensitive == nil
     }
 
     /// A part of the query that keeps no file (`IN ()` isn't SQL).
@@ -183,6 +194,20 @@ public struct SearchFilter: Sendable, Equatable {
                 let list = try? JSONSerialization.data(withJSONObject: Array(photosOnly), options: .withoutEscapingSlashes)
                 values.append(.text(list.map { String(decoding: $0, as: UTF8.self) } ?? "[]"))
             }
+        }
+        if let sensitive {
+            parts.append("SELECT s.file FROM sensitive_scores JOIN segments s ON s.id = segment WHERE "
+                         + sensitive.condition)
+        }
+        if let leavingOutSensitive {
+            // A file that isn't a picture or a video has no picture to rate; one that is must have been read, and each
+            // of its pictures rated and not sensitive.
+            parts.append("""
+                SELECT id FROM files f WHERE f.kind NOT IN \(IndexStore.pictureKinds) OR (f.state IN \
+                \(IndexStore.readStates) AND NOT \(IndexStore.hasUnratedPicture) AND NOT EXISTS (
+                    SELECT 1 FROM sensitive_scores JOIN segments s ON s.id = segment
+                    WHERE s.file = f.id AND \(leavingOutSensitive.condition)))
+                """)
         }
         return parts.isEmpty ? nil : (parts.joined(separator: " INTERSECT "), values)
     }
@@ -422,7 +447,8 @@ public final class Searcher {
                                   segmentID: segmentID, loc: loc, locEnd: locEnd, excerpt: snippet ?? storedExcerpt,
                                   modified: row.modified, size: row.size, info: row.info, focus: focus,
                                   photos: try photosHit(file: file, path: row.path, segment: segmentID, kind: segment),
-                                  momentCount: try moments(ofFile: file, standouts[file] ?? []).count))
+                                  momentCount: try moments(ofFile: file, standouts[file] ?? []).count,
+                                  pictures: try pictures(file: file, kind: row.kind)))
         }
         return hits
     }
@@ -451,8 +477,14 @@ public final class Searcher {
             return SearchHit(path: row.path, kind: row.kind, score: 0, z: nil, cosine: nil, keywordRank: nil,
                              segment: segment.kind, segmentID: segment.id, loc: nil, locEnd: nil, excerpt: nil,
                              modified: row.modified, size: row.size, info: row.info,
-                             photos: try photosHit(file: file, path: row.path, segment: segment.id, kind: segment.kind))
+                             photos: try photosHit(file: file, path: row.path, segment: segment.id, kind: segment.kind),
+                             pictures: try pictures(file: file, kind: row.kind))
         }
+    }
+
+    /// What the detector said of a picture's or a video's pictures; nil for any other file.
+    private func pictures(file: Int64, kind: FileKind) throws -> SensitivePictures? {
+        [.image, .screenshot, .video].contains(kind) ? try store.sensitivePictures(ofFile: file) : nil
     }
 
     /// A file's row, as a hit shows it.

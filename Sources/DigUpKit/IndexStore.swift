@@ -226,13 +226,14 @@ public final class IndexStore {
     // MARK: The fork's tables
 
     /// The fork's own tables, for what Photos says about a library's files and where files were taken
-    /// (`createForkFacts`), are versioned apart from upstream's schema: `meta` "fork_photos_facts" says how many of
-    /// the fork's steps an index has had, each run once and in order, and `PRAGMA user_version` stays upstream's.
+    /// (`createForkFacts`) and how revealing its pictures are (`createSensitiveScores`), are versioned apart from
+    /// upstream's schema: `meta` "fork_photos_facts" says how many of the fork's steps an index has had, each run once
+    /// and in order, and `PRAGMA user_version` stays upstream's.
     /// Upstream owns those numbers: a fork's 6 would claim upstream's migration 6 had run when it hadn't. An upstream
     /// DigUp still opens the index; it doesn't read Photos libraries, so it removes their files, and the foreign keys
     /// take their facts with them. An index a later fork stepped further (a column added) is left as it is.
     static let forkFactsKey = "fork_photos_facts"
-    static let forkFactsVersion = 2
+    static let forkFactsVersion = 3
 
     /// An index already at upstream's current schema that hasn't had the fork's steps (made by upstream's DigUp, or by
     /// the fork before these tables): `migrate` gives an older one theirs, before upstream's own steps.
@@ -252,6 +253,7 @@ public final class IndexStore {
         guard from < Self.forkFactsVersion else { return }
         if from < 1 { try createForkFacts() }
         if from < 2 { try recreatePhotosAssets() }
+        if from < 3 { try createSensitiveScores() }
         try setMeta(Self.forkFactsKey, "\(Self.forkFactsVersion)")
     }
 
@@ -326,6 +328,26 @@ public final class IndexStore {
                 origin TEXT NOT NULL CHECK (origin IN ('camera', 'screenshot', 'saved', 'imported', 'unknown')),
                 origin_app TEXT,   -- the app that put it in the library, as Photos recorded it (bundle id); NULL when it didn't
                 camera TEXT        -- the device that took it, from the EXIF Photos kept ("iPhone 15 Pro"); NULL when none
+            );
+            """)
+    }
+
+    /// Fork step 3 (approved 2026-10-22: "yes to sensitive_scores"): what the sensitive-picture detector said about
+    /// each picture (`SensitiveLevels`), one row per segment that is a picture, `image` or `frame` (not a PDF page drawn
+    /// as a picture, `page_image`, for now). A segment without a row hasn't been rated: not yet, or its file is only in
+    /// iCloud. Per segment, not per file, because a video is many pictures; a file's answer is a query over its
+    /// segments. The indexer writes a picture's row when it reads the picture; reading a file again replaces its
+    /// segments, and the foreign key takes their rows with them. An index made before this gets its rows once, from
+    /// the rating pass (`Indexer.ratePictures`). Which model said so is `meta` "fork_sensitive_model"
+    /// (`adoptSensitiveModel`): rows of two models are never kept together.
+    private func createSensitiveScores() throws {
+        try db.execute("""
+            CREATE TABLE IF NOT EXISTS sensitive_scores(
+                segment INTEGER PRIMARY KEY REFERENCES segments(id) ON DELETE CASCADE,
+                low REAL NOT NULL CHECK (low BETWEEN 0 AND 1),         -- the model's probability of each level;
+                medium REAL NOT NULL CHECK (medium BETWEEN 0 AND 1),   -- neutral is what's left (1 - low - medium - high)
+                high REAL NOT NULL CHECK (high BETWEEN 0 AND 1),
+                CHECK (low + medium + high <= 1.0001)
             );
             """)
     }
@@ -678,16 +700,20 @@ public final class IndexStore {
     // MARK: Segments
 
     /// Adds a segment; `text` goes into keyword search (normalized, see `SearchText`), `vector` into meaning search.
+    /// Returns its id.
+    @discardableResult
     public func addSegment(file: Int64, kind: SegmentKind, modality: Modality, loc: Double? = nil, locEnd: Double? = nil,
-                           excerpt: String? = nil, text: String? = nil, vector: [Float]? = nil) throws {
+                           excerpt: String? = nil, text: String? = nil, vector: [Float]? = nil) throws -> Int64 {
         try db.run("INSERT INTO segments(file, kind, modality, loc, loc_end, excerpt, vec) VALUES(?, ?, ?, ?, ?, ?, ?)",
                    [.int(file), .text(kind.rawValue), .text(vector == nil ? Modality.none.rawValue : modality.rawValue),
                     .optional(loc), .optional(locEnd), .optional(excerpt),
                     vector.map { .blob(Vectors.half($0)) } ?? .null])
+        let id = db.lastInsertID
         if let text, !text.isEmpty {
             try db.run("INSERT INTO fts(rowid, name, body, original) VALUES(?, '', ?, ?)",
-                       [.int(db.lastInsertID)] + Self.keywordText(text))
+                       [.int(id)] + Self.keywordText(text))
         }
+        return id
     }
 
     /// `body` and `original` for keyword search: the normalized text, and the text as written if that differs.
@@ -1068,6 +1094,121 @@ public final class IndexStore {
         }
         return readings
     }
+
+    // MARK: Sensitive pictures
+
+    /// `meta` "fork_sensitive_model": the detector whose ratings `sensitive_scores` holds (`SensitiveModel.identity`).
+    public static let sensitiveModelKey = "fork_sensitive_model"
+    /// The segments that are pictures, which get a rating, as an SQL list.
+    static let pictureSegments = "('\(SegmentKind.image.rawValue)', '\(SegmentKind.frame.rawValue)')"
+    /// The kinds of files that are pictures or have them.
+    static let pictureKinds = "(\(sqlList([FileKind.image, .screenshot, .video])))"
+    /// The states of a file that was read (its segments are written).
+    static let readStates = "('done', 'partial')"
+
+    /// Makes `model` the one the ratings are from: another one's (or ratings no model is recorded for) are all
+    /// deleted first, and the rating pass rates every picture again (`Indexer.ratePictures`). Returns how many went.
+    @discardableResult
+    public func adoptSensitiveModel(_ model: String) throws -> Int {
+        guard try meta(Self.sensitiveModelKey) != model else { return 0 }
+        return try db.transaction {
+            var deleted = 0
+            try db.query("SELECT COUNT(*) FROM sensitive_scores") { deleted = Int($0.int(0)) }
+            try db.run("DELETE FROM sensitive_scores")
+            try setMeta(Self.sensitiveModelKey, model)
+            return deleted
+        }
+    }
+
+    /// Sets what the detector said of a picture segment, in place of what it had.
+    func setSensitive(_ levels: SensitiveLevels, ofSegment segment: Int64) throws {
+        try db.run("INSERT OR REPLACE INTO sensitive_scores(segment, low, medium, high) VALUES(?, ?, ?, ?)",
+                   [.int(segment), .double(levels.low), .double(levels.medium), .double(levels.high)])
+    }
+
+    /// A picture segment without a rating, of a file that was read: what the rating pass reads again.
+    struct UnratedPicture {
+        let segment: Int64
+        let kind: SegmentKind
+        /// When it's shown, in seconds: a frame of a video or a GIF.
+        let loc: Double?
+        /// Its place among its file's segments of its kind, from 0: a stills video's frames are its filmstrip's stills
+        /// in order (`Indexer.stills`), a GIF's are its frames as `ImageExtractor.animationFrames` reads them.
+        let place: Int
+    }
+
+    /// The picture segments without a rating, by file, in indexing order, of the files that were read. (The segments'
+    /// columns are named apart from the files' own.)
+    func unratedPictures() throws -> [(file: FileRecord, pictures: [UnratedPicture])] {
+        var found: [(file: FileRecord, pictures: [UnratedPicture])] = []
+        try db.query("""
+            SELECT \(Self.fileColumns), p.segment, p.segment_kind, p.at, p.place
+            FROM (SELECT id AS segment, file, kind AS segment_kind, loc AS at,
+                         ROW_NUMBER() OVER (PARTITION BY file, kind ORDER BY id) - 1 AS place
+                  FROM segments WHERE kind IN \(Self.pictureSegments)) p
+            JOIN files ON files.id = p.file
+            WHERE state IN \(Self.readStates) AND p.segment NOT IN (SELECT segment FROM sensitive_scores)
+            ORDER BY \(FileKind.indexingOrderSQL), mtime DESC, files.id, p.segment
+            """) { row in
+            let file = Self.record(row)
+            guard let kind = SegmentKind(rawValue: row.text(9) ?? "") else { return }
+            let picture = UnratedPicture(segment: row.int(8), kind: kind, loc: row.isNull(10) ? nil : row.double(10),
+                                         place: Int(row.int(11)))
+            if found.last?.file.id == file.id {
+                found[found.count - 1].pictures.append(picture)
+            } else {
+                found.append((file, [picture]))
+            }
+        }
+        return found
+    }
+
+    /// How many of the pictures read have a rating, and how many wait for one (`Indexer.ratePictures`).
+    public func sensitiveCounts() throws -> (rated: Int, waiting: Int) {
+        var counts = (rated: 0, waiting: 0)
+        try db.query("""
+            SELECT COUNT(r.segment), COUNT(*) - COUNT(r.segment) FROM segments s JOIN files f ON f.id = s.file
+            LEFT JOIN sensitive_scores r ON r.segment = s.id
+            WHERE s.kind IN \(Self.pictureSegments) AND f.state IN \(Self.readStates)
+            """) { counts = (Int($0.int(0)), Int($0.int(1))) }
+        return counts
+    }
+
+    /// What the detector said of each picture of the file `file`.
+    func sensitivePictures(ofFile file: Int64) throws -> SensitivePictures {
+        var pictures = SensitivePictures()
+        try db.query("""
+            SELECT s.id, s.kind, s.loc, r.segment IS NOT NULL, r.low, r.medium, r.high FROM segments s
+            LEFT JOIN sensitive_scores r ON r.segment = s.id
+            WHERE s.file = ? AND s.kind IN \(Self.pictureSegments) ORDER BY s.id
+            """, [.int(file)]) { row in
+            let picture = SensitivePictures.Picture(
+                segment: row.int(0), loc: row.isNull(2) ? nil : row.double(2),
+                levels: row.int(3) == 0 ? nil : SensitiveLevels(low: row.double(4), medium: row.double(5),
+                                                                 high: row.double(6)))
+            if row.text(1) == SegmentKind.image.rawValue { pictures.image = picture } else { pictures.frames.append(picture) }
+        }
+        return pictures
+    }
+
+    /// How many of the files a filter keeps are pictures or videos waiting for a rating: not read yet, or read with a
+    /// picture the rating pass hasn't got to. `digup mcp` keeps them from AI apps until they're rated
+    /// (`SearchFilter.leavingOutSensitive`), and says how many there are.
+    public func unratedFiles(keptBy filter: SearchFilter) throws -> Int {
+        let kept = filter.query
+        var count = 0
+        try db.query("""
+            SELECT COUNT(*) FROM files f WHERE f.kind IN \(Self.pictureKinds)
+            AND (f.state = 'pending' OR (f.state IN \(Self.readStates) AND \(Self.hasUnratedPicture)))
+            """ + (kept.map { " AND f.id IN (\($0.sql))" } ?? ""), kept?.values ?? []) { count = Int($0.int(0)) }
+        return count
+    }
+
+    /// The file `f` has a picture segment without a rating, as SQL.
+    static let hasUnratedPicture = """
+        EXISTS (SELECT 1 FROM segments s WHERE s.file = f.id AND s.kind IN \(pictureSegments)
+                AND s.id NOT IN (SELECT segment FROM sensitive_scores))
+        """
 
     // MARK: Locations
 

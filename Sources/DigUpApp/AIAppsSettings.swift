@@ -111,6 +111,10 @@ struct AIAppsSettings: View {
                 toggle(\.pictures, "Pictures themselves",
                        detail: "A small picture of a result (at most \(AIAccess.picturePixels) pixels) for apps "
                         + "that can look at one. It goes to the app's AI provider too.")
+                toggle(\.sensitive, "Pictures rated sensitive",
+                       detail: "Pictures and videos the detector rates sensitive, at Blur sensitive pictures' "
+                        + "position (General; Revealing while it's off), and the ones it hasn't rated yet. Off, AI apps "
+                        + "never see them.")
             } header: {
                 Text("What they may see")
             } footer: {

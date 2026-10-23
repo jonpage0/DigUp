@@ -464,9 +464,9 @@ final class PreviewPlayback {
         if placed.moment != nil { play(placed) }
     }
 
-    /// Picks one of Photos' stills of a video in iCloud (`row`) to show.
-    func pick(still: String, of row: ResultRow) {
-        picked = (Self.pickKey(row), row.showing(still: still))
+    /// Picks one of Photos' stills of a video in iCloud (`row`), the `index`th of its filmstrip, to show.
+    func pick(still: String, at index: Int, of row: ResultRow) {
+        picked = (Self.pickKey(row), row.showing(still: still, at: index))
     }
 
     /// `row` at the moment or still last picked for it, else as the search gave it.
@@ -565,7 +565,10 @@ struct MomentsSection: View {
             if row.photos?.reading == .stills {
                 if !filmstrip.isEmpty {
                     StillsStrip(filmstrip: filmstrip, matched: Set(moments.compactMap(\.still)),
-                                showing: shown.photos?.still, width: width, pick: pick(still:))
+                                showing: shown.photos?.still, width: width,
+                                hidden: { index in
+                                    SensitiveBlur.shared.hides(row.pictures?.levels(ofFrame: index), of: row.id)
+                                }, pick: pick(still:))
                 }
             } else if let duration {
                 MomentStrip(row: shown, moments: moments.filter { $0.start != nil }, duration: duration, width: width,
@@ -590,13 +593,16 @@ struct MomentsSection: View {
 
     private func isAt(_ moment: Moment) -> Bool { shown.isAt(moment, filmstrip: filmstrip) }
 
+    /// A click on a moment or a still shows it: blurred, it shows from then on (`SensitiveBlur`).
     private func pick(_ moment: Moment) {
+        SensitiveBlur.shared.show(row)
         PreviewPlayback.shared.pick(moment, of: row, filmstrip: filmstrip)
         picked()
     }
 
     private func pick(still: String) {
-        PreviewPlayback.shared.pick(still: still, of: row)
+        SensitiveBlur.shared.show(row)
+        PreviewPlayback.shared.pick(still: still, at: filmstrip.firstIndex(of: still) ?? 0, of: row)
         picked()
     }
 }
@@ -707,7 +713,13 @@ struct MomentStrip: View {
             if row.kind == .video {
                 ZStack {
                     Color.black.opacity(0.85)
-                    if let frame { Image(nsImage: frame).resizable().aspectRatio(contentMode: .fit) }
+                    if let frame {
+                        let hidden = SensitiveBlur.shared.hides(row.pictures?.frame(at: pointer.seconds)?.levels,
+                                                                of: row.id)
+                        Image(nsImage: frame.veiled(hidden)).resizable().interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                            .sensitiveCover(hidden, iconSize: 14)
+                    }
                 }
                 .frame(width: cardWidth - 8, height: (cardWidth - 8) * 9 / 16)
                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
@@ -733,6 +745,8 @@ struct StillsStrip: View {
     /// The still the preview shows.
     let showing: String?
     let width: CGFloat
+    /// Whether the still at this place is blurred (`SensitiveBlur`).
+    let hidden: (Int) -> Bool
     let pick: (String) -> Void
     private static let spacing: CGFloat = 4
 
@@ -752,7 +766,8 @@ struct StillsStrip: View {
     private func still(_ path: String, at index: Int, side: CGFloat) -> some View {
         let name = "Still \(index + 1) of \(filmstrip.count)" + (matched.contains(index) ? ", matched" : "")
         return VStack(spacing: 2) {
-            ThumbnailView(url: URL(fileURLWithPath: path), side: side)
+            ThumbnailView(url: URL(fileURLWithPath: path), side: side, veiled: hidden(index))
+                .sensitiveCover(hidden(index), iconSize: max(9, side / 4))
                 .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .strokeBorder(path == showing ? Color.accentColor : Color.primary.opacity(0.12),
                                   lineWidth: path == showing ? 2.5 : 0.5))

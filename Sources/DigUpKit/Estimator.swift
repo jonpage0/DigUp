@@ -13,6 +13,10 @@ public struct Costs: Sendable {
     public var videoSecond = 0.019       // a 70-token keyframe per shot (at most one per 3 s) + the soundtrack
     /// A stretch of code (2026-10-09: 258 Swift and Objective-C files, 1,245 stretches in 45 s with the model's start).
     public var codeStretch = 0.037
+    /// Rating a picture for how revealing it is (`PictureRater`), on top of reading and embedding it: a picture, a
+    /// screenshot, a video's keyframe, where the detector is installed. Measured on an M3 Max, not the M4 Pro
+    /// (2026-10-22, indexing the osxphotos test libraries: 17 pictures in 0.87 s, Core ML on the GPU).
+    public var sensitivePicture = 0.051
     public init() {}
 }
 
@@ -66,15 +70,20 @@ public struct Estimate: Sendable {
 /// First-index time from metadata alone: counts, PDF page counts and media durations come from Spotlight (falling
 /// back to the file header when Spotlight hasn't seen a file yet), so nothing is decoded.
 public enum Estimator {
-    public static func estimate(_ candidates: [Candidate], options: IndexOptions, costs: Costs = Costs()) -> Estimate {
+    /// `ratesPictures`: the sensitive-picture detector is installed, so each picture and each video's keyframes are
+    /// rated as they're read (`Costs.sensitivePicture`; a keyframe every `frameInterval` seconds at the most, fewer
+    /// where a shot goes on).
+    public static func estimate(_ candidates: [Candidate], options: IndexOptions, costs: Costs = Costs(),
+                                ratesPictures: Bool = false) -> Estimate {
         var estimate = Estimate()
+        let rating = ratesPictures ? costs.sensitivePicture : 0
         for file in candidates {
             estimate.files[file.kind, default: 0] += 1
             let before = estimate.seconds
             defer { estimate.kindSeconds[file.kind, default: 0] += estimate.seconds - before }
             switch file.kind {
-            case .image: estimate.seconds += costs.image
-            case .screenshot: estimate.seconds += costs.screenshot
+            case .image: estimate.seconds += costs.image + rating
+            case .screenshot: estimate.seconds += costs.screenshot + rating
             case .pdf:
                 let total = pages(of: file.path)
                 let all = min(total, options.maxPages)
@@ -102,7 +111,7 @@ public enum Estimator {
             case .video:
                 let seconds = duration(of: file.path)
                 estimate.videoSeconds += seconds
-                estimate.seconds += seconds * costs.videoSecond
+                estimate.seconds += seconds * (costs.videoSecond + rating / options.frameInterval)
             case .code:
                 // A notebook's file is mostly its outputs, which aren't read: a guess at its cells' share.
                 let characters = file.path.lowercased().hasSuffix(".ipynb") ? file.size / 8 : file.size
@@ -122,8 +131,10 @@ public enum Estimator {
     /// Subfolders are named under `folder` as given, though the walk reports real paths (/private/var for /var). A Photos
     /// library has none to show: its own folders (originals, resources) aren't for choosing among.
     public static func estimates(bySubfolder candidates: [Candidate], of folder: String, options: IndexOptions,
-                                 costs: Costs = Costs()) -> [String: Estimate] {
-        if PhotosLibrary.isLibrary(folder) { return [folder: estimate(candidates, options: options, costs: costs)] }
+                                 costs: Costs = Costs(), ratesPictures: Bool = false) -> [String: Estimate] {
+        if PhotosLibrary.isLibrary(folder) {
+            return [folder: estimate(candidates, options: options, costs: costs, ratesPictures: ratesPictures)]
+        }
         let prefix = folder.hasSuffix("/") ? folder : folder + "/"
         let real = FolderSelection.realPath(folder) + "/"
         var groups: [String: [Candidate]] = [:]
@@ -133,6 +144,6 @@ public enum Estimator {
             let key = rest.flatMap { rest in rest.firstIndex(of: "/").map { prefix + rest[..<$0] } } ?? folder
             groups[key, default: []].append(file)
         }
-        return groups.mapValues { estimate($0, options: options, costs: costs) }
+        return groups.mapValues { estimate($0, options: options, costs: costs, ratesPictures: ratesPictures) }
     }
 }
