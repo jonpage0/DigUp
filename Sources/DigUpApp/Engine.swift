@@ -1080,12 +1080,16 @@ nonisolated final class Engine: @unchecked Sendable {
 
     /// The query's vector with its required words', if all of them are cached.
     private func cached(_ text: String, code: Bool) -> QueryVector? {
-        let parts = Self.parts(of: text, code: code)
-        guard let query = vectorCache[Self.cacheKey(parts.text, code: code)] else { return nil }
+        Self.assembled(Self.parts(of: text, code: code)) { vectorCache[Self.cacheKey($0, code: code)] }
+    }
+
+    /// The query's vector with its required words' (`parts`), each part's from `vector`; nil when one has none.
+    private static func assembled(_ parts: RequiredWords, _ vector: (String) -> QueryVector?) -> QueryVector? {
+        guard let query = vector(parts.text) else { return nil }
         var required: [String: [Float]] = [:]
         for term in parts.terms {
-            guard let vector = vectorCache[Self.cacheKey(term, code: code)] else { return nil }
-            required[term] = vector.values
+            guard let found = vector(term) else { return nil }
+            required[term] = found.values
         }
         return QueryVector(values: query.values, source: query.source, required: required)
     }
@@ -1104,28 +1108,34 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
-    /// Embeds what isn't cached yet of the query and its required words, in one go.
+    /// Embeds what isn't cached yet of the query and its required words, in one go. The answer is made from the parts
+    /// read from the cache and the ones just embedded: caching a new part may push out the oldest one, and that may be
+    /// one of this query's.
     private func vector(for text: String, code: Bool) -> QueryVector? {
         if let cached = cached(text, code: code) { return cached }
         guard let worker = runningEncoder() else { return nil }
         defer { scheduleIdleExit() }
+        let parts = Self.parts(of: text, code: code)
+        var found: [String: QueryVector] = [:]
+        for part in parts.embedded { found[part] = vectorCache[Self.cacheKey(part, code: code)] }
         var missing: [String] = []
-        for part in Self.parts(of: text, code: code).embedded
-        where vectorCache[Self.cacheKey(part, code: code)] == nil && !missing.contains(part) {
+        for part in parts.embedded where found[part] == nil && !missing.contains(part) {
             missing.append(part)
         }
         do {
             let vectors = try worker.embedTexts(missing.map { code ? Prompts.codeQuery($0) : Prompts.query($0) })
             let source = worker.info.vectorSource
             for (part, values) in zip(missing, vectors) {
-                vectorCache[Self.cacheKey(part, code: code)] = QueryVector(values: values, source: source)
+                let vector = QueryVector(values: values, source: source)
+                found[part] = vector
+                vectorCache[Self.cacheKey(part, code: code)] = vector
             }
         } catch {
             log("encoder: \(error)")
             stopEncoder()   // the next query starts a new one
             return nil
         }
-        return cached(text, code: code)
+        return Self.assembled(parts) { found[$0] }
     }
 
     private func runningEncoder() -> EmbeddingWorker? {

@@ -280,28 +280,33 @@ final class SearchService: @unchecked Sendable {   // its state is guarded by `l
     // MARK: The query encoder
 
     /// The query's vector and each of its required words' (`RequiredWords`: the word alone, as a query of its own),
-    /// cached, or nil when the encoder can't run: keyword results still work. Code's `+` is literal.
+    /// cached, or nil when the encoder can't run: keyword results still work. Code's `+` is literal. The answer is made
+    /// from the parts read from the cache and the ones just embedded, and all of them are cached again after the cache
+    /// is emptied to make room: emptying it never takes a part this request needs.
     private func vectors(for text: String, code: Bool) -> (query: [Float]?, required: [String: [Float]])? {
         lastQuery = Date()
         let words = code ? RequiredWords(literal: text) : RequiredWords(text)
         func key(_ part: String) -> String { (code ? "code\u{0}" : "") + part }
+        var found: [String: [Float]] = [:]
+        for part in words.embedded { found[part] = vectorCache[key(part)] }
         var missing: [String] = []
-        for part in words.embedded where vectorCache[key(part)] == nil && !missing.contains(part) {
+        for part in words.embedded where found[part] == nil && !missing.contains(part) {
             missing.append(part)
         }
         if !missing.isEmpty {
             guard let encoder = runningEncoder() else { return nil }
             do {
                 let values = try encoder.embedTexts(missing.map { code ? Prompts.codeQuery($0) : Prompts.query($0) })
+                for (part, vector) in zip(missing, values) { found[part] = vector }
                 if vectorCache.count > 256 { vectorCache.removeAll() }
-                for (part, vector) in zip(missing, values) { vectorCache[key(part)] = vector }
+                for (part, vector) in found { vectorCache[key(part)] = vector }
             } catch {
                 FileHandle.standardError.write(Data("encoder: \(error)\n".utf8))
                 stopEncoder()   // the next query starts a new one
                 return nil
             }
         }
-        let embedded = words.embedded.compactMap { vectorCache[key($0)] }
+        let embedded = words.embedded.compactMap { found[$0] }
         return embedded.count == words.embedded.count ? words.vectors(embedded) : nil
     }
 

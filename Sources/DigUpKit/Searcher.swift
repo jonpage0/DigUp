@@ -340,8 +340,9 @@ public final class Searcher {
     /// filter keeps instead, newest first (`browse`).
     ///
     /// Required words typed in it (`+beach`, `+"a phrase"`: `RequiredWords`) keep only the files that have each of them,
-    /// found as `filesHaving` finds them, before anything is ranked or cut to the best; the ranking is the query's, the
-    /// marks taken out (as the caller embeds it for `queryVector`). `requiredVectors`: each term embedded alone, by the
+    /// found as `filesHaving` finds them: the results are ranked by the whole query with the marks removed (as the
+    /// caller embeds it for `queryVector`), over the files that have every required term, narrowed the way a filter
+    /// narrows, before the keyword matches are cut to the best. `requiredVectors`: each term embedded alone, by the
     /// term as `RequiredWords.terms` has it; a term without one is found by its words only. Code's `+` is literal.
     public func search(_ query: String, queryVector: [Float]?, requiredVectors: [String: [Float]] = [:],
                        kinds: Set<FileKind>? = nil, filter: SearchFilter = SearchFilter(), limit: Int = 20,
