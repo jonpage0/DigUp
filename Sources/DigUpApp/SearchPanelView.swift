@@ -8,6 +8,13 @@ struct SearchPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if controller.showsRequiredTip {
+                RequiredWordTip()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 53)   // under the words, past the magnifier
+                    .padding(.top, -10)
+                    .padding(.bottom, 8)
+            }
             if controller.phase != .empty {
                 Divider()
                 content
@@ -31,13 +38,16 @@ struct SearchPanelView: View {
                 .foregroundStyle(Brand.gradient)
                 .frame(width: 24)
                 .help(controller.isCode ? "Searching your code" : "")
-            // With code search on, one example is code's: nothing else in the panel shows "code:".
-            SearchField(text: $controller.query, fontSize: 22,
-                        placeholder: controller.model.hasCode
-                            ? "Describe it: “zebra in a video”, “code: retry with backoff”…"
-                            : "Describe it: “payment error screenshot”, “zebra in a video”…") {
-                controller.field = $0
+            ForEach(controller.required, id: \.self) { term in
+                RequiredTokenView(term: term) { controller.unrequire(term) }
             }
+            // With code search on, one example is code's: nothing else in the panel shows "code:".
+            SearchField(text: Binding(get: { controller.query }, set: { controller.typed($0) }), fontSize: 22,
+                        placeholder: !controller.required.isEmpty ? "Add words…"
+                            : controller.model.hasCode ? "Describe it: “zebra in a video”, “code: retry with backoff”…"
+                            : "Describe it: “payment error screenshot”, “zebra in a video”…",
+                        onMake: { controller.field = $0 },
+                        onRequire: controller.isCode ? nil : { controller.require($0) })
             if let saved = controller.savedSuggestion {
                 SavedSearchSuggestion(name: saved.name) { controller.openSavedSuggestion() }
             }
@@ -75,7 +85,9 @@ struct SearchPanelView: View {
                     Text("Try saying what the code does, or a name that's in it.").foregroundStyle(.secondary)
                 } else {
                     Text("No good matches").font(.system(size: 15, weight: .semibold))
-                    Text("Try what you'd see or hear in it, or words you remember from it.")
+                    Text(RequiredWords(controller.markedQuery).terms.isEmpty
+                         ? "Try what you'd see or hear in it, or words you remember from it."
+                         : "None has every word it must have: take one off, or try other words.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -409,10 +421,14 @@ struct SearchField: NSViewRepresentable {
     var onMake: (NSTextField) -> Void = { _ in }
     /// The field got the cursor (true) or lost it (false).
     var onFocus: (Bool) -> Void = { _ in }
+    /// "Require “beach”" on a right-click on a word of the field (`RequiredWords`): makes it required. Nil: not offered
+    /// (a search of code, where `+` is literal).
+    var onRequire: ((String) -> Void)? = nil
 
     func makeNSView(context: Context) -> NSTextField {
         let field = FocusReportingField()
         field.onFocus = onFocus
+        field.onRequire = onRequire
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
@@ -430,10 +446,20 @@ struct SearchField: NSViewRepresentable {
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.text = $text
         (field as? FocusReportingField)?.onFocus = onFocus
+        (field as? FocusReportingField)?.onRequire = onRequire
         // While an input method composes (Korean, Japanese, Chinese), the field is ahead of `text` until the syllable
         // is committed, and writing `text` back would cut the composition short ("사어ㅂ" typed for "사업").
         if (field.currentEditor() as? NSTextView)?.hasMarkedText() != true, field.stringValue != text {
+            // Changed while it's being edited (a `+beach ` typed became a token): the cursor stays as far from the end
+            // as it was, and all of it stays selected if it was.
+            let before = (field.stringValue as NSString).length
+            let selected = field.currentEditor()?.selectedRange
             field.stringValue = text
+            if let selected, let editor = field.currentEditor() {
+                let length = (text as NSString).length
+                editor.selectedRange = before > 0 && selected.length == before ? NSRange(location: 0, length: length)
+                    : NSRange(location: max(0, length - (before - selected.upperBound)), length: 0)
+            }
         }
         if field.placeholderString != placeholder { field.placeholderString = placeholder }
     }
@@ -454,9 +480,11 @@ struct SearchField: NSViewRepresentable {
     }
 }
 
-/// A text field that says when it gets the cursor and when it gives it up (its editing ends).
+/// A text field that says when it gets the cursor and when it gives it up (its editing ends), and offers to require a
+/// word of it on a right-click.
 final class FocusReportingField: NSTextField {
     var onFocus: (Bool) -> Void = { _ in }
+    var onRequire: ((String) -> Void)?
 
     override func becomeFirstResponder() -> Bool {
         let became = super.becomeFirstResponder()
@@ -467,6 +495,21 @@ final class FocusReportingField: NSTextField {
     override func textDidEndEditing(_ notification: Notification) {
         super.textDidEndEditing(notification)
         onFocus(false)
+    }
+
+    /// A right-click while it's edited: its field editor asks its delegate, this field, for the menu. "Require “beach”"
+    /// comes first, for the words selected, or the word clicked (`RequiredWords.term(selected:)`).
+    @objc(textView:menu:forEvent:atIndex:)
+    func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at index: Int) -> NSMenu? {
+        guard let onRequire else { return menu }
+        var range = view.selectedRange()
+        if range.length == 0 {
+            range = view.selectionRange(forProposedRange: NSRange(location: index, length: 0), granularity: .selectByWord)
+        }
+        guard let term = RequiredWords.term(selected: (view.string as NSString).substring(with: range)) else { return menu }
+        menu.insertItem(ActionMenuItem("Require “\(term)”") { onRequire(term) }, at: 0)
+        menu.insertItem(.separator(), at: 1)
+        return menu
     }
 }
 

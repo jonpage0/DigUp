@@ -461,8 +461,9 @@ private struct SensitiveSettings: View {
     }
 }
 
-/// Shortcuts: the one that opens DigUp from any app, and the keys for what you do with a result, in the panel and the
-/// window (`SearchPanelController.handle`, `SearchWindowController.handle`, the preview's buttons).
+/// Shortcuts: the one that opens DigUp from any app, the keys for what you do with a result, in the panel and the
+/// window (`SearchPanelController.handle`, `SearchWindowController.handle`, the preview's buttons), and what can be
+/// typed in the search field besides words (`RequiredWords`).
 private struct ShortcutsSettings: View {
     @Bindable var state: SettingsState
 
@@ -494,7 +495,7 @@ private struct ShortcutsSettings: View {
             action: "Only screenshots, images, documents, video or audio"),
         Key(caps: ["⌘", "7"], spoken: "Command 7", action: "Code (when code search is on)"),
         Key(caps: ["Tab"], spoken: "Tab", action: "Take the suggested filter (a person, an album) for the words you typed"),
-        Key(caps: ["⌫"], spoken: "Delete", action: "With nothing typed, take the last filter off"),
+        Key(caps: ["⌫"], spoken: "Delete", action: "With nothing typed, take the last must-have word or filter off"),
         Key(caps: ["⌘", "S"], spoken: "Command S",
             action: "Save this search, with its filters (the Saved menu, the bookmark beside the field, opens it again)"),
         Key(caps: ["⌘", ","], spoken: "Command comma", action: "Settings"),
@@ -505,6 +506,14 @@ private struct ShortcutsSettings: View {
         Key(caps: ["Tab"], spoken: "Tab",
             action: "Open the saved search whose name you're typing in the search window (↩ too, before you've "
                 + "arrowed to a result)"),
+        Key(caps: ["⌫"], spoken: "Delete", action: "With nothing typed, take the last must-have word off"),
+    ]
+
+    /// What the search field reads besides words: a required word or phrase (`RequiredWords`).
+    private static let syntax: [(typed: String, meaning: String)] = [
+        ("+beach", "Every result must have the word: in its words (its name, its text, what Photos knows, what's "
+            + "said) or by what it shows. All the words still rank the results."),
+        ("+\"red car\"", "The same for a phrase: its words one after another."),
     ]
 
     var body: some View {
@@ -521,6 +530,30 @@ private struct ShortcutsSettings: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+            }
+            // What can be typed, near the top: it's how a search is made, so it shouldn't need a scroll to find.
+            Section {
+                ForEach(Self.syntax, id: \.typed) { item in
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(item.typed)
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(width: 96, alignment: .leading)
+                        Text(item.meaning)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("\(item.typed): \(item.meaning)")
+                }
+            } header: {
+                Text("Search syntax")
+            } footer: {
+                Text("A word that must be there shows as “must have” in the search field (its × takes it off). To make "
+                     + "one required, you can also select it in the field and right-click: Require.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             keys(Self.results, header: "With a result selected, in the panel and the window")
             keys(Self.window, header: "In the search window")

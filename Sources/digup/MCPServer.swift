@@ -499,17 +499,20 @@ final class MCPServer {
                         prompt: (String) -> String) throws -> Outcome {
         let searcher = try open.current()
         var note: String?
-        var vector: [Float]?
+        var vectors: (query: [Float]?, required: [String: [Float]]) = (nil, [:])
         if !query.isEmpty, searcher.vectorCount > 0 {
+            // Required words (`+beach`) are embedded alone too; code's `+` is literal.
+            let words = searcher.isCode ? RequiredWords(literal: query) : RequiredWords(query)
             do {
-                vector = try queryVectors([query], searcher: searcher, encoder: try runningEncoder(),
-                                          prompt: prompt).first
+                vectors = words.vectors(try queryVectors(words.embedded, searcher: searcher,
+                                                         encoder: try runningEncoder(), prompt: prompt))
             } catch {
                 note = "Searched by words only: DigUp's model can't search by meaning now (\(error))."
             }
         }
         let hits = try (query.isEmpty ? searcher.browse(filter, kinds: kinds, limit: limit)
-                        : searcher.search(query, queryVector: vector, kinds: kinds, filter: filter, limit: limit))
+                        : searcher.search(query, queryVector: vectors.query, requiredVectors: vectors.required,
+                                          kinds: kinds, filter: filter, limit: limit))
             .filter { FileManager.default.fileExists(atPath: $0.path) }
         let places = try open.store.locations(of: hits.map(\.path))
         var fields: [String: Any] = ["results": hits.map { Self.describe($0, place: places[$0.path]?.place) }]
@@ -916,7 +919,9 @@ final class MCPServer {
                     + "words: documents, PDFs, pictures, screenshots, audio and video, and, when the user allows it, "
                     + "Photos libraries and code. Each result says where the file is, why it matched (\"Matches the "
                     + "text on page 3\"), the matching words, and when and where it was taken. Without words, a kind "
-                    + "or the filters list what they keep, newest first.",
+                    + "or the filters list what they keep, newest first. A + before a word or a quoted phrase in the "
+                    + "query (+beach, +\"red car\") keeps only results that have it, in their words or by what they "
+                    + "show.",
                  properties: searchProperties),
             tool("read_text", title: "Read a file's words",
                  description: "The words DigUp read from one file search_files returned: a document's text, a PDF's "

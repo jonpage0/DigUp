@@ -55,6 +55,8 @@ nonisolated struct AppSettings: Sendable {
     /// "Blur sensitive pictures" (Settings → General): off at first ("optional blurring", Jon, 2026-10-21). Where it's
     /// set is also what the Sensitive filter keeps (Revealing while it's off) and what AI apps are kept from.
     var blurSensitive: SensitivePosition
+    /// A word was made required once (`+beach`, `RequiredWords`): the search field's tip about it stops showing.
+    var requiredWordUsed: Bool
 
     static let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/DigUp")
@@ -101,7 +103,8 @@ nonisolated struct AppSettings: Sendable {
             myDevicesAdded: defaults.stringArray(forKey: AppDefaults.myDevicesAdded) ?? [],
             myDevicesRemoved: defaults.stringArray(forKey: AppDefaults.myDevicesRemoved) ?? [],
             aiAccess: AIAccess(defaults),
-            blurSensitive: SensitivePosition(defaults))
+            blurSensitive: SensitivePosition(defaults),
+            requiredWordUsed: defaults.bool(forKey: "requiredWordUsed"))
     }
 
     /// A list of folders: a plist array, or paths joined with ":" (the form launch arguments use).
@@ -172,6 +175,10 @@ nonisolated struct AppSettings: Sendable {
 
     static func save(blurSensitive: SensitivePosition) {
         defaults.set(blurSensitive.rawValue, forKey: AppDefaults.blurSensitive)
+    }
+
+    static func saveRequiredWordUsed() {
+        defaults.set(true, forKey: "requiredWordUsed")
     }
 
     /// The defaults suite this run keeps its settings in (`-defaultsSuite`), nil for the app's own domain: an AI app's

@@ -81,10 +81,12 @@ nonisolated struct EngineStatus: Sendable, Equatable {
 ///
 /// The folders can change while it runs (`setFolders`): the watcher follows, and the helper restarts with them.
 nonisolated final class Engine: @unchecked Sendable {
-    /// A query's vector and the model that made it (vectors from different models can't be compared).
+    /// A query's vector and the model that made it (vectors from different models can't be compared), with each of its
+    /// required words' (`RequiredWords`: the word embedded alone), by the word.
     struct QueryVector: Sendable {
         let values: [Float]
         let source: String
+        var required: [String: [Float]] = [:]
     }
 
     let indexDirectory: URL
@@ -843,22 +845,23 @@ nonisolated final class Engine: @unchecked Sendable {
     /// shows while the query encoder starts. Files that are gone (deleted since the last sync, or on a drive that's
     /// unplugged) are left out.
     /// `code`: the code index (its own folders), never anything else. `filter`: only files with these Photos facts or
-    /// inside this area of the map; with no words it lists the files it keeps (`Searcher.search`).
+    /// inside this area of the map; with no words it lists the files it keeps (`Searcher.search`). Required words
+    /// marked in `text` (`+beach`) are kept to by their vectors in `vector` too (`embedQuery`), else by their words.
     func search(_ text: String, vector: QueryVector?, prefixLast: Bool, kinds: Set<FileKind>? = nil,
                 filter: SearchFilter = SearchFilter(), limit: Int = 40, code: Bool = false) async -> [SearchHit] {
         if code { return await searchCode(text, vector: vector, prefixLast: prefixLast, limit: limit) }
         return await withCheckedContinuation { continuation in
             searchQueue.async { [self] in
-                var values = vector?.values
+                var values = vector?.values, required = vector?.required ?? [:]
                 if let vector, let indexed = searcher?.vectorSource, indexed != vector.source {
                     if !warnedAboutSource {
                         log("meaning search is off: the index was built with \(indexed), the encoder is \(vector.source)")
                         warnedAboutSource = true
                     }
-                    values = nil
+                    (values, required) = (nil, [:])
                 }
-                let hits = try? searcher?.search(text, queryVector: values, kinds: kinds, filter: filter, limit: limit,
-                                                 prefixLast: prefixLast)
+                let hits = try? searcher?.search(text, queryVector: values, requiredVectors: required, kinds: kinds,
+                                                 filter: filter, limit: limit, prefixLast: prefixLast)
                 // Only files that are searched (`FolderSelection`'s rule, as the crawler walks them) and of types not
                 // skipped: a removed folder's rows (or a newly skipped type's) can outlive it until a helper syncs
                 // (indexing was paused, or the app quit first).
@@ -1070,13 +1073,36 @@ nonisolated final class Engine: @unchecked Sendable {
     /// A query's vector depends on its prompt: a search of code (`Prompts.codeQuery`) or of everything else.
     private static func cacheKey(_ text: String, code: Bool) -> String { code ? "code\u{0}" + text : text }
 
+    /// The texts a query's vector is made of: the query with its required words' marks taken out, then each required
+    /// word alone (`RequiredWords.embedded`), each a query of its own, cached as one ("beach" alone is the query
+    /// "beach"). Code's query as it is: its `+` is literal.
+    private static func parts(of text: String, code: Bool) -> RequiredWords {
+        code ? RequiredWords(literal: text) : RequiredWords(text)
+    }
+
+    /// The query's vector with its required words', if all of them are cached.
+    private func cached(_ text: String, code: Bool) -> QueryVector? {
+        Self.assembled(Self.parts(of: text, code: code)) { vectorCache[Self.cacheKey($0, code: code)] }
+    }
+
+    /// The query's vector with its required words' (`parts`), each part's from `vector`; nil when one has none.
+    private static func assembled(_ parts: RequiredWords, _ vector: (String) -> QueryVector?) -> QueryVector? {
+        guard let query = vector(parts.text) else { return nil }
+        var required: [String: [Float]] = [:]
+        for term in parts.terms {
+            guard let found = vector(term) else { return nil }
+            required[term] = found.values
+        }
+        return QueryVector(values: query.values, source: query.source, required: required)
+    }
+
     /// The query's vector, or nil when the encoder can't run (keyword results still work). Also nil, at once, for
     /// text that's no longer the newest typed: its results would be thrown away.
     func embedQuery(_ text: String, code: Bool = false) async -> QueryVector? {
         let key = Self.cacheKey(text, code: code)
         return await withCheckedContinuation { continuation in
             encoderQueue.async { [self] in
-                if vectorCache[key] == nil, let newest = lock.withLock({ newestTyped }), newest != key {
+                if cached(text, code: code) == nil, let newest = lock.withLock({ newestTyped }), newest != key {
                     return continuation.resume(returning: nil)
                 }
                 continuation.resume(returning: vector(for: text, code: code))
@@ -1084,21 +1110,34 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
+    /// Embeds what isn't cached yet of the query and its required words, in one go. The answer is made from the parts
+    /// read from the cache and the ones just embedded: caching a new part may push out the oldest one, and that may be
+    /// one of this query's.
     private func vector(for text: String, code: Bool) -> QueryVector? {
-        let key = Self.cacheKey(text, code: code)
-        if let cached = vectorCache[key] { return cached }
+        if let cached = cached(text, code: code) { return cached }
         guard let worker = runningEncoder() else { return nil }
         defer { scheduleIdleExit() }
+        let parts = Self.parts(of: text, code: code)
+        var found: [String: QueryVector] = [:]
+        for part in parts.embedded { found[part] = vectorCache[Self.cacheKey(part, code: code)] }
+        var missing: [String] = []
+        for part in parts.embedded where found[part] == nil && !missing.contains(part) {
+            missing.append(part)
+        }
         do {
-            let values = try worker.embedTexts([code ? Prompts.codeQuery(text) : Prompts.query(text)]).first ?? []
-            let vector = QueryVector(values: values, source: worker.info.vectorSource)
-            vectorCache[key] = vector
-            return vector
+            let vectors = try worker.embedTexts(missing.map { code ? Prompts.codeQuery($0) : Prompts.query($0) })
+            let source = worker.info.vectorSource
+            for (part, values) in zip(missing, vectors) {
+                let vector = QueryVector(values: values, source: source)
+                found[part] = vector
+                vectorCache[Self.cacheKey(part, code: code)] = vector
+            }
         } catch {
             log("encoder: \(error)")
             stopEncoder()   // the next query starts a new one
             return nil
         }
+        return Self.assembled(parts) { found[$0] }
     }
 
     private func runningEncoder() -> EmbeddingWorker? {
