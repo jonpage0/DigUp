@@ -207,7 +207,9 @@ a file through moves and renames on its disk.
 
 A result whose original is only in iCloud has Download Original under its preview: Photos gets the original from your
 iCloud and keeps it in the library, as when you open it in Photos, and DigUp then reads the original under the same
-result (a video by its frames and sound). DigUp downloads nothing by itself.
+result (a video by its frames and sound). Space on a video that's only in iCloud does the same once Quick Look has
+stayed on it for a moment (arrowing past videos downloads none of them): Quick Look shows its stills meanwhile, with
+how the download is going in their title, then plays the video. DigUp downloads nothing by itself.
 
 DigUp reads the library through [osxphotos](https://github.com/RhetTbull/osxphotos), which needs installing once:
 `uv tool install osxphotos` (or `pipx install osxphotos`). DigUp looks for it in `~/.local/bin`, Homebrew's and
@@ -221,7 +223,7 @@ What it reads of a library, and what it leaves alone:
   long side for a photo, as many as DigUp gives the model anyway. A video that's only in iCloud is read from what Photos
   keeps of it on this Mac: the stills of Photos' filmstrip of it (six or so, each found like a frame of the video,
   though they carry no time; the preview shows the one that matched, the search window's preview lines them all up with
-  the ones that matched marked, and Space shows them all, starting at that one),
+  the ones that matched marked, and Space shows them all, starting at that one, until it has downloaded the video),
   else one still of it; a video Photos keeps nothing of is left out until it's on this Mac. A picture whose file
   changes (downloaded, edited) stays one result, with all Photos says about it, and is read again.
 - the words in a picture are the ones Photos read in it, kept in its catalog, so DigUp doesn't read each screenshot

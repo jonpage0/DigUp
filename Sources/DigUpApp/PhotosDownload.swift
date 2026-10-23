@@ -31,8 +31,8 @@ final class PhotosDownloads {
 
     func state(of uuid: String) -> State? { states[uuid] }
 
-    /// The file of a video downloaded since the app started, if PhotoKit gave one (a slow-motion video comes as a
-    /// composition with no single file).
+    /// The file of a video downloaded since the app started: the version Photos shows, or for a slow-motion video, which
+    /// PhotoKit hands over as a composition with no single file, its original (played at the speed it was recorded).
     func video(of uuid: String) -> URL? { videos[uuid] }
 
     /// Starts the download (once at a time per item); `then` runs when it ends, however it ends.
@@ -85,17 +85,35 @@ final class PhotosDownloads {
         }
     }
 
+    /// What PhotoKit gave for one version of a video: its file, a video with no single file, or why it gave nothing.
+    private enum Video: Sendable {
+        case file(URL)
+        case noFile
+        case failed(String)
+    }
+
     private nonisolated static func video(_ asset: PHAsset, _ progress: @escaping @Sendable (Double) -> Void) async
         -> (State, URL?) {
+        switch await request(asset, .current, progress) {
+        case .file(let url): return (.done, url)
+        case .failed(let why): return (.failed(why), nil)
+        case .noFile:
+            if case .file(let url) = await request(asset, .original, progress) { return (.done, url) }
+            return (.done, nil)
+        }
+    }
+
+    private nonisolated static func request(_ asset: PHAsset, _ version: PHVideoRequestOptionsVersion,
+                                            _ progress: @escaping @Sendable (Double) -> Void) async -> Video {
         let options = PHVideoRequestOptions()
-        options.version = .current
+        options.version = version
         options.deliveryMode = .highQualityFormat
         options.isNetworkAccessAllowed = true
         options.progressHandler = { value, _, _, _ in progress(value) }
         return await withCheckedContinuation { continuation in
             PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { video, _, info in
-                continuation.resume(returning: video != nil ? (.done, (video as? AVURLAsset)?.url)
-                                                            : (.failed(Self.reason(info)), nil))
+                guard let video else { return continuation.resume(returning: .failed(Self.reason(info))) }
+                continuation.resume(returning: (video as? AVURLAsset).map { .file($0.url) } ?? .noFile)
             }
         }
     }
