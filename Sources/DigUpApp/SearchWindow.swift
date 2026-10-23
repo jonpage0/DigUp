@@ -548,11 +548,9 @@ final class SearchModel {
         return (parts.isEmpty ? shownTokens.map(\.title) : parts).joined(separator: " · ")
     }
 
-    /// What a search saved now keeps: "“+beach” · Images · Tatiana Rotari · In the map's area".
+    /// What a search saved now keeps (`SavedSearch.summary`): "“+beach” · Images · Tatiana Rotari · In the map's area".
     var savedSummary: String {
-        let words = markedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        return ((words.isEmpty ? [] : ["“\(words)”"]) + [filter?.title ?? "All kinds"] + shownTokens.map(\.title))
-            .joined(separator: " · ")
+        SavedSearch.summary(query: markedQuery, kind: filter, filters: shownTokens.map(\.title))
     }
 
     /// Puts a saved search in the window and runs it: its words (the required ones as tokens), kind, tokens and map

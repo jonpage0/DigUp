@@ -987,9 +987,10 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
-    /// Every moment of the recording at `path` that matches `text` (`Searcher.moments(of:text:queryVector:zGate:)`),
-    /// best first, for the preview. Without a query vector, or with one of another model than the index's (as `search`
-    /// finds them), only what's said in it can match, by its words.
+    /// Every moment of the recording at `path` that matches `text`
+    /// (`Searcher.moments(of:text:queryVector:filter:zGate:)`), best first, for the preview, which leaves nothing out.
+    /// Without a query vector, or with one of another model than the index's (as `search` finds them), only what's said
+    /// in it can match, by its words.
     func moments(of path: String, matching text: String) async -> [Moment] {
         let vector = await embedQuery(text)
         return await withCheckedContinuation { continuation in

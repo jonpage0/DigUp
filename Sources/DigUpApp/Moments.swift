@@ -36,13 +36,11 @@ extension ResultRow {
         momentCount > 1 ? "\(momentCount) moments" : nil
     }
 
-    /// Whether this result is at `moment`: the one it matched at, or the one picked.
+    /// Whether this result is at `moment`: the one it matched at, or the one picked (`Moment.covers`).
     func isAt(_ moment: Moment, filmstrip: [String]) -> Bool {
         if let still = moment.still { return filmstrip.indices.contains(still) && photos?.still == filmstrip[still] }
-        guard let loc, let start = moment.start, let end = moment.end, moment.kind.segment == segment else {
-            return false
-        }
-        return start <= loc && (loc < end || loc == start)
+        guard let loc else { return false }
+        return moment.covers(segment, at: loc)
     }
 
     /// Where opening or Quick Look should go when it isn't the start: a page after the first, or a moment ("p. 3",

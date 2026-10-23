@@ -47,6 +47,26 @@ public struct AIAccess: Sendable, Equatable {
         defaults.set(pictures, forKey: AppDefaults.aiAccessPictures)
         defaults.set(sensitive, forKey: AppDefaults.aiAccessSensitive)
     }
+
+    /// What a search can use that the user may keep from AI apps, each by its own switch (`allows`): a saved search's
+    /// (`SavedSearch.aiUses`), or what an AI app asks for.
+    public enum Use: CaseIterable, Sendable {
+        /// Photos libraries: their people, albums, favorites and From.
+        case photos
+        /// Pictures rated sensitive: the Sensitive filter.
+        case sensitive
+        /// Code search.
+        case code
+    }
+
+    /// Whether AI apps may use it now.
+    public func allows(_ use: Use) -> Bool {
+        switch use {
+        case .photos: photos
+        case .sensitive: sensitive
+        case .code: code
+        }
+    }
 }
 
 /// The app's settings that `digup mcp` reads too, by key: the app saves them (`AppSettings`), in its defaults domain

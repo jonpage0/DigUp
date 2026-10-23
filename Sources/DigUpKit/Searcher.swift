@@ -23,9 +23,9 @@ public struct SearchHit: Sendable {
     public var focus: Double? = nil
     /// A picture or video of a Photos library: where it is in Photos, and what Photos calls it.
     public var photos: PhotosHit? = nil
-    /// A video or audio file: how many moments of it match the query (`Searcher.moments(of:text:queryVector:zGate:)`),
-    /// counted from the scores the search has anyway, and from its stretches of speech that hold the query's words. 0
-    /// when none does (it's here by its name, say).
+    /// A video or audio file: how many moments of it match the query
+    /// (`Searcher.moments(of:text:queryVector:filter:zGate:)`), counted from the scores the search has anyway, and from
+    /// its stretches of speech that hold the query's words. 0 when none does (it's here by its name, say).
     public var momentCount = 0
     /// A picture or a video: what the sensitive-picture detector said of each of its pictures (`SensitivePictures`).
     /// Nil for any other file.
@@ -45,8 +45,8 @@ public struct FaceMatch: Sendable, Equatable {
     public let confirmed: Bool
 }
 
-/// A stretch of a recording that matches a query (`Searcher.moments(of:text:queryVector:zGate:)`): its segments that
-/// stand out on the query's scale or hold the query's words, neighbours of the same kind merged into one.
+/// A stretch of a recording that matches a query (`Searcher.moments(of:text:queryVector:filter:zGate:)`): its segments
+/// that stand out on the query's scale or hold the query's words, neighbours of the same kind merged into one.
 public struct Moment: Sendable, Equatable {
     public enum Kind: String, Sendable {
         /// A frame of the video, or one of Photos' stills of a video in iCloud.
@@ -91,6 +91,22 @@ public struct Moment: Sendable, Equatable {
     public let segmentID: Int64
     /// What's said in a `said` moment, as the index keeps it; nil for the others.
     public let words: String?
+    /// Its best segment stands out on the query's scale (what's seen, heard or said there means what's asked); false
+    /// for a stretch of speech found by the query's words alone.
+    public let byMeaning: Bool
+
+    /// Whether a place in the recording, a segment of `segment`'s kind at `loc` seconds, is in it: the moment a result
+    /// at that place is at (the preview lights it).
+    public func covers(_ segment: SegmentKind, at loc: Double) -> Bool {
+        guard let start, let end, kind.segment == segment else { return false }
+        return start <= loc && (loc < end || loc == start)
+    }
+
+    /// Whether it's the moment `hit` points at: its best segment is the hit's, or it covers the hit's place. A
+    /// recording's other moments are the ones that aren't (`digup mcp`'s `moments`).
+    public func holds(_ hit: SearchHit) -> Bool {
+        segmentID == hit.segmentID || hit.loc.map { covers(hit.segment, at: $0) } == true
+    }
 }
 
 /// A hit from a Photos library (`PhotosLibrary`): the asset it shows, its title and date in Photos (from its
@@ -472,6 +488,58 @@ extension SearchFilter.Shape: Codable {
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(text)
+    }
+}
+
+/// What the Length menu and a Length token say of a length, and a saved search's summary line (`SavedSearch.summary`).
+extension SearchFilter.Length {
+    /// The menu's buckets as they're named ("Under 15 s", "15 s – 1 min", "1 – 5 min", "Over 5 min"), any other
+    /// length (a saved search's, made by hand) by its bounds the same way.
+    public var title: String {
+        switch (atLeast, under) {
+        case (let atLeast?, let under?):
+            Self.minutes(atLeast).flatMap { from in Self.minutes(under).map { "\(from) – \($0) min" } }
+                ?? "\(Self.spoken(atLeast)) – \(Self.spoken(under))"
+        case (let atLeast?, nil): "Over \(Self.spoken(atLeast))"
+        case (nil, let under?): "Under \(Self.spoken(under))"
+        case (nil, nil): ""   // not a length (`init` turns it down)
+        }
+    }
+
+    /// "shorter than 15 s", "at least 15 s long and shorter than 1 min", "5 min long or longer".
+    public var phrase: String {
+        switch (atLeast, under) {
+        case (let atLeast?, let under?): "at least \(Self.spoken(atLeast)) long and shorter than \(Self.spoken(under))"
+        case (let atLeast?, nil): "\(Self.spoken(atLeast)) long or longer"
+        case (nil, let under?): "shorter than \(Self.spoken(under))"
+        case (nil, nil): ""
+        }
+    }
+
+    /// "15 s", "1 min", "1 min 30 s".
+    private static func spoken(_ seconds: Double) -> String {
+        if let whole = minutes(seconds) { return "\(whole) min" }
+        let over = Int(seconds) / 60
+        let rest = "\((seconds - Double(over * 60)).formatted(.number.precision(.fractionLength(0...1)))) s"
+        return over > 0 ? "\(over) min \(rest)" : rest
+    }
+
+    /// Whole minutes, from 1 up; nil for any other number of seconds.
+    private static func minutes(_ seconds: Double) -> Int? {
+        seconds >= 60 && seconds.truncatingRemainder(dividingBy: 60) == 0 ? Int(seconds / 60) : nil
+    }
+}
+
+/// What the Shape menu and a Shape token say of a shape, and a saved search's summary line (`SavedSearch.summary`).
+extension SearchFilter.Shape {
+    public var title: String {
+        switch self {
+        case .portrait: "Portrait"
+        case .landscape: "Landscape"
+        case .square: "Square"
+        case .wide: "Wide"
+        case .ratio: text
+        }
     }
 }
 
@@ -899,24 +967,30 @@ public final class Searcher {
     /// query's words, as a file qualifies by them (`saidWords`). Each is scored as `search` scores a file, and
     /// neighbours of the same kind are merged (`merged`). A search's hits count theirs the same way (`momentCount`).
     /// None for a file that isn't a video or audio; without a vector, only what's said can match.
-    public func moments(of path: String, text: String, queryVector: [Float]?, zGate: Double = 2.0) throws -> [Moment] {
+    ///
+    /// Only what `filter`'s exclusions keep counts (an AI app's sight, `SearchFilter.exclusions`), as for `search`: a
+    /// file they leave out has no moments, and the files they leave out set no part of the query's scale nor decide
+    /// whether a word is matched whole or as the start of longer ones. The app's preview leaves nothing out.
+    public func moments(of path: String, text: String, queryVector: [Float]?, filter: SearchFilter = SearchFilter(),
+                        zGate: Double = 2.0) throws -> [Moment] {
+        let exclusions = filter.exclusions
+        let seen = exclusions.query
         var file: (id: Int64, kind: FileKind?)?
-        try store.db.query("SELECT id, kind FROM files WHERE path = ?", [.text(path)]) {
+        try store.db.query("SELECT id, kind FROM files WHERE path = ?" + (seen.map { " AND id IN (\($0.sql))" } ?? ""),
+                           [.text(path)] + (seen?.values ?? [])) {
             file = ($0.int(0), FileKind(rawValue: $0.text(1) ?? ""))
         }
         guard let file, let kind = file.kind, Self.recordings.contains(kind) else { return [] }
         var standouts: [(segment: Int64, z: Double)] = []
         if let query = queryVector, query.count == Vectors.dimension {
             if !vectorsLoaded { try reload() }
-            // The app's preview: nothing is left out of its sight.
-            let setsScale = try rowsSettingScale(seeing: SearchFilter())
+            let setsScale = try rowsSettingScale(seeing: exclusions)
             let meaning = Self.meaning(score(query), rowModality, setsScale: setsScale)
             standouts = rowFile.indices.filter { rowFile[$0] == file.id && meaning[$0] >= zGate }
                 .map { (segment: rowSegment[$0], z: meaning[$0]) }
         }
         let terms = Self.terms(text)
-        // The app's preview: nothing is left out of its sight.
-        let said = try saidWords(inFile: file.id, wordPatterns(terms, prefixLast: false, within: nil))
+        let said = try saidWords(inFile: file.id, wordPatterns(terms, prefixLast: false, within: seen))
         return try moments(ofFile: file.id, standouts, said: said,
                            weights: Self.weights(lookup: Self.isLookup(terms), wordWeight: Self.wordWeight))
     }
@@ -962,7 +1036,8 @@ public final class Searcher {
             MomentPiece(segment: $0.segment, kind: $0.kind, start: $0.start, end: $0.end,
                         still: $0.start == nil ? filmstrip[$0.segment] : nil, words: $0.words,
                         score: weights.meaning * max(z[$0.segment] ?? 0, 0)
-                            + weights.words * pow(said[$0.segment] ?? 0, 1.5))
+                            + weights.words * pow(said[$0.segment] ?? 0, 1.5),
+                        byMeaning: z[$0.segment] != nil)
         })
     }
 
@@ -978,6 +1053,8 @@ public final class Searcher {
         /// What's said in a stretch of speech.
         let words: String?
         let score: Double
+        /// It stands out on the query's scale (`Moment.byMeaning`).
+        let byMeaning: Bool
     }
 
     /// Moments from pieces, best first. Timed frames and windows of sound merge while each starts where the moment so
@@ -992,7 +1069,7 @@ public final class Searcher {
         let defaults = IndexOptions()
         func moment(_ best: MomentPiece, from start: Double?, to end: Double?) -> Moment {
             Moment(kind: best.kind, start: start, end: end, still: best.still, score: best.score,
-                   segmentID: best.segment, words: best.words)
+                   segmentID: best.segment, words: best.words, byMeaning: best.byMeaning)
         }
         let (said, others) = (pieces.filter { $0.kind == .said }, pieces.filter { $0.kind != .said })
         var moments = said.map { moment($0, from: $0.start, to: $0.end) }

@@ -79,9 +79,9 @@ struct ResultRow: Identifiable, Equatable {
         self.terms = terms
     }
 
-    /// This result at another of its moments (`Searcher.moments(of:text:queryVector:zGate:)`), picked under the preview:
-    /// where it plays from, and where Quick Look and Open go. A still's file is found in `filmstrip`, the video's stills
-    /// in order.
+    /// This result at another of its moments (`Searcher.moments(of:text:queryVector:filter:zGate:)`), picked under the
+    /// preview: where it plays from, and where Quick Look and Open go. A still's file is found in `filmstrip`, the
+    /// video's stills in order.
     func at(_ moment: Moment, filmstrip: [String]) -> ResultRow {
         var placed = self
         placed.segment = moment.kind.segment
@@ -192,38 +192,8 @@ struct ResultRow: Identifiable, Equatable {
     static func clock(_ seconds: Double) -> String { MatchDescription.clock(seconds) }
 }
 
-/// How results are grouped in the panel, and the kind filters in the window. A saved search keeps its kind by these
-/// names ("screenshots", "images"…: `SavedSearch.kind`).
-enum ResultGroupKind: String, CaseIterable, Codable {
-    case screenshots, images, documents, video, audio
-    /// Code search's results (the code index; a search of it never shows anything else).
-    case code
-
-    /// The kinds of files the main index holds: the window's kind filters, ⌘2 to ⌘6.
-    static let files: [ResultGroupKind] = [.screenshots, .images, .documents, .video, .audio]
-
-    init(_ kind: FileKind) {
-        switch kind {
-        case .screenshot: self = .screenshots
-        case .image: self = .images
-        case .pdf, .doc: self = .documents
-        case .video: self = .video
-        case .audio: self = .audio
-        case .code: self = .code
-        }
-    }
-
-    var title: String {
-        switch self {
-        case .screenshots: "Screenshots"
-        case .images: "Images"
-        case .documents: "Documents"
-        case .video: "Video"
-        case .audio: "Audio"
-        case .code: "Code"
-        }
-    }
-
+/// The kit's grouping of results (`ResultGroupKind`), as the panel and the window's kind filters draw it.
+extension ResultGroupKind {
     var symbol: String {
         switch self {
         case .screenshots: FileKind.screenshot.symbol
@@ -232,17 +202,6 @@ enum ResultGroupKind: String, CaseIterable, Codable {
         case .video: FileKind.video.symbol
         case .audio: FileKind.audio.symbol
         case .code: FileKind.code.symbol
-        }
-    }
-
-    var kinds: Set<FileKind> {
-        switch self {
-        case .screenshots: [.screenshot]
-        case .images: [.image]
-        case .documents: [.pdf, .doc]
-        case .video: [.video]
-        case .audio: [.audio]
-        case .code: [.code]
         }
     }
 }

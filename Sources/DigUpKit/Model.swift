@@ -13,6 +13,50 @@ public enum FileKind: String, CaseIterable, Sendable, Codable {
         """
 }
 
+/// How results are grouped in the app's panel, and the kind filters in its search window. A saved search keeps its kind
+/// by these names ("screenshots", "images"…: `SavedSearch.kind`).
+public enum ResultGroupKind: String, CaseIterable, Codable, Sendable {
+    case screenshots, images, documents, video, audio
+    /// Code search's results (the code index; a search of it never shows anything else).
+    case code
+
+    /// The kinds of files the main index holds: the window's kind filters, ⌘2 to ⌘6.
+    public static let files: [ResultGroupKind] = [.screenshots, .images, .documents, .video, .audio]
+
+    public init(_ kind: FileKind) {
+        switch kind {
+        case .screenshot: self = .screenshots
+        case .image: self = .images
+        case .pdf, .doc: self = .documents
+        case .video: self = .video
+        case .audio: self = .audio
+        case .code: self = .code
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .screenshots: "Screenshots"
+        case .images: "Images"
+        case .documents: "Documents"
+        case .video: "Video"
+        case .audio: "Audio"
+        case .code: "Code"
+        }
+    }
+
+    public var kinds: Set<FileKind> {
+        switch self {
+        case .screenshots: [.screenshot]
+        case .images: [.image]
+        case .documents: [.pdf, .doc]
+        case .video: [.video]
+        case .audio: [.audio]
+        case .code: [.code]
+        }
+    }
+}
+
 /// One searchable piece of a file.
 public enum SegmentKind: String, Sendable {
     case name             // file name + folder names (keyword search only)
