@@ -52,6 +52,20 @@ public enum Speech {
 
         let tokens: [Token]
 
+        /// It, cut wherever its words pause for longer than `longestSilence`, punctuation going with the words before
+        /// it. parakeet-mlx cuts a sentence at a silence between any two tokens, so a comma heard in the middle of a
+        /// pause keeps the words either side of it in one sentence.
+        var cutAtPauses: [Sentence] {
+            var pieces: [[Token]] = [[]]
+            var lastWord: Token?
+            for token in tokens {
+                if token.isWordy, let lastWord, token.start - lastWord.end > Speech.longestSilence { pieces.append([]) }
+                pieces[pieces.count - 1].append(token)
+                if token.isWordy { lastWord = token }
+            }
+            return pieces.map(Sentence.init(tokens:))
+        }
+
         static func isWordy(_ character: Character) -> Bool { character.isLetter || character.isNumber }
     }
 
@@ -64,10 +78,11 @@ public enum Speech {
     }
 
     /// The sentences as stretches of speech, in order: consecutive ones grouped while the stretch stays within `longest`
-    /// seconds and `mostWords` words ("$42,000" is one), never across a silence longer than `longestSilence`. A sentence
-    /// longer than that by itself is a stretch of its own (parakeet-mlx is asked to cut sentences at the same limits,
-    /// `run`). Punctuation before a sentence's first word ends the stretch before it: parakeet-mlx, cutting at a
-    /// silence, can hear a sentence's full stop after the silence, as a sentence of its own.
+    /// seconds and `mostWords` words ("$42,000" is one), never across a silence longer than `longestSilence`, between
+    /// sentences or inside one (`Sentence.cutAtPauses`). A sentence longer than that by itself is a stretch of its own
+    /// (parakeet-mlx is asked to cut sentences at the same limits, `run`). Punctuation before a sentence's first word
+    /// ends the stretch before it: parakeet-mlx, cutting at a silence, can hear a sentence's full stop after the
+    /// silence, as a sentence of its own.
     static func stretches(of sentences: [Sentence]) -> [Stretch] {
         var stretches: [Stretch] = []
         var open: (start: Double, end: Double, words: Int, text: String)?
@@ -76,7 +91,7 @@ public enum Speech {
             stretches.append(Stretch(start: done.start, end: done.end,
                                      text: done.text.trimmingCharacters(in: .whitespacesAndNewlines)))
         }
-        for sentence in sentences {
+        for sentence in sentences.flatMap(\.cutAtPauses) {
             let lead = sentence.tokens.prefix { !$0.isWordy }
             open?.text += lead.map(\.text).joined()
             let said = sentence.tokens.dropFirst(lead.count)

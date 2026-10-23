@@ -56,6 +56,17 @@ import Testing
         #expect(stretches.first?.text == "word word word word word.")
     }
 
+    /// A silence over 2 s inside one of parakeet-mlx's sentences ends a stretch too: it cuts a sentence at a silence
+    /// between any two tokens, so a comma heard in the middle of the silence keeps the words either side in one.
+    @Test func aSilenceInsideASentenceEndsAStretch() {
+        let sentence = Speech.Sentence(tokens: [Token(text: " Hello", start: 0, end: 1),
+                                                Token(text: ",", start: 2.5, end: 2.6),
+                                                Token(text: " again", start: 4, end: 5)])
+        let stretches = Speech.stretches(of: [sentence])
+        #expect(stretches.map { [$0.start, $0.end] } == [[0, 1], [4, 5]])
+        #expect(stretches.map(\.text) == ["Hello,", "again"])
+    }
+
     /// parakeet-mlx offline before it has its model, say: not a fact about the recording.
     struct Offline: Error {}
 
