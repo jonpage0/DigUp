@@ -690,5 +690,28 @@ final class FakeFaceReader: FaceReader, @unchecked Sendable {
         #expect(saved)
         #expect(try indexed.kept([[katie]]).map(\.path) == [indexed.pictures[0]])
     }
+
+    /// A picture you said is Katie that the faces pass reads teaches the pictures it reads after it, even when
+    /// `face_matches` is made again in between (the app, after a correction): the pass's matching follows what
+    /// `face_matches` was made from, not only the corrections file.
+    @Test func aTeacherReadByThePassTeachesWhatItReadsAfter() throws {
+        let more: [String: [[Float]]] = ["like-katie-85.jpg": [[0.7, 0, 0, 0.714]]]
+        let indexed = try indexed(by: nil, more: more)
+        let katie = try indexed.person("P-KATIE")
+        // The two faces are 0.97 alike: whichever the pass reads first teaches the other.
+        let files = Dictionary(uniqueKeysWithValues: try indexed.store.files(under: [indexed.downloads.path])
+            .map { ($0.path, $0.id) })
+        let (one, other) = ("katie-85.jpg", "like-katie-85.jpg")
+        let teacherFirst = try #require(files[indexed.path(one)]) < (try #require(files[indexed.path(other)]))
+        let (teacher, pupil) = teacherFirst ? (one, other) : (other, one)
+        try correct(indexed, [(teacher, 0, Self.katie, "is")])
+        let pass = try indexed.indexer(reader(more: more))
+        _ = try pass.sync([indexed.library, indexed.downloads])
+        try pass.readFaces(onStep: { step in
+            guard step.path == indexed.path(teacher) else { return }
+            do { try indexed.store.rebuildFaceMatches() } catch { Issue.record(error) }
+        })
+        #expect(try indexed.kept([[katie]]).contains { $0.path == indexed.path(pupil) })
+    }
 }
 #endif

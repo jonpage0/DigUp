@@ -796,8 +796,8 @@ public final class Indexer {
     }
 
     /// Writes the faces read in a picture (inside the caller's transaction), and matches the ones outside Photos as the
-    /// run found the named faces when it first needed them, and the corrections as they are (`matching`, made again
-    /// when they were saved since: `IndexStore.faceMatching(_:)`).
+    /// run found the named faces and the corrections when it first needed them, or as `face_matches` was made from
+    /// since (`matching`, `IndexStore.faceMatching(_:)`).
     private func keep(_ rows: [IndexStore.FaceRow], ofSegment segment: Int64, of file: Int64) throws {
         let outside = Self.outside(rows, written: try store.setFaces(rows, ofSegment: segment), of: file)
         guard !outside.isEmpty else { return }
@@ -1105,7 +1105,7 @@ public final class Indexer {
             try store.db.transaction {
                 if let rows {
                     let ids = try store.setFaces(rows, ofSegment: picture.segment)
-                    matching = try store.faceMatching(matching)   // corrections saved since: as they are now
+                    matching = try store.faceMatching(matching)   // made again if face_matches was, from more
                     try store.matchFaces(Self.outside(rows, written: ids, of: id), with: matching)
                 }
                 try store.setFacesRead(read)

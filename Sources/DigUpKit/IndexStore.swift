@@ -1179,7 +1179,8 @@ public final class IndexStore {
     /// How the faces outside Photos are matched now (`FaceMatching`): with the faces Photos named and the corrections
     /// beside the index (`faceRulings`), only those of files `filter` keeps (`digup mcp`: the ones an AI app may see).
     func faceMatching(referencesKeptBy filter: SearchFilter = SearchFilter()) throws -> FaceMatching {
-        let stamp = correctionsStamp()   // before they're read: a save after it shows as a change
+        // What it's made from, before it's read: a change after it shows as another basis.
+        let basis = filter.query == nil ? try facesMark() : ""
         let kept = filter.query
         var named: [(person: Int64, print: [Float])] = []
         try db.query("SELECT f.person, f.print FROM faces f JOIN segments s ON s.id = f.segment WHERE f.person IS NOT NULL"
@@ -1188,14 +1189,17 @@ public final class IndexStore {
         }
         let rulings = try faceRulings(keptBy: filter)
         return FaceMatching(named: named, rulings: rulings, ruled: try outsideFaces(ofFiles: Set(rulings.keys)),
-                            stamp: stamp)
+                            basis: basis)
     }
 
-    /// `matching`, or made again when the corrections were saved since it was made. Called inside the transaction that
-    /// writes the matches it makes, so the app's making `face_matches` again after it saves comes wholly before that
-    /// (and this sees the save) or wholly after (and that sees these faces).
+    /// `matching`, kept by a run or the faces pass, or made again when `face_matches` was made since from something
+    /// else (`rebuildFaceMatches`: the app, after you said who a face is, or a sync): the corrections saved, or a face
+    /// that teaches read in the meantime. Called inside the transaction that writes the matches it makes, so that
+    /// making comes wholly before (and this sees it) or wholly after (and sees these faces). While nothing has made
+    /// `face_matches` since the run's own writes, its end makes them again if their basis changed
+    /// (`rebuildFaceMatchesIfChanged`).
     func faceMatching(_ matching: FaceMatching?) throws -> FaceMatching {
-        if let matching, matching.stamp == correctionsStamp() { return matching }
+        if let matching, try meta(Self.facesMatchedKey).map({ $0 == matching.basis }) ?? true { return matching }
         return try faceMatching()
     }
 
@@ -1284,14 +1288,14 @@ public final class IndexStore {
     @discardableResult
     public func rebuildFaceMatches() throws -> Int {
         try db.transaction {
-            let (mark, matching, faces) = (try facesMark(), try faceMatching(), try outsideFaces())
+            let (matching, faces) = (try faceMatching(), try outsideFaces())
             try db.run("DELETE FROM face_matches")
             var count = 0
             for case let (face, match?) in zip(faces, matching.matches(faces)) {
                 try insert(match, of: face.id)
                 count += 1
             }
-            try setMeta(Self.facesMatchedKey, mark)
+            try setMeta(Self.facesMatchedKey, matching.basis)
             return count
         }
     }

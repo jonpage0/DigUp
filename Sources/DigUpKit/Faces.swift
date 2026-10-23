@@ -390,21 +390,22 @@ public struct FaceMatching {
     let matcher: FaceMatcher
     /// By the file they're of, in the order they were made.
     let rulings: [Int64: [Ruling]]
-    /// The corrections file as it was when these were read (`IndexStore.correctionsStamp`): one kept for a while is
-    /// made again when it's changed since.
-    let stamp: String
+    /// What it was made from, as `face_matches`' mark spells it (`IndexStore.facesMark`: the named faces, the
+    /// corrections, the faces they teach); "" when that isn't said. One kept for a while is made again once
+    /// `face_matches` was made from something else (`IndexStore.faceMatching(_:)`).
+    let basis: String
 
     /// `named`: the faces Photos named, with their people. `rulings`: the corrections, by the file they're of.
     /// `ruled`: every face of those files, so the ones you said are someone are compared against too.
     public init(named: [(person: Int64, print: [Float])], rulings: [Int64: [Ruling]] = [:], ruled: [Face] = [],
-                stamp: String = "") {
+                basis: String = "") {
         let photos = FaceMatcher(references: named)
         let taught: [(person: Int64, print: [Float])] = Self.said(of: ruled, rulings).compactMap { place, said in
             said.is.flatMap { Self.confirmed(ruled[place].print, as: $0, by: photos) }
                 .map { ($0.person, ruled[place].print) }
         }
         matcher = taught.isEmpty ? photos : FaceMatcher(references: named, taught: taught)
-        (self.rulings, self.stamp) = (rulings, stamp)
+        (self.rulings, self.basis) = (rulings, basis)
     }
 
     /// Each face's match, nil for no one: who you said it is (at its likeness to their faces in Photos), else its
