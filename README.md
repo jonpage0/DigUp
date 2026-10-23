@@ -47,9 +47,9 @@ A word that every result must have gets a + before it: "a dog running on +beach"
 their words (a file's or folder's name, its text, the text in a picture, what Photos knows about it, what's said) or
 that show a beach by what they mean, still ranked by all the words; `+"red car"` does the same for a phrase. The `+`
 counts only at the start of a word and before a letter or a quote, so "c++" and "+1 555 0100" are searched as typed,
-and code search (`code:`) takes it as written. On a Mac the word shows as a "must have" token in the search field (its
-× or ⌫ in an empty field takes it off), a right-click on a word in the field offers Require, and a saved search keeps
-it in its words, as AI apps send it in theirs.
+and code search (`code:`) takes it as written. On a Mac the search field highlights the marked word where it's typed
+(delete its + and it's an ordinary word again), a right-click on a word in the field offers Require, which types the
+`+` for you, and a saved search keeps the words as typed, as AI apps send them in theirs.
 
 ## Private
 

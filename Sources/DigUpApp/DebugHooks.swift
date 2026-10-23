@@ -9,8 +9,7 @@ import SwiftUI
 ///     -debugOffscreen YES     build and draw windows and the panel but never show them or activate the app, so
 ///                             snapshot runs don't take the keyboard from whoever is at the Mac (no key tests then)
 ///     -debugMenu YES          log the menu once the index is open, then run Pause and Resume and log it again
-///     -debugQuery "<text>"    open the panel and search for <text>, as if it had been typed ("": the empty panel; a
-///                             `+word ` in it becomes a must-have token, as typed)
+///     -debugQuery "<text>"    open the panel and search for <text>, as if it had been typed ("": the empty panel)
 ///     -debugSnapshot <png>    once the final results and their pictures are showing, draw the panel into <png>
 ///     -debugKeys "down,space,esc,cmd+c"   then press these keys (posted through the app's own event queue, so
 ///                             no Accessibility permission is needed) and log what each one did. ⌘C goes to a
@@ -54,7 +53,8 @@ import SwiftUI
 ///                             checkbox) or click:NAME/SUB (a subfolder's), add:PATH and skip:PATH (as picked in the
 ///                             open panel), unskip:PATH, types:heic,txt. NAME is the end of a listed folder's path.
 ///     -debugAdd YES           after the snapshot, press Add Folders' Add (or the code sheet's) and log what it applied
-///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot
+///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot,
+///                             after its words, as after typing them
 ///     -debugMap YES           with -debugWindow search: the map shows above the results
 ///     -debugArea "lat1,lon1,lat2,lon2"   with -debugWindow search: results kept to that box of the map
 ///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup|sensitive|length:15..60|shape:16:9"   with
@@ -269,7 +269,7 @@ enum DebugHooks {
             }
         }
         panel.show()
-        panel.typed(text)
+        panel.query = text
     }
 
     /// `-debugPlay`: plays `row` from its moment, muted, and logs where playback is 1.5 s later.
@@ -375,8 +375,15 @@ enum DebugHooks {
             default:
                 app.showSearchWindow(query: defaults.string(forKey: "debugQuery") ?? "")
                 let search = app.searchWindow.search
-                // The field with the cursor, as on screen (an offscreen window doesn't take it by itself).
-                if defaults.bool(forKey: "debugFocus") { DispatchQueue.main.async { search.focusField() } }
+                // The field with the cursor, as on screen (an offscreen window doesn't take it by itself), after its
+                // words, as after typing them.
+                if defaults.bool(forKey: "debugFocus") {
+                    DispatchQueue.main.async {
+                        search.focusField()
+                        let editor = search.field?.currentEditor()
+                        editor?.selectedRange = NSRange(location: (editor?.string as NSString? ?? "").length, length: 0)
+                    }
+                }
                 search.showsMap = defaults.bool(forKey: "debugMap")
                 let box = (defaults.string(forKey: "debugArea") ?? "").split(separator: ",").compactMap { Double($0) }
                 if box.count == 4 {
@@ -803,7 +810,7 @@ enum DebugHooks {
         return "cell \(index) of \(rows.count) (\(search.selectedRow?.name ?? "none")) · columns \(search.columns) · "
             + "filter \(search.filter?.title ?? "All") · query \"\(search.query)\" · "
             + "tokens \(search.shownTokens.map { $0.title + ($0.isMissing ? " (not in Photos now)" : "") }) · "
-            + "must have \(search.required) · Quick Look \(previewing ? "open" : "closed")"
+            + "Quick Look \(previewing ? "open" : "closed")"
     }
 
     /// Selects the field's text (⌘A) and types `queries[0]` a key at a time, waits for its final results, then the rest.

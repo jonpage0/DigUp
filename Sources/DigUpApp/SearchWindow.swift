@@ -32,7 +32,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         let window = self.window ?? makeWindow()
         if let query {
             search.filter = kind
-            search.setQuery(query)
+            search.query = query
         }
         search.searchesPhotos = app.photosLibraries.contains(where: app.searches)
         search.readChoices(force: true)
@@ -131,8 +131,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
 
     /// Arrows move through the grid (← → only once you've arrowed, so they still move the cursor while you type),
     /// ↩ opens, ⌘↩ reveals, Space previews, ⌘C copies, ⌘S saves the search, Esc closes the preview or clears the
-    /// search, Tab turns the suggested filter on, ⌫ in an empty field takes the last token (a required word, a filter)
-    /// off.
+    /// search, Tab turns the suggested filter on, ⌫ in an empty field takes the last filter off.
     private func handle(_ event: NSEvent) -> Bool {
         // An input method is composing (Japanese, Chinese…): ↩, the arrows and Esc are its keys until it's done.
         if (search.field?.currentEditor() as? NSTextView)?.hasMarkedText() == true { return false }
@@ -179,8 +178,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             NSPasteboard.general.writeObjects([row.url as NSURL])
         case 48 where modifiers.isEmpty && !search.suggestions.isEmpty:   // Tab: the first suggestion becomes a filter
             search.accept(search.suggestions[0])
-        case 51 where modifiers.isEmpty && search.query.isEmpty
-            && !(search.shownTokens.isEmpty && search.required.isEmpty):   // ⌫, nothing typed
+        case 51 where modifiers.isEmpty && search.query.isEmpty && !search.shownTokens.isEmpty:   // ⌫, nothing typed
             search.removeLastToken()
         case 53:   // Esc
             if previewing {
@@ -272,11 +270,6 @@ final class SearchModel {
     /// the picture), albums (in any of them), favorites and From, DigUp's favorites, Sensitive, Length and Shape.
     var tokens: [FilterToken] = [] {
         didSet { if tokens != oldValue { run() } }
-    }
-    /// Words every result must have (`RequiredWords`): "must have" tokens after the filters. Their words stay in `query`
-    /// where they were typed; the search marks them there (`markedQuery`).
-    var required: [String] = [] {
-        didSet { if required != oldValue { run() } }
     }
     /// The people and albums the indexed Photos libraries name (the filter menus and suggestions).
     private(set) var choices = PhotosChoices()
@@ -387,20 +380,15 @@ final class SearchModel {
     var suggestions: [FilterSuggestion] {
         isCode ? [] : choices.suggestions(for: query, photos: searchesPhotos, except: shownTokens)
     }
-    /// There's something to show: words typed, a required word, or a filter that lists files by itself.
-    var isSearching: Bool {
-        !markedQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !searchFilter.isEmpty
-    }
+    /// There's something to show: words typed, or a filter that lists files by itself.
+    var isSearching: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !searchFilter.isEmpty }
 
     /// A search of code: the Code filter, or "code:" typed.
     var isCode: Bool { filter == .code || CodeQuery.text(of: query) != nil }
-    /// The query as it's searched and saved: the field's words with the required ones marked (`+beach`); a search of
-    /// code's as typed (its `+` is literal, and must-have tokens don't apply to it, as the filters don't).
-    var markedQuery: String { isCode ? query : RequiredWords.marking(required, in: query) }
-    /// The tip under the field shows (`RequiredTokens.showsTip`), unless a filter suggestion hangs there.
+    /// The tip under the field shows (`RequiredMarks.showsTip`), unless a filter suggestion hangs there.
     var showsRequiredTip: Bool {
         suggestions.isEmpty
-            && RequiredTokens.showsTip(query: query, required: required, code: isCode, used: model.settings.requiredWordUsed)
+            && RequiredMarks.showsTip(query: query, code: isCode, used: model.settings.requiredWordUsed)
     }
     var selectedRow: ResultRow? { rows.first { $0.id == selection } ?? rows.first }
 
@@ -438,51 +426,9 @@ final class SearchModel {
 
     func toggle(_ token: FilterToken) { set(token, on: !has(token)) }
 
-    /// ⌫ in an empty field: the last token goes (a required word's, nearest the words, before the filters).
+    /// ⌫ in an empty field: the last filter goes.
     func removeLastToken() {
-        if let last = required.last {
-            unrequire(last)
-        } else if let last = shownTokens.last {
-            set(last, on: false)
-        }
-    }
-
-    /// Typing in the field: a required word typed in full (`+beach `) becomes a token, its word left where it is.
-    func typed(_ text: String) {
-        let code = filter == .code || CodeQuery.text(of: text) != nil
-        guard let taken = RequiredTokens.taking(text, into: required, code: code) else {
-            query = text
-            return
-        }
-        set(query: taken.text, required: taken.required)
-    }
-
-    /// Puts a query in the field as it's searched and saved (`markedQuery`: a saved search's, the panel's): its
-    /// required words become tokens.
-    func setQuery(_ text: String) {
-        let words = filter == .code || CodeQuery.text(of: text) != nil ? RequiredWords(literal: text)
-            : RequiredWords(text)
-        set(query: words.text, required: words.terms)
-    }
-
-    /// "Require “beach”" (the field's right-click): as typing + before it does.
-    func require(_ term: String) {
-        required = RequiredWords.adding([term], to: required)
-    }
-
-    /// A must-have token's ×, or ⌫: its word stays in the query, as a word like the others.
-    func unrequire(_ term: String) {
-        required.removeAll { $0 == term }
-    }
-
-    /// The words and the required ones changed together: one search.
-    private func set(query: String, required: [String]) {
-        guard query != self.query || required != self.required else { return }
-        let held = runsHeld
-        runsHeld = true
-        (self.query, self.required) = (query, required)
-        runsHeld = held
-        run()
+        if let last = shownTokens.last { set(last, on: false) }
     }
 
     /// A suggestion taken: its words leave the query, and it's on.
@@ -509,11 +455,11 @@ final class SearchModel {
 
     // MARK: Saved searches
 
-    /// The window's search as a saved search, under `name`: its words (the required ones marked, `markedQuery`), kind,
+    /// The window's search as a saved search, under `name`: its words as typed (a required one marked, `+beach`), kind,
     /// and tokens in order (the map's area among them).
     func saved(named name: String) -> SavedSearch {
-        SavedSearch(id: UUID(), name: name, query: markedQuery, kind: filter,
-                    filters: shownTokens.compactMap(savedFilter), saved: Date())
+        SavedSearch(id: UUID(), name: name, query: query, kind: filter, filters: shownTokens.compactMap(savedFilter),
+                    saved: Date())
     }
 
     private func savedFilter(_ token: FilterToken) -> SavedSearch.Filter? {
@@ -537,7 +483,7 @@ final class SearchModel {
     /// albums ("beach · Tatiana Rotari · Florida"); with neither, the other filters ("Photos Favorites · Shot on my
     /// devices").
     var suggestedName: String {
-        let words = (isCode ? query : RequiredWords(markedQuery).text).trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = (isCode ? query : RequiredWords(query).text).trimmingCharacters(in: .whitespacesAndNewlines)
         let named = shownTokens.filter {
             switch $0 {
             case .person, .album: true
@@ -550,12 +496,12 @@ final class SearchModel {
 
     /// What a search saved now keeps: "“+beach” · Images · Tatiana Rotari · In the map's area".
     var savedSummary: String {
-        let words = markedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = query.trimmingCharacters(in: .whitespacesAndNewlines)
         return ((words.isEmpty ? [] : ["“\(words)”"]) + [filter?.title ?? "All kinds"] + shownTokens.map(\.title))
             .joined(separator: " · ")
     }
 
-    /// Puts a saved search in the window and runs it: its words (the required ones as tokens), kind, tokens and map
+    /// Puts a saved search in the window and runs it: its words (as typed, required ones marked), kind, tokens and map
     /// area. Its people and albums are found by Photos' uuid in the libraries as they are now
     /// (`PhotosChoices.token(for:)`); one that's gone shows struck through and keeps nothing.
     func open(_ saved: SavedSearch) async {
@@ -582,7 +528,7 @@ final class SearchModel {
         self.tokens = tokens
         self.area = area
         filter = saved.kind
-        setQuery(saved.query)
+        query = saved.query
         runsHeld = false
         run()
         let missing = tokens.filter(\.isMissing).count
@@ -611,7 +557,7 @@ final class SearchModel {
         let current = generation
         task?.cancel()
         navigated = false
-        let typed = markedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let code = isCode
         let text = CodeQuery.text(of: typed) ?? typed
         codePhase = nil
@@ -632,7 +578,7 @@ final class SearchModel {
             return
         }
         let filter = self.filter, searchFilter = self.searchFilter
-        RequiredTokens.noteUse(of: text, code: code, in: model)
+        RequiredMarks.noteUse(of: text, code: code, in: model)
         if !text.isEmpty {
             engine.prewarm()
             engine.embedAhead(text, code: code)
@@ -749,13 +695,9 @@ struct SearchWindowView: View {
                     ForEach(search.shownTokens) { token in
                         FilterTokenView(token: token) { search.set(token, on: false) }
                     }
-                    ForEach(search.required, id: \.self) { term in
-                        RequiredTokenView(term: term) { search.unrequire(term) }
-                    }
-                    SearchField(text: Binding(get: { search.query }, set: { search.typed($0) }), fontSize: 18,
-                                placeholder: placeholder, onMake: { search.field = $0 },
-                                onFocus: { fieldFocused = $0 },
-                                onRequire: search.isCode ? nil : { search.require($0) })
+                    SearchField(text: $search.query, fontSize: 18, placeholder: placeholder,
+                                onMake: { search.field = $0 }, onFocus: { fieldFocused = $0 },
+                                marksRequired: !search.isCode)
                         .frame(minWidth: 140)
                     if !search.query.isEmpty {
                         Button {
@@ -872,15 +814,14 @@ struct SearchWindowView: View {
         } else if !search.hasResults {
             ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if search.results.isEmpty {
-            let words = search.markedQuery.trimmingCharacters(in: .whitespaces)
+            let words = search.query.trimmingCharacters(in: .whitespaces)
             let onlyArea = search.tokens.isEmpty
             EmptyState(symbol: search.isCode ? FileKind.code.symbol : "magnifyingglass",
                        title: !words.isEmpty ? "No good matches for “\(words)”"
                            : onlyArea ? "Nothing taken in this area" : "Nothing fits these filters",
                        message: search.isCode ? "Try saying what the code does, or a name that's in it."
                            : !RequiredWords(words).terms.isEmpty
-                           ? "None of the matches has every word it must have: take one off (its × in the search "
-                               + "field), or try other words."
+                           ? "None of the matches has every word it must have: take a + off, or try other words."
                            : !words.isEmpty ? "Try describing what's in it: what you'd see or hear, or words you remember."
                            : onlyArea ? "Move the map and search that area, or type what you're looking for."
                            : "Take a filter off (its × in the search field), or type what you're looking for.")
@@ -925,7 +866,7 @@ struct SearchWindowView: View {
     /// Examples of what to type: code's with the Code chip on, and one of them with code search on (as the panel's).
     private var placeholder: String {
         if search.filter == .code { return "Describe the code: “retry a request with backoff”, a name in it…" }
-        if !search.shownTokens.isEmpty || !search.required.isEmpty { return "Add words…" }
+        if !search.shownTokens.isEmpty { return "Add words…" }
         return model.hasCode ? "Describe it: “zebra in a video”, “code: retry with backoff”…"
             : "Describe it: “receipt from the hardware store”, “zebra in a video”…"
     }
