@@ -146,6 +146,9 @@ nonisolated struct PhotosChoices: Sendable, Equatable {
            ["favorites", "favourites"].contains(where: { $0.hasPrefix(last.lowercased()) }) {
             add(.photosFavorites, for: String(last), "in Photos")
         }
+        if let last = words.last, last.count >= 3, "sensitive".hasPrefix(last.lowercased()) {
+            add(.sensitive, for: String(last), "pictures rated sensitive")
+        }
         return found
     }
 
@@ -184,6 +187,9 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
     case origin(PhotosLibrary.Origin)
     /// Taken in the map's area ("Search This Area"; `SearchModel.area` holds the box).
     case area
+    /// A picture or video with a picture rated sensitive (`SearchFilter.sensitive`), at the position "Blur sensitive
+    /// pictures" has when the search runs (Revealing while blurring is off: `SensitivePosition.filterPosition`).
+    case sensitive
 
     /// A person by their name and an album by its folders and title, as the menus offer them; one that isn't in
     /// Photos now by the Photos ids it was saved with.
@@ -198,6 +204,7 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case .shotOnMyDevices: "from:mine"
         case .origin(let origin): "from:\(origin.rawValue)"
         case .area: "area"
+        case .sensitive: "sensitive"
         }
     }
 
@@ -223,6 +230,7 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case .shotOnMyDevices: "Shot on my devices"
         case .origin(let origin): origin == .imported ? "Imported into Photos" : "Saved from other apps"
         case .area: "In the map's area"
+        case .sensitive: "Sensitive"
         }
     }
 
@@ -235,6 +243,7 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case .shotOnMyDevices: "iphone"
         case .origin(let origin): origin == .imported ? "square.and.arrow.down" : "arrow.down.app"
         case .area: "map"
+        case .sensitive: "eye.slash"
         }
     }
 
@@ -254,6 +263,9 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
             origin == .imported ? "Only what was imported into Photos (from a folder on a Mac, or a camera's card)"
                 : "Only what other apps saved to Photos: Messages, AirDrop, Safari and the rest"
         case .area: "Only what was taken in the area you searched on the map"
+        case .sensitive:
+            "Only pictures and videos with a picture rated sensitive, at Blur sensitive pictures' position (Settings → "
+                + "General; Revealing while it's off)"
         }
     }
 }

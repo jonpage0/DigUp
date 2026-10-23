@@ -52,9 +52,10 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         Task { await search.open(saved) }
     }
 
-    /// Save This Search… (⌘S): asks for the name, the suggested one filled in. Only with something to save.
+    /// Save This Search… (⌘S): asks for the name, the suggested one filled in. Only with something to save, and never
+    /// with the Sensitive filter on (`SearchModel.canSave`).
     func saveSearch() {
-        guard search.isSearching, !app.savedSearches.unreadable else { return }
+        guard search.canSave, !app.savedSearches.unreadable else { return }
         savedSheet.beginSave(search.saved(named: search.suggestedName), describing: search.savedSummary, on: window)
     }
 
@@ -166,7 +167,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             search.filter = kinds[index]
         case 26 where modifiers == .command && app.model.hasCode:   // ⌘7: code
             search.filter = .code
-        case 1 where modifiers == .command && search.isSearching && !app.savedSearches.unreadable:   // ⌘S
+        case 1 where modifiers == .command && search.canSave && !app.savedSearches.unreadable:   // ⌘S
             saveSearch()
         case 8 where modifiers == .command:   // ⌘C
             // The selected file, as in the panel, except right after you selected some of the query's words (then
@@ -312,6 +313,11 @@ final class SearchModel {
         if has(.shotOnMyDevices) { run() }
     }
 
+    /// "Blur sensitive pictures" moved: a search with the Sensitive filter on runs again at the new position.
+    func sensitivePositionChanged() {
+        if has(.sensitive) { run() }
+    }
+
     /// Every result shown, in order (strong ones, then the weaker ones once they're unfolded).
     var rows: [ResultRow] { results.ranked + (showWeaker ? results.weaker : []) }
 
@@ -328,6 +334,7 @@ final class SearchModel {
             case .shotOnMyDevices: filter.shotOn = Set(myDevices)   // empty: still filtering (`SearchFilter.shotOn`)
             case .origin(let origin): filter.origins = [origin.rawValue]
             case .area: break
+            case .sensitive: filter.sensitive = model.settings.blurSensitive.filterPosition
             }
         }
         return filter
@@ -346,6 +353,13 @@ final class SearchModel {
     }
     /// There's something to show: words typed, or a filter that lists files by itself.
     var isSearching: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !searchFilter.isEmpty }
+    /// Save This Search… can save it: there's something to show, and no Sensitive filter (`saveNote`).
+    var canSave: Bool { isSearching && !has(.sensitive) }
+    /// Why the Saved menu can't save what's shown: the saved searches' shape (PHOTOS-FACTS-SCHEMA.md) has no key for
+    /// the Sensitive filter yet, and one saved without it would keep more than this search does.
+    var saveNote: String? {
+        isSearching && has(.sensitive) ? "Searches with the Sensitive filter can't be saved yet" : nil
+    }
 
     /// A search of code: the Code filter, or "code:" typed.
     var isCode: Bool { filter == .code || CodeQuery.text(of: query) != nil }
@@ -432,6 +446,7 @@ final class SearchModel {
         // The window's From offers these two origins (`PhotosFilterMenus`).
         case .origin(let origin): SavedSearch.From(rawValue: origin.rawValue).map { .from($0) }
         case .area: area.map { .area(SavedSearch.Area($0)) }
+        case .sensitive: nil   // never saved: Save is off while it's on (`canSave`)
         }
     }
 
@@ -674,7 +689,7 @@ struct SearchWindowView: View {
                             .offset(x: 30, y: 44)   // just under the field, below the magnifier
                     }
                 }
-                SavedSearchesMenu(saved: app.savedSearches, canSave: search.isSearching,
+                SavedSearchesMenu(saved: app.savedSearches, canSave: search.canSave, saveNote: search.saveNote,
                                   open: { app.searchWindow.open($0) }, save: { app.searchWindow.saveSearch() },
                                   edit: { app.searchWindow.editSavedSearches() })
                 Button {
@@ -725,6 +740,14 @@ struct SearchWindowView: View {
                         .buttonStyle(.plain)
                         .help("Favorites: only what you've marked ♥ in DigUp (\(search.favorites.count))")
                         .accessibilityAddTraits(search.has(.digupFavorites) ? .isSelected : [])
+                        Button {
+                            search.toggle(.sensitive)
+                        } label: {
+                            FilterChipLabel(title: "Sensitive", symbol: "eye.slash", selected: search.has(.sensitive))
+                        }
+                        .buttonStyle(.plain)
+                        .help(FilterToken.sensitive.help)
+                        .accessibilityAddTraits(search.has(.sensitive) ? .isSelected : [])
                     }
                     if search.searchesPhotos, !search.isCode {
                         Divider().frame(height: 16).padding(.horizontal, 2)
@@ -983,8 +1006,10 @@ private struct ResultsGrid: View {
     private func cell(_ row: ResultRow) -> some View {
         GridCell(row: row, selected: row.id == search.selectedRow?.id, favorite: search.favorites.contains(row))
             .id(row.id)
-            .overlay(FileDragArea(url: row.url, openTitle: row.openTitle, onClick: { search.select(row) },
-                                  onOpen: { search.open(row) }))
+            .overlay(FileDragArea(url: row.url, openTitle: row.openTitle, onClick: {
+                SensitiveBlur.shared.show(row)   // a click shows a blurred picture
+                search.select(row)
+            }, onOpen: { search.open(row) }))
     }
 }
 
@@ -1006,7 +1031,9 @@ private struct GridCell: View {
                             .font(.system(size: 34, weight: .light))
                             .foregroundStyle(Brand.gradient)
                     } else {
-                        MomentThumbnail(row: row)
+                        let hidden = SensitiveBlur.shared.hides(row)
+                        MomentThumbnail(row: row, hidden: hidden)
+                            .sensitiveCover(hidden, iconSize: 20)
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -1168,9 +1195,11 @@ private struct CodeOffOrHint: View {
     }
 }
 
-/// A grid cell's picture: the video frame or PDF page that matched (from the preview cache), else Quick Look's.
+/// A grid cell's picture: the video frame or PDF page that matched (from the preview cache), else Quick Look's; veiled
+/// while it's `hidden` (`SensitiveBlur`).
 private struct MomentThumbnail: View {
     let row: ResultRow
+    var hidden = false
     @State private var image: NSImage?
     @Environment(\.displayScale) private var scale
 
@@ -1178,7 +1207,7 @@ private struct MomentThumbnail: View {
         Group {
             if let image {
                 // A page shows its top (its title), anything else its middle.
-                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                Image(nsImage: image.veiled(hidden)).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: row.page == nil ? .center : .top)
             } else {
                 Image(nsImage: NSWorkspace.shared.icon(forFile: row.url.path))

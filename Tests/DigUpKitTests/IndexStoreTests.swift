@@ -131,7 +131,8 @@ import WinSDK
 
     @Test func theForksTablesAreAddedOnceAndTheSchemaStaysUpstreams() throws {
         let fork: Set = ["locations", "photos_people", "photos_person_files", "photos_person_files_file",
-                         "photos_albums", "photos_album_files", "photos_album_files_file", "photos_assets"]
+                         "photos_albums", "photos_album_files", "photos_album_files_file", "photos_assets",
+                         "sensitive_scores"]
         func check(_ store: IndexStore) throws {
             var names = Set<String>(), version: Int64 = 0
             try store.db.query("SELECT name FROM sqlite_master") { names.insert($0.text(0) ?? "") }
@@ -146,6 +147,7 @@ import WinSDK
         try upstream.db.execute("""
             DROP TABLE locations; DROP TABLE photos_person_files; DROP TABLE photos_people;
             DROP TABLE photos_album_files; DROP TABLE photos_albums; DROP TABLE photos_assets;
+            DROP TABLE sensitive_scores;
             DELETE FROM meta WHERE key = 'fork_photos_facts';
             """)
         let reopened = try IndexStore(directory: folder)

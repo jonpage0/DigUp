@@ -17,6 +17,10 @@ public struct Costs: Sendable {
     /// Max, 2026-10-22, with parakeet-mlx 0.5.3: 0.0156 s a second and about half a second a file to start, 0.020 s a
     /// second for a recording of two minutes; that Mac's speed check puts it at ×0.88 of the M4 Pro.
     public var speechSecond = 0.022
+    /// Rating a picture for how revealing it is (`PictureRater`), on top of reading and embedding it: a picture, a
+    /// screenshot, a video's keyframe, where the detector is installed. Measured on an M3 Max, not the M4 Pro
+    /// (2026-10-22, indexing the osxphotos test libraries: 17 pictures in 0.87 s, Core ML on the GPU).
+    public var sensitivePicture = 0.051
     public init() {}
 }
 
@@ -74,15 +78,20 @@ public struct Estimate: Sendable {
 /// First-index time from metadata alone: counts, PDF page counts and media durations come from Spotlight (falling
 /// back to the file header when Spotlight hasn't seen a file yet), so nothing is decoded.
 public enum Estimator {
-    public static func estimate(_ candidates: [Candidate], options: IndexOptions, costs: Costs = Costs()) -> Estimate {
+    /// `ratesPictures`: the sensitive-picture detector is installed, so each picture and each video's keyframes are
+    /// rated as they're read (`Costs.sensitivePicture`; a keyframe every `frameInterval` seconds at the most, fewer
+    /// where a shot goes on).
+    public static func estimate(_ candidates: [Candidate], options: IndexOptions, costs: Costs = Costs(),
+                                ratesPictures: Bool = false) -> Estimate {
         var estimate = Estimate()
+        let rating = ratesPictures ? costs.sensitivePicture : 0
         for file in candidates {
             estimate.files[file.kind, default: 0] += 1
             let before = estimate.seconds
             defer { estimate.kindSeconds[file.kind, default: 0] += estimate.seconds - before }
             switch file.kind {
-            case .image: estimate.seconds += costs.image
-            case .screenshot: estimate.seconds += costs.screenshot
+            case .image: estimate.seconds += costs.image + rating
+            case .screenshot: estimate.seconds += costs.screenshot + rating
             case .pdf:
                 let total = pages(of: file.path)
                 let all = min(total, options.maxPages)
@@ -106,7 +115,9 @@ public enum Estimator {
             case .audio, .video:
                 let seconds = duration(of: file.path)
                 if file.kind == .audio { estimate.audioSeconds += seconds } else { estimate.videoSeconds += seconds }
-                estimate.seconds += seconds * (file.kind == .audio ? costs.audioSecond : costs.videoSecond)
+                // A video's keyframes are rated too, where the detector is installed.
+                estimate.seconds += seconds * (file.kind == .audio ? costs.audioSecond
+                                                                   : costs.videoSecond + rating / options.frameInterval)
                 // What's said in it, when that's read. A Photos video in iCloud is read from its stills, which are
                 // pictures: no length, and nothing said.
                 if options.speech != nil {
@@ -132,8 +143,10 @@ public enum Estimator {
     /// Subfolders are named under `folder` as given, though the walk reports real paths (/private/var for /var). A Photos
     /// library has none to show: its own folders (originals, resources) aren't for choosing among.
     public static func estimates(bySubfolder candidates: [Candidate], of folder: String, options: IndexOptions,
-                                 costs: Costs = Costs()) -> [String: Estimate] {
-        if PhotosLibrary.isLibrary(folder) { return [folder: estimate(candidates, options: options, costs: costs)] }
+                                 costs: Costs = Costs(), ratesPictures: Bool = false) -> [String: Estimate] {
+        if PhotosLibrary.isLibrary(folder) {
+            return [folder: estimate(candidates, options: options, costs: costs, ratesPictures: ratesPictures)]
+        }
         let prefix = folder.hasSuffix("/") ? folder : folder + "/"
         let real = FolderSelection.realPath(folder) + "/"
         var groups: [String: [Candidate]] = [:]
@@ -143,6 +156,6 @@ public enum Estimator {
             let key = rest.flatMap { rest in rest.firstIndex(of: "/").map { prefix + rest[..<$0] } } ?? folder
             groups[key, default: []].append(file)
         }
-        return groups.mapValues { estimate($0, options: options, costs: costs) }
+        return groups.mapValues { estimate($0, options: options, costs: costs, ratesPictures: ratesPictures) }
     }
 }

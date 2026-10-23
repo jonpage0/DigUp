@@ -369,13 +369,17 @@ struct PreviewPicture: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .frame(maxWidth: size.width, maxHeight: size.height)
             } else if let image {
-                Image(nsImage: image)
+                let hidden = SensitiveBlur.shared.hides(row)
+                Image(nsImage: image.veiled(hidden))
                     .resizable()
+                    .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
                     .overlay(alignment: .bottomLeading) { marks }
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2, perform: open)
                     .overlay { if row.moment != nil { PlayButton(row: row) } }
+                    // Over the play button too: playing it would show it. A click shows it.
+                    .sensitiveCover(hidden, iconSize: 26, show: { SensitiveBlur.shared.show(row) })
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))

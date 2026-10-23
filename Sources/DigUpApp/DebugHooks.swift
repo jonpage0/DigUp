@@ -56,8 +56,9 @@ import SwiftUI
 ///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot
 ///     -debugMap YES           with -debugWindow search: the map shows above the results
 ///     -debugArea "lat1,lon1,lat2,lon2"   with -debugWindow search: results kept to that box of the map
-///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup"   with -debugWindow search: these filters on
-///                             (a Photos library's people and albums, by name; Photos' favorites; DigUp's own)
+///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup|sensitive"   with -debugWindow search: these
+///                             filters on (a Photos library's people and albums, by name; Photos' favorites; DigUp's
+///                             own; the Sensitive filter)
 ///     -debugSaved "<name>"    with -debugWindow search: then open the saved search of that name, as the Saved menu
 ///                             would
 ///     -debugSavedMenu YES     with -debugWindow search: after the snapshot, log the Saved menu's items and draw them
@@ -392,6 +393,8 @@ enum DebugHooks {
                                 search.set(.photosFavorites, on: true)
                             } else if kind == "digup" {
                                 search.set(.digupFavorites, on: true)
+                            } else if kind == "sensitive" {
+                                search.set(.sensitive, on: true)
                             } else {
                                 log("debug: no filter \"\(part)\"")
                             }
@@ -458,7 +461,8 @@ enum DebugHooks {
         let defaults = UserDefaults.standard
         let window = app.searchWindow!
         if defaults.bool(forKey: "debugSavedMenu") {
-            let items = SavedMenuItem.items(app.savedSearches, canSave: window.search.isSearching)
+            let items = SavedMenuItem.items(app.savedSearches, canSave: window.search.canSave,
+                                            saveNote: window.search.saveNote)
             log("saved menu: " + items.map { item in
                 switch item {
                 case .search(let search): search.name
@@ -513,7 +517,7 @@ enum DebugHooks {
                 log("debug: \(row.name) has \(filmstrip.count) stills, no still \(number)")
                 return done()
             }
-            playback.pick(still: filmstrip[number - 1], of: row)
+            playback.pick(still: filmstrip[number - 1], at: number - 1, of: row)
             return report("still \(number) of \(filmstrip.count)")
         }
         Task {

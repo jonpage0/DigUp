@@ -27,6 +27,9 @@ public struct SearchHit: Sendable {
     /// counted from the scores the search has anyway, and from its stretches of speech that hold the query's words. 0
     /// when none does (it's here by its name, say).
     public var momentCount = 0
+    /// A picture or a video: what the sensitive-picture detector said of each of its pictures (`SensitivePictures`).
+    /// Nil for any other file.
+    public var pictures: SensitivePictures? = nil
 }
 
 /// A stretch of a recording that matches a query (`Searcher.moments(of:text:queryVector:zGate:)`): its segments that
@@ -127,6 +130,14 @@ public struct SearchFilter: Sendable, Equatable {
     /// before anything is matched, counted or cut to the best, so it's never in a result or a count, and found by path,
     /// whatever the index knows of the file yet.
     public var photosOnly: Set<String>?
+    /// Only files with a picture rated sensitive at this position (the Sensitive filter): a picture, or a frame or a
+    /// still of a video (`sensitive_scores`).
+    public var sensitive: SensitivePosition?
+    /// Leaves out every file with a picture rated sensitive at this position, and every picture or video not rated yet
+    /// (not read, or with a picture the rating pass hasn't got to, or never read: too small, or unreadable): what an AI
+    /// app doesn't see while "Pictures rated sensitive" is off (`AIAccess.sensitive`), fail-safe as hidden Photos items
+    /// are. Left out before anything is matched, counted or cut to the best, as `photosOnly` is.
+    public var leavingOutSensitive: SensitivePosition?
 
     /// A box on the map, in degrees: south to north, west to east.
     public struct Area: Sendable, Equatable {
@@ -147,7 +158,16 @@ public struct SearchFilter: Sendable, Equatable {
 
     public var isEmpty: Bool {
         people.isEmpty && albums == nil && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
-            && paths == nil && area == nil && photosOnly == nil
+            && paths == nil && area == nil && photosOnly == nil && sensitive == nil && leavingOutSensitive == nil
+    }
+
+    /// What of it leaves files out of an AI app's sight (`photosOnly`, `leavingOutSensitive`); empty for DigUp's own
+    /// searches. A file it leaves out bears on nothing a search does, not even on whether a word counts as indexed
+    /// (`Searcher.search`'s prefix matching).
+    var exclusions: SearchFilter {
+        var exclusions = SearchFilter()
+        (exclusions.photosOnly, exclusions.leavingOutSensitive) = (photosOnly, leavingOutSensitive)
+        return exclusions
     }
 
     /// A part of the query that keeps no file (`IN ()` isn't SQL).
@@ -208,6 +228,20 @@ public struct SearchFilter: Sendable, Equatable {
                 let list = try? JSONSerialization.data(withJSONObject: Array(photosOnly), options: .withoutEscapingSlashes)
                 values.append(.text(list.map { String(decoding: $0, as: UTF8.self) } ?? "[]"))
             }
+        }
+        if let sensitive {
+            parts.append("SELECT s.file FROM sensitive_scores JOIN segments s ON s.id = segment WHERE "
+                         + sensitive.condition)
+        }
+        if let leavingOutSensitive {
+            // A file that isn't a picture or a video has no picture to rate; one that is must have been read, and each
+            // of its pictures rated and not sensitive.
+            parts.append("""
+                SELECT id FROM files f WHERE f.kind NOT IN \(IndexStore.pictureKinds) OR (f.state IN \
+                \(IndexStore.readStates) AND NOT \(IndexStore.hasUnratedPicture) AND NOT EXISTS (
+                    SELECT 1 FROM sensitive_scores JOIN segments s ON s.id = segment
+                    WHERE s.file = f.id AND \(leavingOutSensitive.condition)))
+                """)
         }
         return parts.isEmpty ? nil : (parts.joined(separator: " INTERSECT "), values)
     }
@@ -345,7 +379,9 @@ public final class Searcher {
         let identifier = isCode ? CodeLookup.identifier(text) : nil
         var words: [(file: Int64, segment: Int64, snippet: String?)] = []
         var coverage: [Int64: Double] = [:]   // share of the query's words found anywhere in the file
-        let patterns = try identifier.map { [CodeLookup.phrase($0)] } ?? wordPatterns(terms, prefixLast: prefixLast)
+        // Only the files an AI app may see count for a word's prefix matching (`SearchFilter.exclusions`).
+        let patterns = try identifier.map { [CodeLookup.phrase($0)] }
+            ?? wordPatterns(terms, prefixLast: prefixLast, within: filter.exclusions.query)
         if !patterns.isEmpty {
             var seen = Set<Int64>()
             // The filter narrows the matches before they're cut to the best 1,000: else a file it keeps could be
@@ -441,7 +477,8 @@ public final class Searcher {
                                   modified: row.modified, size: row.size, info: row.info, focus: focus,
                                   photos: try photosHit(file: file, path: row.path, segment: segmentID, kind: segment),
                                   momentCount: try moments(ofFile: file, standouts[file] ?? [], said: said,
-                                                           weights: (meaningWeight, wordsWeight)).count))
+                                                           weights: (meaningWeight, wordsWeight)).count,
+                                  pictures: try pictures(file: file, kind: row.kind)))
         }
         return hits
     }
@@ -470,8 +507,14 @@ public final class Searcher {
             return SearchHit(path: row.path, kind: row.kind, score: 0, z: nil, cosine: nil, keywordRank: nil,
                              segment: segment.kind, segmentID: segment.id, loc: nil, locEnd: nil, excerpt: nil,
                              modified: row.modified, size: row.size, info: row.info,
-                             photos: try photosHit(file: file, path: row.path, segment: segment.id, kind: segment.kind))
+                             photos: try photosHit(file: file, path: row.path, segment: segment.id, kind: segment.kind),
+                             pictures: try pictures(file: file, kind: row.kind))
         }
+    }
+
+    /// What the detector said of a picture's or a video's pictures; nil for any other file.
+    private func pictures(file: Int64, kind: FileKind) throws -> SensitivePictures? {
+        [.image, .screenshot, .video].contains(kind) ? try store.sensitivePictures(ofFile: file) : nil
     }
 
     /// A file's row, as a hit shows it.
@@ -544,7 +587,8 @@ public final class Searcher {
                 .map { (segment: rowSegment[$0], z: meaning[$0]) }
         }
         let terms = Self.terms(text)
-        let said = try saidWords(inFile: file.id, wordPatterns(terms, prefixLast: false))
+        // The app's preview: nothing is left out of its sight.
+        let said = try saidWords(inFile: file.id, wordPatterns(terms, prefixLast: false, within: nil))
         return try moments(ofFile: file.id, standouts, said: said,
                            weights: Self.weights(lookup: Self.isLookup(terms), wordWeight: Self.wordWeight))
     }
@@ -811,19 +855,27 @@ public final class Searcher {
     /// while it's being typed: "grok" finds "Grok4" and "Grokipedia" (stemming only covers endings, as in "grokking").
     /// Otherwise a file the panel showed while you typed dropped out once you stopped. A word that is in the index as
     /// typed stays whole, so "cat" doesn't bring in "category"; so does a word of two letters, the start of too many
-    /// words to stand for one.
-    private func wordPatterns(_ terms: [String], prefixLast: Bool) throws -> [String] {
+    /// words to stand for one. Only the files `within` keeps count (an AI app's, `SearchFilter.exclusions`; nil, every
+    /// file): one left out having the word must not make it stay whole, nor show that it's there.
+    private func wordPatterns(_ terms: [String], prefixLast: Bool,
+                              within kept: (sql: String, values: [SQLValue])?) throws -> [String] {
         var patterns = Self.patterns(terms, prefixLast: prefixLast)
         for index in terms.indices where terms[index].count >= 3 && !patterns[index].hasSuffix("*") {
-            if try !isIndexed(patterns[index]) { patterns[index] += "*" }
+            if try !isIndexed(patterns[index], within: kept) { patterns[index] += "*" }
         }
         return patterns
     }
 
-    /// Whether keyword search finds `pattern` in any file.
-    private func isIndexed(_ pattern: String) throws -> Bool {
+    /// Whether keyword search finds `pattern` in any file, or in any of the files `within` keeps.
+    private func isIndexed(_ pattern: String, within kept: (sql: String, values: [SQLValue])?) throws -> Bool {
         var found = false
-        try store.db.query("SELECT 1 FROM fts WHERE fts MATCH ? LIMIT 1", [.text(pattern)]) { _ in found = true }
+        guard let kept else {
+            try store.db.query("SELECT 1 FROM fts WHERE fts MATCH ? LIMIT 1", [.text(pattern)]) { _ in found = true }
+            return found
+        }
+        try store.db.query("""
+            SELECT 1 FROM fts JOIN segments s ON s.id = fts.rowid WHERE fts MATCH ? AND s.file IN (\(kept.sql)) LIMIT 1
+            """, [.text(pattern)] + kept.values) { _ in found = true }
         return found
     }
 

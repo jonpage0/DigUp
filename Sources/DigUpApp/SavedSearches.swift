@@ -387,7 +387,7 @@ final class SavedSearches {
 /// The Saved menu's items, in order: the saved searches, then Save This Search… (⌘S) and Edit Saved Searches….
 enum SavedMenuItem: Identifiable {
     case search(SavedSearch)
-    /// A line that can't be chosen: none saved yet, or a file that can't be read.
+    /// A line that can't be chosen: none saved yet, a file that can't be read, or why this search can't be saved.
     case note(String)
     case divider
     case save(enabled: Bool)
@@ -406,16 +406,17 @@ enum SavedMenuItem: Identifiable {
     static let saveTitle = "Save This Search…"
     static let editTitle = "Edit Saved Searches…"
 
-    /// `canSave`: the window has something to save (words, or a filter).
-    static func items(_ saved: SavedSearches, canSave: Bool) -> [SavedMenuItem] {
+    /// `canSave`: the window has something to save (words, or a filter). `saveNote`: why it can't be saved, said under
+    /// Save This Search….
+    static func items(_ saved: SavedSearches, canSave: Bool, saveNote: String? = nil) -> [SavedMenuItem] {
         var items: [SavedMenuItem] = saved.searches.map { .search($0) }
         if saved.unreadable {
             items = [.note("\(saved.url.lastPathComponent) can't be read")]
         } else if items.isEmpty {
             items = [.note("No saved searches yet")]
         }
-        return items + [.divider, .save(enabled: canSave && !saved.unreadable),
-                        .edit(enabled: !saved.unreadable && !saved.searches.isEmpty)]
+        return items + [.divider, .save(enabled: canSave && !saved.unreadable)] + (saveNote.map { [.note($0)] } ?? [])
+            + [.edit(enabled: !saved.unreadable && !saved.searches.isEmpty)]
     }
 }
 
@@ -424,13 +425,14 @@ enum SavedMenuItem: Identifiable {
 struct SavedSearchesMenu: View {
     let saved: SavedSearches
     let canSave: Bool
+    var saveNote: String?
     let open: (SavedSearch) -> Void
     let save: () -> Void
     let edit: () -> Void
 
     var body: some View {
         Menu {
-            ForEach(SavedMenuItem.items(saved, canSave: canSave)) { item in
+            ForEach(SavedMenuItem.items(saved, canSave: canSave, saveNote: saveNote)) { item in
                 switch item {
                 case .search(let search): Button(search.name) { open(search) }
                 case .note(let text): Text(text)

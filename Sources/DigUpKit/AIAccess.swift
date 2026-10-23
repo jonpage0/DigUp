@@ -14,13 +14,19 @@ public struct AIAccess: Sendable, Equatable {
     public var code: Bool
     /// Pictures themselves: a result's thumbnail, which goes to the AI app's model provider.
     public var pictures: Bool
+    /// Pictures rated sensitive. Off, a picture or video with a picture rated sensitive at the position the Sensitive
+    /// filter goes by (`SensitivePosition.filterPosition`) is never returned, counted or read, and neither is one not
+    /// rated yet (`SearchFilter.leavingOutSensitive`). Approved with the AI apps tab (MCP-PLAN.md): "leave out pictures
+    /// rated sensitive" on.
+    public var sensitive: Bool
 
     /// Pictures AI apps get are at most this big, on their long side (MCP-PLAN.md).
     public static let picturePixels = 768
 
     public init(on: Bool = false, photos: Bool = false, hiddenPhotos: Bool = false, code: Bool = false,
-                pictures: Bool = false) {
+                pictures: Bool = false, sensitive: Bool = false) {
         (self.on, self.photos, self.hiddenPhotos, self.code, self.pictures) = (on, photos, hiddenPhotos, code, pictures)
+        self.sensitive = sensitive
     }
 
     /// As the app's settings have it now; a switch never set is off.
@@ -29,7 +35,8 @@ public struct AIAccess: Sendable, Equatable {
                   photos: defaults.bool(forKey: AppDefaults.aiAccessPhotos),
                   hiddenPhotos: defaults.bool(forKey: AppDefaults.aiAccessHiddenPhotos),
                   code: defaults.bool(forKey: AppDefaults.aiAccessCode),
-                  pictures: defaults.bool(forKey: AppDefaults.aiAccessPictures))
+                  pictures: defaults.bool(forKey: AppDefaults.aiAccessPictures),
+                  sensitive: defaults.bool(forKey: AppDefaults.aiAccessSensitive))
     }
 
     public func save(to defaults: UserDefaults) {
@@ -38,6 +45,7 @@ public struct AIAccess: Sendable, Equatable {
         defaults.set(hiddenPhotos, forKey: AppDefaults.aiAccessHiddenPhotos)
         defaults.set(code, forKey: AppDefaults.aiAccessCode)
         defaults.set(pictures, forKey: AppDefaults.aiAccessPictures)
+        defaults.set(sensitive, forKey: AppDefaults.aiAccessSensitive)
     }
 }
 
@@ -57,6 +65,9 @@ public enum AppDefaults {
     public static let aiAccessHiddenPhotos = "aiAccessHiddenPhotos"
     public static let aiAccessCode = "aiAccessCode"
     public static let aiAccessPictures = "aiAccessPictures"
+    public static let aiAccessSensitive = "aiAccessSensitive"
+    /// "Blur sensitive pictures" (`SensitivePosition`'s raw value), which `digup mcp` goes by too.
+    public static let blurSensitive = "blurSensitive"
 }
 
 /// One call an AI app made through `digup mcp`, as `<index folder>/mcp.log` keeps it, a JSON line each: when, which app
