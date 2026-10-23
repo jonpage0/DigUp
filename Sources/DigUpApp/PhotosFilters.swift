@@ -166,7 +166,7 @@ nonisolated struct PhotosChoices: Sendable, Equatable {
 }
 
 /// A filter the window's search keeps to: a token in the search field (× or ⌫ in an empty field takes it off), and
-/// checked in its menu beside the kinds. Plain data, as `PhotosChoices` makes it.
+/// checked in the Filters menu (or the Favorites chip) beside the kinds. Plain data, as `PhotosChoices` makes it.
 nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
     /// In the picture (every person chosen must be): the ids of everyone with that name, and who they are in Photos
     /// (what a saved search keeps). No ids: a saved search's person who isn't in the indexed libraries now, which
@@ -190,6 +190,10 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
     /// A picture or video with a picture rated sensitive (`SearchFilter.sensitive`), at the position "Blur sensitive
     /// pictures" has when the search runs (Revealing while blurring is off: `SensitivePosition.filterPosition`).
     case sensitive
+    /// A video or a recording this long (`SearchFilter.length`): one Length at a time.
+    case length(SearchFilter.Length)
+    /// A picture or a video of this shape as it's shown (`SearchFilter.shape`): one Shape at a time.
+    case shape(SearchFilter.Shape)
 
     /// A person by their name and an album by its folders and title, as the menus offer them; one that isn't in
     /// Photos now by the Photos ids it was saved with.
@@ -205,12 +209,35 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case .origin(let origin): "from:\(origin.rawValue)"
         case .area: "area"
         case .sensitive: "sensitive"
+        case .length(let length): "length:\(length.text)"
+        case .shape(let shape): "shape:\(shape.text)"
         }
     }
 
-    /// Only one "From" filter is on at a time: what was shot on my devices and what was saved from apps exclude each
-    /// other, and both together would keep nothing.
-    var isFrom: Bool { id.hasPrefix("from:") }
+    /// The filters that are on one at a time, each with its group: what was shot on my devices and what was saved from
+    /// apps exclude each other (both together would keep nothing), and so do two lengths or two shapes. The one picked
+    /// replaces the one on.
+    enum Choice {
+        case from, length, shape
+    }
+
+    var choice: Choice? {
+        switch self {
+        case .shotOnMyDevices, .origin: .from
+        case .length: .length
+        case .shape: .shape
+        default: nil
+        }
+    }
+
+    /// It's among the Filters menu's (`FiltersMenu`): every filter but DigUp's favorites (their own chip) and the map's
+    /// area (the map's).
+    var isInFiltersMenu: Bool {
+        switch self {
+        case .digupFavorites, .area: false
+        default: true
+        }
+    }
 
     /// A saved search's person or album that isn't in the indexed libraries now (deleted in Photos, or the library
     /// isn't searched): its token shows struck through, and it keeps nothing rather than everyone.
@@ -231,6 +258,8 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case .origin(let origin): origin == .imported ? "Imported into Photos" : "Saved from other apps"
         case .area: "In the map's area"
         case .sensitive: "Sensitive"
+        case .length(let length): length.title
+        case .shape(let shape): shape.title
         }
     }
 
@@ -244,6 +273,8 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case .origin(let origin): origin == .imported ? "square.and.arrow.down" : "arrow.down.app"
         case .area: "map"
         case .sensitive: "eye.slash"
+        case .length: "timer"
+        case .shape(let shape): shape.symbol
         }
     }
 
@@ -266,6 +297,90 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case .sensitive:
             "Only pictures and videos with a picture rated sensitive, at Blur sensitive pictures' position (Settings → "
                 + "General; Revealing while it's off)"
+        case .length(let length): "Only videos and recordings \(length.phrase)"
+        case .shape(let shape): "Only pictures and videos \(shape.phrase), as they're shown"
+        }
+    }
+}
+
+/// What the Length menu and a Length token say of a length.
+nonisolated extension SearchFilter.Length {
+    /// The menu's buckets as they're named ("Under 15 s", "15 s – 1 min", "1 – 5 min", "Over 5 min"), any other
+    /// length (a saved search's, made by hand) by its bounds the same way.
+    var title: String {
+        switch (atLeast, under) {
+        case (let atLeast?, let under?):
+            Self.minutes(atLeast).flatMap { from in Self.minutes(under).map { "\(from) – \($0) min" } }
+                ?? "\(Self.spoken(atLeast)) – \(Self.spoken(under))"
+        case (let atLeast?, nil): "Over \(Self.spoken(atLeast))"
+        case (nil, let under?): "Under \(Self.spoken(under))"
+        case (nil, nil): ""   // not a length (`init` turns it down)
+        }
+    }
+
+    /// "shorter than 15 s", "at least 15 s long and shorter than 1 min", "5 min long or longer".
+    var phrase: String {
+        switch (atLeast, under) {
+        case (let atLeast?, let under?): "at least \(Self.spoken(atLeast)) long and shorter than \(Self.spoken(under))"
+        case (let atLeast?, nil): "\(Self.spoken(atLeast)) long or longer"
+        case (nil, let under?): "shorter than \(Self.spoken(under))"
+        case (nil, nil): ""
+        }
+    }
+
+    /// "15 s", "1 min", "1 min 30 s".
+    private static func spoken(_ seconds: Double) -> String {
+        if let whole = minutes(seconds) { return "\(whole) min" }
+        let over = Int(seconds) / 60
+        let rest = "\((seconds - Double(over * 60)).formatted(.number.precision(.fractionLength(0...1)))) s"
+        return over > 0 ? "\(over) min \(rest)" : rest
+    }
+
+    /// Whole minutes, from 1 up; nil for any other number of seconds.
+    private static func minutes(_ seconds: Double) -> Int? {
+        seconds >= 60 && seconds.truncatingRemainder(dividingBy: 60) == 0 ? Int(seconds / 60) : nil
+    }
+}
+
+/// What the Shape menu and a Shape token say of a shape.
+nonisolated extension SearchFilter.Shape {
+    var title: String {
+        switch self {
+        case .portrait: "Portrait"
+        case .landscape: "Landscape"
+        case .square: "Square"
+        case .wide: "Wide"
+        case .ratio: text
+        }
+    }
+
+    /// The Shape menu's item: its title, and for square and wide what they take in.
+    var menuTitle: String {
+        switch self {
+        case .square: "Square (sides within 5 %)"
+        case .wide: "Wide (2:1 or wider)"
+        default: title
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .portrait: "rectangle.portrait"
+        case .landscape: "rectangle"
+        case .square: "square"
+        case .wide: "pano"
+        case .ratio: "aspectratio"
+        }
+    }
+
+    /// "taller than they're wide", "shaped 16:9 (within 2 %)".
+    var phrase: String {
+        switch self {
+        case .portrait: "taller than they're wide"
+        case .landscape: "wider than they're tall"
+        case .square: "with sides within 5 % of each other"
+        case .wide: "at least twice as wide as they're tall (panoramas, cinema)"
+        case .ratio: "shaped \(text) (within 2 %)"
         }
     }
 }
@@ -348,125 +463,150 @@ struct FilterSuggestionsBar: View {
     }
 }
 
-/// People ▾ · Albums ▾ · ♥ Favorites beside the kinds: what Photos knows, as filters. A choice is a token in the field
-/// too. Everyone picked must be in a picture; it may be in any album picked.
-struct PhotosFilterMenus: View {
+/// Filters ▾ beside the kinds and the Favorites chip (Jon, 2026-10-22: "yes"): every filter but DigUp's favorites and
+/// the map's area, in one menu, so the row fits the window. Photos' people (everyone picked must be in a picture),
+/// albums (it may be in any one picked), favorites and From while a library is searched; then Sensitive, Length and
+/// Shape. A filter with choices has a submenu, whose title says which is on. The menu's title counts the filters on
+/// ("Filters · 2"), and each is a token in the field too.
+struct FiltersMenu: View {
     let search: SearchModel
 
     var body: some View {
-        HStack(spacing: 6) {
-            if !search.choices.people.isEmpty {
-                Menu {
-                    ForEach(search.choices.people) { person in
-                        PhotosFilterToggle(title: "\(person.name)  ·  \(person.files)", token: person.token,
-                                           search: search)
-                    }
-                } label: {
-                    FilterChipLabel(title: title(of: people, none: "People"), symbol: "person.crop.circle",
-                                    selected: !people.isEmpty, menu: true)
-                }
-                .menuStyle(.button)
-                .buttonStyle(.plain)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("People: only pictures everyone you pick is in")
-            }
-            if !search.choices.albums.isEmpty {
-                Menu {
-                    AlbumMenuItems(albums: search.choices.albums, depth: 0, search: search)
-                } label: {
-                    FilterChipLabel(title: title(of: albums, none: "Albums"), symbol: "rectangle.stack",
-                                    selected: !albums.isEmpty, menu: true)
-                }
-                .menuStyle(.button)
-                .buttonStyle(.plain)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("Albums: only what's in any album you pick")
-            }
-            Button {
-                search.toggle(.photosFavorites)
-            } label: {
-                FilterChipLabel(title: "Photos Favorites", symbol: search.has(.photosFavorites) ? "heart.fill" : "heart",
-                                selected: search.has(.photosFavorites))
-            }
-            .buttonStyle(.plain)
-            .help("Photos Favorites: only what you've marked ♥ in Photos")
-            .accessibilityAddTraits(search.has(.photosFavorites) ? .isSelected : [])
-            Menu {
-                let devices = search.myDevices
-                PhotosFilterToggle(title: "Shot on my devices", token: .shotOnMyDevices, search: search)
-                    .disabled(devices.isEmpty && !search.has(.shotOnMyDevices))
-                if !devices.isEmpty {
-                    Text(devices.formatted(.list(type: .and)))
-                }
-                Divider()
-                PhotosFilterToggle(title: "Saved from other apps", token: .origin(.saved), search: search)
-                PhotosFilterToggle(title: "Imported into Photos", token: .origin(.imported), search: search)
-            } label: {
-                FilterChipLabel(title: from?.title ?? "From", symbol: from?.symbol ?? "iphone", selected: from != nil,
-                                menu: true)
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("From: what you shot on your own devices, what other apps saved, or what was imported")
+        let count = FilterMenuItem.count(search)
+        Menu {
+            FilterMenuContent(items: FilterMenuItem.items(search), search: search)
+        } label: {
+            FilterChipLabel(title: FilterMenuItem.title(on: count), symbol: "line.3.horizontal.decrease.circle",
+                            selected: count > 0, menu: true)
         }
-    }
-
-    private var people: [String] {
-        search.tokens.compactMap { if case .person(let name, _, _) = $0 { name } else { nil } }
-    }
-
-    /// The "From" filter that's on, if one is.
-    private var from: FilterToken? { search.tokens.first(where: \.isFrom) }
-
-    private var albums: [String] {
-        search.tokens.compactMap { if case .album(let title, _, _, _) = $0 { title } else { nil } }
-    }
-
-    /// "People", "Tati", or "Tati + 2".
-    private func title(of names: [String], none: String) -> String {
-        guard let first = names.first else { return none }
-        return names.count == 1 ? first : "\(first) + \(names.count - 1)"
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(search.searchesPhotos
+              ? "Filters: Photos' people, albums, favorites and where it came from, pictures rated sensitive, how long "
+                + "a video or a recording is, and what shape a picture or a video is"
+              : "Filters: pictures rated sensitive, how long a video or a recording is, and what shape a picture or a "
+                + "video is")
     }
 }
 
-/// An album menu's items at one depth of folders: its albums, then a submenu for each folder.
-private struct AlbumMenuItems: View {
-    let albums: [PhotosChoices.Album]
-    let depth: Int
-    let search: SearchModel
+/// One item of the Filters menu, as data: `FiltersMenu` makes the menu of them, and `-debugFiltersMenu` draws them (an
+/// open menu can't be drawn offscreen).
+enum FilterMenuItem: Identifiable {
+    /// A filter, checked while it's on.
+    case toggle(String, FilterToken, enabled: Bool = true)
+    /// A submenu: its title, which says what of it is on, a name for it among its neighbours, and its items.
+    case submenu(String, id: String, [FilterMenuItem])
+    /// A line that can't be chosen.
+    case note(String)
+    case divider(id: String)
 
-    var body: some View {
-        let here = albums.filter { $0.folders.count == depth }
+    var id: String {
+        switch self {
+        case .toggle(_, let token, _): token.id
+        case .submenu(_, let id, _): "menu:\(id)"
+        case .note(let text): "note:\(text)"
+        case .divider(let id): "divider:\(id)"
+        }
+    }
+
+    /// How many of the menu's filters are on.
+    static func count(_ search: SearchModel) -> Int {
+        search.tokens.filter(\.isInFiltersMenu).count
+    }
+
+    /// "Filters", or "Filters · 2" with two of its filters on.
+    static func title(on count: Int) -> String {
+        count == 0 ? "Filters" : "Filters · \(count)"
+    }
+
+    /// The menu as it is for the window's search now.
+    static func items(_ search: SearchModel) -> [FilterMenuItem] {
+        var items = search.searchesPhotos ? photosItems(search) + [.divider(id: "photos")] : []
+        items.append(.toggle("Sensitive", .sensitive))
+        let lengths = SearchFilter.Length.buckets.map { FilterMenuItem.toggle($0.title, .length($0)) }
+        items.append(.submenu(titled("Length", on: titles(of: .length, in: search)), id: "length", lengths))
+        let shapes: [SearchFilter.Shape] = [.portrait, .landscape, .square, .wide]
+        let shapeItems = shapes.map { FilterMenuItem.toggle($0.menuTitle, .shape($0)) } + [.divider(id: "ratios")]
+            + SearchFilter.Shape.ratios.map { FilterMenuItem.toggle($0.menuTitle, .shape($0)) }
+        items.append(.submenu(titled("Shape", on: titles(of: .shape, in: search)), id: "shape", shapeItems))
+        return items
+    }
+
+    /// People, Albums, Photos Favorites and From: what Photos knows, while a library is searched.
+    private static func photosItems(_ search: SearchModel) -> [FilterMenuItem] {
+        var items: [FilterMenuItem] = []
+        let people = search.choices.people, albums = search.choices.albums
+        if !people.isEmpty {
+            let named = search.tokens.compactMap { if case .person(let name, _, _) = $0 { name } else { nil } }
+            items.append(.submenu(titled("People", on: named), id: "people", people.map {
+                FilterMenuItem.toggle("\($0.name)  ·  \($0.files)", $0.token)
+            }))
+        }
+        if !albums.isEmpty {
+            let picked = search.tokens.compactMap { if case .album(let title, _, _, _) = $0 { title } else { nil } }
+            items.append(.submenu(titled("Albums", on: picked), id: "albums", albumItems(albums, depth: 0)))
+        }
+        items.append(.toggle("Photos Favorites", .photosFavorites))
+        let devices = search.myDevices
+        let from: [FilterMenuItem] = [
+            .toggle("Shot on my devices", .shotOnMyDevices, enabled: !devices.isEmpty || search.has(.shotOnMyDevices)),
+        ] + (devices.isEmpty ? [] : [.note(devices.formatted(.list(type: .and)))]) + [
+            .divider(id: "from"),
+            .toggle("Saved from other apps", .origin(.saved)),
+            .toggle("Imported into Photos", .origin(.imported)),
+        ]
+        items.append(.submenu(titled("From", on: titles(of: .from, in: search)), id: "from", from))
+        return items
+    }
+
+    /// The title of the From, Length or Shape that's on, if one is.
+    private static func titles(of choice: FilterToken.Choice, in search: SearchModel) -> [String] {
+        search.tokens.filter { $0.choice == choice }.map(\.title)
+    }
+
+    /// The albums at one depth of folders: their toggles, then a submenu for each folder.
+    private static func albumItems(_ albums: [PhotosChoices.Album], depth: Int) -> [FilterMenuItem] {
         var folders: [String] = []
         for album in albums where album.folders.count > depth && !folders.contains(album.folders[depth]) {
             folders.append(album.folders[depth])
         }
-        return Group {
-            ForEach(here) { album in
-                PhotosFilterToggle(title: "\(album.title)  ·  \(album.files)", token: album.token, search: search)
-            }
-            ForEach(folders, id: \.self) { folder in
-                Menu(folder) {
-                    AnyView(AlbumMenuItems(albums: albums.filter { $0.folders.count > depth && $0.folders[depth] == folder },
-                                           depth: depth + 1, search: search))
-                }
-            }
+        return albums.filter { $0.folders.count == depth }.map {
+            FilterMenuItem.toggle("\($0.title)  ·  \($0.files)", $0.token)
+        } + folders.map { folder in
+            .submenu(folder, id: "folder:\(folder)", albumItems(albums.filter {
+                $0.folders.count > depth && $0.folders[depth] == folder
+            }, depth: depth + 1))
         }
+    }
+
+    /// "Length", "Length · 15 s – 1 min", "People · Tati + 2": a submenu's title with what's on in it.
+    private static func titled(_ name: String, on: [String]) -> String {
+        guard let first = on.first else { return name }
+        return "\(name) · " + (on.count == 1 ? first : "\(first) + \(on.count - 1)")
     }
 }
 
-/// A menu item that turns one filter on and off (a check shows while it's on).
-private struct PhotosFilterToggle: View {
-    let title: String
-    let token: FilterToken
+/// The Filters menu's items at one level of it (a submenu's are a level of their own).
+private struct FilterMenuContent: View {
+    let items: [FilterMenuItem]
     let search: SearchModel
 
     var body: some View {
-        Toggle(title, isOn: Binding(get: { search.has(token) }, set: { search.set(token, on: $0) }))
+        ForEach(items) { item in
+            switch item {
+            case .toggle(let title, let token, let enabled):
+                Toggle(title, isOn: Binding(get: { search.has(token) }, set: { search.set(token, on: $0) }))
+                    .disabled(!enabled)
+            case .submenu(let title, _, let items):
+                Menu(title) { AnyView(FilterMenuContent(items: items, search: search)) }
+            case .note(let text):
+                Text(text)
+            case .divider:
+                Divider()
+            }
+        }
     }
 }
 

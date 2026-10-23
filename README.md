@@ -109,13 +109,27 @@ With the .deb, DigUp tells you when there's a new version and opens its release 
 On a Mac, Settings → Shortcuts lists every key, in the panel and the window, sets the one that opens the panel, and
 shows what the search field reads besides words (`+word`, `+"a phrase"`).
 
+On a Mac, the search window keeps All, the kinds and ♥ Favorites as chips under the field, and every other filter in
+one Filters menu beside them, which says how many are on ("Filters · 2"): a library's people, albums, Photos favorites
+and From (see [Apple Photos](#apple-photos)), Sensitive (see [Sensitive pictures](#sensitive-pictures)), and:
+
+- Length, for videos and recordings: under 15 s, 15 s to 1 min, 1 to 5 min, or over 5 min
+- Shape, for pictures and videos as they're shown: Portrait, Landscape, Square (sides within 5 %), Wide (2:1 or wider:
+  panoramas and cinema), or an exact ratio, 16:9, 9:16, 4:3, 3:4, 3:2 or 2:3, within 2 % (16:9 is landscape, 9:16
+  portrait). A phone's photo or video turned by the camera counts as it's shown, not as it's stored
+
+Each filter that's on is a token in the search field too (its × takes it off, as ⌫ does in an empty field). A Photos
+picture's size and a Photos video's length are Photos' own, so a video that's only in iCloud has its length too; any
+other file's are read from the file. `digup search --length 15..60 --shape 16:9` does the same in the CLI (seconds,
+either end left out: `..15`, `300..`).
+
 On a Mac, the search window's Saved menu (the bookmark beside the field) keeps the searches you come back to. Save This
-Search… (⌘S) keeps the words, the kind and the filters (people, albums, favorites, From, the map's area, Sensitive)
-under a name, and choosing it searches again, so new files show up; Edit Saved Searches… renames, reorders and deletes
-them. Typing the start of one's name in the panel offers it, and Tab opens it in the window. They're kept in
-`saved-searches.json` beside the index, so rebuilding the index keeps them, with Photos' people and albums by Photos'
-own ids: someone renamed in Photos is still found, and someone who's gone from Photos shows struck through, and the
-search keeps nothing for them rather than everyone.
+Search… (⌘S) keeps the words, the kind and the filters (people, albums, favorites, From, the map's area, Sensitive,
+Length, Shape) under a name, and choosing it searches again, so new files show up; Edit Saved Searches… renames,
+reorders and deletes them. Typing the start of one's name in the panel offers it, and Tab opens it in the window.
+They're kept in `saved-searches.json` beside the index, so rebuilding the index keeps them, with Photos' people and
+albums by Photos' own ids: someone renamed in Photos is still found, and someone who's gone from Photos shows struck
+through, and the search keeps nothing for them rather than everyone.
 
 DigUp lives in the menu bar on a Mac and in the tray on Windows and Linux, where you can see how indexing is going,
 pause it, or open Settings. Opening it from the Start menu or your app list shows the search window.
@@ -205,17 +219,17 @@ The search window's map (its map button) shows where results were taken: Photos'
 photo's GPS tags and a video's location for other files. Search This Area keeps the results to what's in view, and
 with nothing typed it lists everything taken there, newest first. The map is Apple Maps, so it's online (see Private).
 
-Beside the kinds, the search window has People, Albums, Photos Favorites and From: results are kept to pictures with
-everyone you pick in them, in any album you pick, marked ♥ in Photos, or, from From, shot on your own devices (what a
-device's camera saved to Photos, and older items taken with one of those devices), saved from other apps (Messages,
-AirDrop, Safari…), or imported into Photos. Settings → Photos → My devices says which devices are yours: a device
-whose camera saved something is on by itself (so a new phone joins), and you can take one off or add one that only
-took older pictures. Each filter that's on is a token in the search field (its × takes it off, as ⌫ does in an empty
-field), and typing a person's or an album's name offers it as a filter (Tab takes it). With nothing typed, the window
-lists everything the filters keep, newest first.
+While a library is searched, the search window's Filters menu has People, Albums, Photos Favorites and From (a submenu
+for each with choices): results are kept to pictures with everyone you pick in them, in any album you pick, marked ♥
+in Photos, or, from From, shot on your own devices (what a device's camera saved to Photos, and older items taken with
+one of those devices), saved from other apps (Messages, AirDrop, Safari…), or imported into Photos. Settings → Photos
+→ My devices says which devices are yours: a device whose camera saved something is on by itself (so a new phone
+joins), and you can take one off or add one that only took older pictures. Each filter that's on is a token in the
+search field (its × takes it off, as ⌫ does in an empty field), and typing a person's or an album's name offers it as
+a filter (Tab takes it). With nothing typed, the window lists everything the filters keep, newest first.
 
 Anything DigUp finds, in Photos or not, can be marked ♥ in DigUp itself (under the preview, or ⌘D), without touching
-Photos' own favorites; the Favorites filter beside the kinds keeps those. They're kept in `favorites.json` beside the
+Photos' own favorites; the Favorites chip beside the kinds keeps those. They're kept in `favorites.json` beside the
 index, so rebuilding or deleting the index keeps them; a Photos picture stays marked through downloads and edits, and
 a file through moves and renames on its disk.
 
@@ -259,7 +273,10 @@ What it reads of a library, and what it leaves alone:
 A big library takes osxphotos a while to read, so its listing is kept in the index folder (`photos/`) and read again
 when pictures arrive, change or download. A change that's only in Photos' database (a name given to a face, a keyword)
 reaches keyword search with the next look at your folders, five minutes after the last listing at the earliest. A
-library that can't be read for a while keeps what's indexed from it.
+library that can't be read for a while keeps what's indexed from it. A DigUp that lists more of a library than the one
+before (each picture's size and each video's length, for Length and Shape) lists each library once more, by itself.
+Pictures, videos and recordings outside Photos indexed before DigUp kept their sizes and lengths get them once, from
+their metadata alone (milliseconds a file, and never a file that's only in iCloud).
 
 This fork's Mac app doesn't check for updates by itself: its feed is upstream's, and an update from it would replace
 the fork with upstream's release, which doesn't read Photos libraries. Check for Updates… in the menu still reads that
@@ -312,10 +329,10 @@ shows it as it is). Its positions, with what they caught on a real library of 55
 - Revealing (0.5 or more): about 9 in 10 nude pictures (about 1 in 9 blurred)
 - Nudity only (medium or higher, 0.5 or more): close to 9 in 10 (about 1 in 11 blurred)
 
-The Sensitive filter beside the kinds (and `digup search --sensitive`) keeps the pictures and videos rated sensitive at
-that position, or at Revealing while blurring is off; a video counts by any of its frames. A search saved with it keeps
-it, at the position blurring has when the search runs. AI apps don't see them, nor any picture not rated yet, unless
-you allow it (AI apps, below). Known limits: tiny nudes inside screenshots and figures far away are missed, and
+The Sensitive filter in the Filters menu (and `digup search --sensitive`) keeps the pictures and videos rated sensitive
+at that position, or at Revealing while blurring is off; a video counts by any of its frames. A search saved with it
+keeps it, at the position blurring has when the search runs. AI apps don't see them, nor any picture not rated yet,
+unless you allow it (AI apps, below). Known limits: tiny nudes inside screenshots and figures far away are missed, and
 skin-toned close-ups and shirtless men are sometimes rated sensitive.
 
 The detector isn't downloaded yet: make it once with `scripts/sensitive-model.py convert` (uv runs it; it downloads
@@ -331,14 +348,15 @@ can search your files through DigUp, if you let them. DigUp's helper speaks MCP 
 (`DigUp.app/Contents/Helpers/digup mcp`), so nothing listens on the network. It's off until you turn it on in
 Settings → AI apps, which also shows each of those apps' own command or config entry for it, with a Copy button.
 DigUp never changes an app's settings: you run the command or add the entry yourself, and the app asks before it uses
-DigUp, as you set it up there.
+DigUp, as you set it up there. The helper reads the index whether DigUp is open or not, and never writes to it: it
+opens the index read-only, first making SQLite's log and shared-memory files beside it when they aren't there.
 
 They get four tools, all read-only:
 
 - `search_files`: what the search window does, with its kinds and filters (people, albums, Photos favorites, DigUp's
-  favorites, From, an area on the map) and its required words (`+beach`); with no words, a kind or a filter lists what
-  it keeps, newest first. Each result says where the file is, why it's there ("Matches the text on page 3"), the words
-  that matched, and when and where it was taken.
+  favorites, From, an area on the map, a length, a shape) and its required words (`+beach`); with no words, a kind or
+  a filter lists what it keeps, newest first. Each result says where the file is, why it's there ("Matches the text on
+  page 3"), the words that matched, and when and where it was taken.
 - `read_text`: the words DigUp read from a file it returned (a document, a PDF's page, the text in a screenshot, what
   Photos knows about a picture, a stretch of code, what's said in a recording; with a `moment`, what's said within
   30 seconds of it), up to 20,000 characters.

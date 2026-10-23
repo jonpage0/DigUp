@@ -75,13 +75,14 @@ public final class IndexStore {
         try migrateForkFacts()
     }
 
-    /// Opens an index only to read it (`digup mcp`): nothing is created, migrated or written. An index that isn't
-    /// there, or that the app hasn't brought up to this DigUp's schema yet (it does when it opens it), is refused, not
-    /// changed.
+    /// Opens an index only to read it (`digup mcp`), whether or not DigUp has it open: nothing in it is created,
+    /// migrated or written (`Database.reader(of:)`; SQLite's write-ahead log and shared memory beside it are made when
+    /// they aren't there). An index that isn't there, or that the app hasn't brought up to this DigUp's schema yet (it
+    /// does when it opens it), is refused, not changed.
     public init(readingOnly directory: URL, file name: String = IndexStore.mainFile) throws {
         self.directory = directory
         file = directory.appendingPathComponent(name)
-        db = try Database(readingOnly: file.path)
+        db = try Database.reader(of: file.path)
         var version: Int64 = 0
         try db.query("PRAGMA user_version") { version = $0.int(0) }
         guard version == Self.schemaVersion, try forkFactsStepped() >= Self.forkFactsVersion else {
@@ -226,14 +227,15 @@ public final class IndexStore {
     // MARK: The fork's tables
 
     /// The fork's own tables, for what Photos says about a library's files and where files were taken
-    /// (`createForkFacts`) and how revealing its pictures are (`createSensitiveScores`), are versioned apart from
-    /// upstream's schema: `meta` "fork_photos_facts" says how many of the fork's steps an index has had, each run once
-    /// and in order, and `PRAGMA user_version` stays upstream's.
+    /// (`createForkFacts`), how revealing its pictures are (`createSensitiveScores`) and how big and how long its
+    /// pictures, videos and recordings are (`createMediaDimensions`), are versioned apart from upstream's schema: `meta`
+    /// "fork_photos_facts" says how many of the fork's steps an index has had, each run once and in order, and
+    /// `PRAGMA user_version` stays upstream's.
     /// Upstream owns those numbers: a fork's 6 would claim upstream's migration 6 had run when it hadn't. An upstream
     /// DigUp still opens the index; it doesn't read Photos libraries, so it removes their files, and the foreign keys
     /// take their facts with them. An index a later fork stepped further (a column added) is left as it is.
     static let forkFactsKey = "fork_photos_facts"
-    static let forkFactsVersion = 3
+    static let forkFactsVersion = 4
 
     /// An index already at upstream's current schema that hasn't had the fork's steps (made by upstream's DigUp, or by
     /// the fork before these tables): `migrate` gives an older one theirs, before upstream's own steps.
@@ -254,6 +256,7 @@ public final class IndexStore {
         if from < 1 { try createForkFacts() }
         if from < 2 { try recreatePhotosAssets() }
         if from < 3 { try createSensitiveScores() }
+        if from < 4 { try createMediaDimensions() }
         try setMeta(Self.forkFactsKey, "\(Self.forkFactsVersion)")
     }
 
@@ -348,6 +351,27 @@ public final class IndexStore {
                 medium REAL NOT NULL CHECK (medium BETWEEN 0 AND 1),   -- neutral is what's left (1 - low - medium - high)
                 high REAL NOT NULL CHECK (high BETWEEN 0 AND 1),
                 CHECK (low + medium + high <= 1.0001)
+            );
+            """)
+    }
+
+    /// Fork step 4 (approved 2026-10-22: "yes, approved, buckets and exact ratios"): a picture's, video's or
+    /// recording's size as it's shown and its length (`MediaDimensions`), one row per file whose size or length is
+    /// known, for the Length and Shape filters. `source` is 'photos' exactly when the file is in a Photos library:
+    /// Photos' upright size and its length, of the version it shows, whether or not the original is on this Mac,
+    /// which the sync writes from the listing. The indexer writes the others ('file') when it reads a file (a picture
+    /// turned by its orientation, a video's size through its transform), and reading it again drops them first, as it
+    /// does its segments. An index made before this gets them once, from their metadata alone (`measureOnce`).
+    private func createMediaDimensions() throws {
+        try db.execute("""
+            CREATE TABLE IF NOT EXISTS media_dimensions(
+                file INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                width INTEGER CHECK (width > 0),         -- pixels as shown (after rotation); NULL for a sound recording
+                height INTEGER CHECK (height > 0),
+                duration REAL CHECK (duration >= 0),     -- seconds, for a video or recording; NULL for a still picture
+                source TEXT NOT NULL CHECK (source IN ('photos', 'file')),
+                CHECK ((width IS NULL) = (height IS NULL)),
+                CHECK (width IS NOT NULL OR duration IS NOT NULL)
             );
             """)
     }
@@ -520,6 +544,7 @@ public final class IndexStore {
             try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE kind NOT IN \(Self.crawlKinds))")
             try db.run("DELETE FROM segments WHERE kind NOT IN \(Self.crawlKinds)")
             try db.run("DELETE FROM locations WHERE NOT \(Self.crawlLocation)")
+            try db.run("DELETE FROM media_dimensions WHERE NOT \(Self.crawlDimensions)")
             try db.run("UPDATE files SET state = 'pending', detail = NULL, info = NULL, indexed_at = NULL")
             try setMeta("fingerprint", nil)
         }
@@ -711,50 +736,75 @@ public final class IndexStore {
     /// `meta` "locations_read": "1" once every picture and video read before DigUp kept locations has had its look
     /// (`locateOnce`), else the ids of the ones still waiting for it, as a JSON array.
     static let locationsReadKey = "locations_read"
-    static let locationsAllRead = "1"
+    /// `meta` "fork_dimensions_read": as "locations_read", for the pictures, videos and recordings read before DigUp
+    /// kept their sizes and lengths (`measureOnce`). The fork's, as its tables are (`forkFactsKey`).
+    static let dimensionsReadKey = "fork_dimensions_read"
+    /// What those keys say once no file waits.
+    static let allReadOnce = "1"
 
     /// Pictures and videos read before DigUp kept where they were taken get it once per index, from their metadata
-    /// alone: a picture's GPS tags, a video's location, milliseconds a file, and nothing read for the model again. Not
-    /// a Photos library's files, whose location is Photos' (the sync's). A file that's away now (gone, on a drive
-    /// that's unplugged, or in the cloud, where reading it would download it) waits for a later call
-    /// (`locationsReadKey`), which looks at the waiting files alone; one whose row went, or that was read again since
-    /// (which reads its location), stops waiting. Only where this machine reads locations. Returns how many files got
-    /// one.
+    /// alone (`readOnce`): a picture's GPS tags, a video's location. Not a Photos library's files, whose location is
+    /// Photos' (the sync's). Only where this machine reads locations. Returns how many files got one.
     @discardableResult
     public func locateOnce() throws -> Int {
         var kinds: [FileKind] = []
         if ImageExtractor.readsLocations { kinds += [.image, .screenshot] }
         if VideoExtractor.readsLocations { kinds.append(.video) }
         guard !kinds.isEmpty else { return 0 }
-        let waiting = try meta(Self.locationsReadKey)   // nil: the first look, at every file
-        guard waiting != Self.locationsAllRead else { return 0 }
+        return try readOnce(Self.locationsReadKey, files: """
+            state = 'done' AND kind IN (\(Self.sqlList(kinds))) AND id NOT IN (SELECT file FROM locations)
+            """, read: { url, kind in
+                kind == .video ? VideoExtractor.location(of: url) : ImageExtractor.location(of: url)
+            }, write: setLocation)
+    }
+
+    /// Pictures, videos and recordings read before DigUp kept their size as shown and their length get them once per
+    /// index, from their metadata alone (`readOnce`, `MediaDimensions.read`): a picture's size and orientation, a
+    /// video's size, transform and duration, a recording's duration. A recording left out because nothing in it was
+    /// seen or heard has a length too. Not a Photos library's files, whose size and length are Photos' (the sync's).
+    /// Returns how many files got them.
+    @discardableResult
+    public func measureOnce() throws -> Int {
+        try readOnce(Self.dimensionsReadKey, files: """
+            (kind IN (\(Self.sqlList([FileKind.image, .screenshot]))) AND state = 'done' OR \(Self.recordingsRead))
+            AND id NOT IN (SELECT file FROM media_dimensions)
+            """, read: MediaDimensions.read, write: setDimensions)
+    }
+
+    /// A pass over the files read before DigUp kept something it reads from their metadata alone, milliseconds a
+    /// file, with nothing read for the model again (`locateOnce`, `measureOnce`): the files `condition` picks (an SQL
+    /// condition on `files`), but a Photos library's, get what `read` finds in them (nil: nothing to keep), written by
+    /// `write`. A file that's away now (gone, on a drive that's unplugged, or in the cloud, where reading it would
+    /// download it) waits for a later call, its id in `meta` `key`, and that call looks at the waiting files alone;
+    /// one whose row went, or that was read again since (which reads it), stops waiting. Once none waits, `key` says
+    /// `allReadOnce`. Every file is looked at before anything is written: the index isn't held while they're read.
+    /// Returns how many files got something.
+    private func readOnce<Fact>(_ key: String, files condition: String, read: (URL, FileKind) -> Fact?,
+                                write: (Fact, Int64) throws -> Void) throws -> Int {
+        let waiting = try meta(key)   // nil: the first look, at every file
+        guard waiting != Self.allReadOnce else { return 0 }
         let onlyWaiting = waiting == nil ? "" : " AND id IN (SELECT value FROM json_each(?))"
         var files: [(id: Int64, path: String, kind: FileKind)] = []
-        try db.query("""
-            SELECT id, path, kind FROM files WHERE state = 'done' AND kind IN (\(Self.sqlList(kinds)))
-            AND id NOT IN (SELECT file FROM locations)\(onlyWaiting)
-            """, waiting.map { [.text($0)] } ?? []) { row in
+        try db.query("SELECT id, path, kind FROM files WHERE \(condition)\(onlyWaiting)",
+                     waiting.map { [.text($0)] } ?? []) { row in
             let path = row.text(1) ?? ""
             guard PhotosLibrary.library(containing: path) == nil, let kind = FileKind(rawValue: row.text(2) ?? "")
             else { return }
             files.append((row.int(0), path, kind))
         }
-        // Every file looked at before anything is written: the index isn't held while they're read.
-        var found: [(file: Int64, location: Location)] = [], away: [Int64] = []
+        var found: [(file: Int64, fact: Fact)] = [], away: [Int64] = []
         for file in files {
             guard let info = FileSystem.info(of: file.path), info.isRegular, !info.dataless else {
                 away.append(file.id)
                 continue
             }
-            let url = URL(fileURLWithPath: file.path)
-            let location = autoreleasepool {
-                file.kind == .video ? VideoExtractor.location(of: url) : ImageExtractor.location(of: url)
+            if let fact = autoreleasepool(invoking: { read(URL(fileURLWithPath: file.path), file.kind) }) {
+                found.append((file.id, fact))
             }
-            if let location { found.append((file.id, location)) }
         }
         try db.transaction {
-            for (file, location) in found { try setLocation(location, of: file) }
-            try setMeta(Self.locationsReadKey, away.isEmpty ? Self.locationsAllRead
+            for (file, fact) in found { try write(fact, file) }
+            try setMeta(key, away.isEmpty ? Self.allReadOnce
                         : String(decoding: try JSONEncoder().encode(away), as: UTF8.self))
         }
         return found.count
@@ -819,6 +869,8 @@ public final class IndexStore {
     /// The locations the crawl writes: Photos', from the listing. The others come from reading the file, and go when
     /// it's read again, as its segments do.
     static let crawlLocation = "source = '\(Location.Source.photos.rawValue)'"
+    /// The sizes and lengths the crawl writes: Photos', from the listing; the others go as a file's location does.
+    static let crawlDimensions = "source = '\(MediaDimensions.Source.photos.rawValue)'"
 
     private func deleteSegments(of file: Int64, keepingCrawled: Bool) throws {
         let filter = keepingCrawled ? "AND kind NOT IN \(Self.crawlKinds)" : ""
@@ -826,6 +878,8 @@ public final class IndexStore {
         try db.run("DELETE FROM segments WHERE file = ? \(filter)", [.int(file)])
         let located = keepingCrawled ? "AND NOT \(Self.crawlLocation)" : ""
         try db.run("DELETE FROM locations WHERE file = ? \(located)", [.int(file)])
+        let measured = keepingCrawled ? "AND NOT \(Self.crawlDimensions)" : ""
+        try db.run("DELETE FROM media_dimensions WHERE file = ? \(measured)", [.int(file)])
     }
 
     /// "Screenshot 2026-10-01 at 9.41.07 PM.png" → searchable words. A Photos library's file is named for its asset's
@@ -849,10 +903,11 @@ public final class IndexStore {
 
     /// What Photos says about a file from a Photos library: its words, title and date (its `photosInfo` segment),
     /// whether it's a favorite, what DigUp read of it, how it came into the library and the device that took it
-    /// (`photos_assets`), where it was taken (its `photos` location), and who is in it and the albums it's in, as their
-    /// rows of the file's library (`photos_people`, `photos_albums`). Rows, not Photos' uuids: a library renamed or
-    /// moved is a new library to the index (its people and albums are spelled with its path), so its files are linked
-    /// to its own rows again, and the old library's go.
+    /// (`photos_assets`), where it was taken (its `photos` location), its size as shown and a video's length (its
+    /// `photos` dimensions), and who is in it and the albums it's in, as their rows of the file's library
+    /// (`photos_people`, `photos_albums`). Rows, not Photos' uuids: a library renamed or moved is a new library to the
+    /// index (its people and albums are spelled with its path), so its files are linked to its own rows again, and the
+    /// old library's go.
     public struct PhotosFacts: Equatable, Sendable {
         public var title: String
         public var date: Double
@@ -863,6 +918,7 @@ public final class IndexStore {
         public var originApp: String?
         public var camera: String?
         public var location: Location?
+        public var dimensions: MediaDimensions?
         public var people: Set<Int64>
         public var albums: Set<Int64>
 
@@ -872,17 +928,17 @@ public final class IndexStore {
             (title, date, text) = (asset.title, asset.date, asset.text)
             (favorite, reading, origin, originApp, camera) = (asset.favorite, asset.reading, asset.origin,
                                                               asset.originApp, asset.camera)
-            location = asset.location
+            (location, dimensions) = (asset.location, asset.dimensions)
             self.people = Set(asset.people.compactMap { people[$0] })
             self.albums = Set(asset.albums.compactMap { albums[$0] })
         }
 
         init(title: String, date: Double, text: String, favorite: Bool, reading: PhotosLibrary.Reading,
              origin: PhotosLibrary.Origin, originApp: String?, camera: String?, location: Location? = nil,
-             people: Set<Int64> = [], albums: Set<Int64> = []) {
+             dimensions: MediaDimensions? = nil, people: Set<Int64> = [], albums: Set<Int64> = []) {
             (self.title, self.date, self.text, self.favorite) = (title, date, text, favorite)
             (self.reading, self.origin, self.originApp, self.camera) = (reading, origin, originApp, camera)
-            (self.location, self.people, self.albums) = (location, people, albums)
+            (self.location, self.dimensions, self.people, self.albums) = (location, dimensions, people, albums)
         }
 
         /// What its `photos_assets` row holds.
@@ -912,6 +968,9 @@ public final class IndexStore {
         try db.query("SELECT file, latitude, longitude, source, place FROM locations WHERE \(Self.crawlLocation)") {
             facts[$0.int(0)]?.location = Self.location($0, from: 1)
         }
+        try db.query("SELECT file, width, height, duration FROM media_dimensions WHERE \(Self.crawlDimensions)") {
+            facts[$0.int(0)]?.dimensions = Self.dimensions($0, from: 1, source: .photos)
+        }
         try db.query("SELECT file, person FROM photos_person_files") { facts[$0.int(0)]?.people.insert($0.int(1)) }
         try db.query("SELECT file, album FROM photos_album_files") { facts[$0.int(0)]?.albums.insert($0.int(1)) }
         return facts
@@ -919,7 +978,7 @@ public final class IndexStore {
 
     /// Writes what differs between a library file's facts and the ones `stored` (nil: none written yet): keyword
     /// search finds Photos' words in it, a result shows its title and date, and the filters see its favorite, origin,
-    /// camera, place, people and albums. Nothing is embedded.
+    /// camera, place, size, length, people and albums. Nothing is embedded.
     func setPhotosFacts(_ facts: PhotosFacts, replacing stored: PhotosFacts?, of file: Int64) throws {
         if stored.map({ ($0.title, $0.date, $0.text) != (facts.title, facts.date, facts.text) }) ?? true {
             let kind = SegmentKind.photosInfo.rawValue
@@ -942,6 +1001,13 @@ public final class IndexStore {
                 try setLocation(location, of: file)
             } else {
                 try db.run("DELETE FROM locations WHERE file = ?", [.int(file)])
+            }
+        }
+        if stored?.dimensions != facts.dimensions {
+            if let dimensions = facts.dimensions {
+                try setDimensions(dimensions, of: file)
+            } else {
+                try db.run("DELETE FROM media_dimensions WHERE file = ?", [.int(file)])
             }
         }
         if stored?.people != facts.people {
@@ -1335,6 +1401,27 @@ public final class IndexStore {
         guard let source = Location.Source(rawValue: row.text(column + 2) ?? "") else { return nil }
         return Location(latitude: row.double(column), longitude: row.double(column + 1), source: source,
                         place: row.text(column + 3))
+    }
+
+    // MARK: Sizes and lengths
+
+    /// Sets a file's size as shown and its length, in place of what it had.
+    func setDimensions(_ dimensions: MediaDimensions, of file: Int64) throws {
+        try db.run("""
+            INSERT INTO media_dimensions(file, width, height, duration, source) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(file) DO UPDATE SET width = excluded.width, height = excluded.height,
+                duration = excluded.duration, source = excluded.source
+            """, [.int(file), .optional(dimensions.width), .optional(dimensions.height), .optional(dimensions.duration),
+                  .text(dimensions.source.rawValue)])
+    }
+
+    /// A file's size and length from its row's width, height and duration, starting at `column`.
+    static func dimensions(_ row: Statement, from column: Int32, source: MediaDimensions.Source) -> MediaDimensions? {
+        func value<T>(_ offset: Int32, _ read: (Int32) -> T) -> T? {
+            row.isNull(column + offset) ? nil : read(column + offset)
+        }
+        return MediaDimensions(width: value(0) { Int(row.int($0)) }, height: value(1) { Int(row.int($0)) },
+                               duration: value(2, row.double), source: source)
     }
 
     // MARK: Stats

@@ -29,7 +29,31 @@ extension ImageExtractor {
         let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
         return Prepared(path: out.path, width: width, height: height,
                         taken: exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
-                        location: location(in: properties))
+                        location: location(in: properties), dimensions: shown(properties))
+    }
+
+    /// A picture's size as it's shown, from its properties alone (nothing is decoded): its pixels as ImageIO reports
+    /// them, as stored, turned by its orientation. A picture ImageIO can't open (an SVG) has its size as AppKit draws
+    /// it (`drawn`).
+    static func dimensions(of url: URL) -> MediaDimensions? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              CGImageSourceGetType(source) != nil else {
+            return NSImage(contentsOf: url).flatMap(drawnSize)
+        }
+        return shown(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:])
+    }
+
+    /// The size a picture with these properties is shown at.
+    private static func shown(_ properties: [CFString: Any]) -> MediaDimensions? {
+        shown(width: properties[kCGImagePropertyPixelWidth] as? Int ?? 0,
+              height: properties[kCGImagePropertyPixelHeight] as? Int ?? 0,
+              orientation: properties[kCGImagePropertyOrientation] as? Int ?? 1)
+    }
+
+    /// A vector picture has no pixels of its own: its size in points stands for them.
+    private static func drawnSize(_ image: NSImage) -> MediaDimensions? {
+        MediaDimensions(width: Int(image.size.width.rounded()), height: Int(image.size.height.rounded()), duration: nil,
+                        source: .file)
     }
 
     /// ImageIO decodes straight to the size the model needs, turned the way the camera held it.
@@ -117,7 +141,8 @@ extension ImageExtractor {
         guard let bitmap = context.makeImage() else { throw ExtractError.unreadable("can't draw this picture") }
         let out = folder.appendingPathComponent(UUID().uuidString + (png ? ".png" : ".jpg"))
         try write(bitmap, to: out, png: png)
-        return Prepared(path: out.path, width: width, height: height, taken: nil, location: nil)
+        return Prepared(path: out.path, width: width, height: height, taken: nil, location: nil,
+                        dimensions: drawnSize(image))
     }
 
     static func fullImage(_ url: URL) -> CGImage? {

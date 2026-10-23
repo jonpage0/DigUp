@@ -9,12 +9,12 @@ import Foundation
 ///   and `server/discover` says what this server speaks;
 /// - 2025-11-25, 2025-06-18 and 2025-03-26: `initialize` settles the revision for the rest of the process.
 ///
-/// Read-only: the index is opened only to be read (`IndexStore(readingOnly:)`), and no tool changes, moves, opens or
-/// uploads a file. What AI apps may see is the user's to say in the app (Settings → AI apps, `AIAccess`), read from its
-/// settings at every call and enforced here, not left to the client: with access off every call fails; Photos
-/// libraries, Photos' hidden items, code, pictures and pictures rated sensitive (or not rated yet) each stay out until
-/// allowed, and what's out is never returned, counted or read. Each tool call is a line of `<index>/mcp.log`
-/// (`AICall`), never with what was searched for.
+/// Read-only: the index is opened only to be read, whether or not DigUp has it open (`IndexStore(readingOnly:)`), and
+/// no tool changes, moves, opens or uploads a file. What AI apps may see is the user's to say in the app (Settings → AI
+/// apps, `AIAccess`), read from its settings at every call and enforced here, not left to the client: with access off
+/// every call fails; Photos libraries, Photos' hidden items, code, pictures and pictures rated sensitive (or not rated
+/// yet) each stay out until allowed, and what's out is never returned, counted or read. Each tool call is a line of
+/// `<index>/mcp.log` (`AICall`), never with what was searched for.
 final class MCPServer {
     /// The revision named in each request's `_meta`.
     static let statelessVersions = ["2026-07-28"]
@@ -421,7 +421,8 @@ final class MCPServer {
 
     private func searchFiles(_ arguments: [String: Any], access: AIAccess) throws -> Outcome {
         let input = try Input(arguments, allowed: ["query", "kind", "people", "albums", "photos_favorites",
-                                                   "digup_favorites", "from", "taken_within", "limit"])
+                                                   "digup_favorites", "from", "taken_within", "length", "shape",
+                                                   "limit"])
         var query = try input.string("query")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let kind = try input.choice("kind", of: Self.kindNames.values.sorted())
         let limit = try input.integer("limit", in: 1...Self.maxLimit) ?? Self.defaultLimit
@@ -430,12 +431,14 @@ final class MCPServer {
         let digupFavorites = try input.bool("digup_favorites") ?? false
         let from = try input.choice("from", of: ["mine", "saved", "imported"])
         let area = try input.area("taken_within")
+        let length = try input.length("length"), shape = try input.shape("shape")
 
         let codeWords = CodeQuery.text(of: query)
         if kind == Self.kindNames[.code] || codeWords != nil {
             guard access.code else { return .refused(.code) }
-            guard people == nil, albums == nil, !photosFavorites, !digupFavorites, from == nil, area == nil else {
-                throw InputError("Code search takes no Photos, favorites or map filters.")
+            guard people == nil, albums == nil, !photosFavorites, !digupFavorites, from == nil, area == nil,
+                  length == nil, shape == nil else {
+                throw InputError("Code search takes no Photos, favorites, map, length or shape filters.")
             }
             query = codeWords ?? query   // none ("code:" alone, or the kind alone): the newest code files
             guard let code = try codeIndex() else {
@@ -447,7 +450,8 @@ final class MCPServer {
 
         let photosOnly = people != nil || albums != nil || photosFavorites || from != nil
         if photosOnly, !access.photos { return .refused(.photos) }
-        guard !query.isEmpty || photosOnly || digupFavorites || area != nil || kind != nil else {
+        guard !query.isEmpty || photosOnly || digupFavorites || area != nil || length != nil || shape != nil
+                || kind != nil else {
             throw InputError("Say what to look for (query), or give a kind or a filter to list what it keeps.")
         }
         let main = try mainIndex()
@@ -484,6 +488,7 @@ final class MCPServer {
         }
         if digupFavorites { filter.paths = try favoritePaths(in: store) }
         filter.area = area
+        (filter.length, filter.shape) = (length, shape)
         let kinds = kind.flatMap { name in Self.kindNames.first { $0.value == name }?.key }.map { Set([$0]) }
         return try search(query, in: main, kinds: kinds, filter: filter, limit: limit, prompt: Prompts.query)
     }
@@ -816,6 +821,33 @@ final class MCPServer {
             }
             return SearchFilter.Area(latitudes: edges[0]...edges[2], longitudes: edges[1]...edges[3])
         }
+
+        /// How long, in seconds: at least `at_least` and shorter than `under`, either left out but not both, neither
+        /// over ten years (`SearchFilter.Length.longest`).
+        func length(_ key: String) throws -> SearchFilter.Length? {
+            guard let value = value(key) else { return nil }
+            let range = value as? [String: Any] ?? [:]
+            let bounds = range.mapValues { ($0 as? NSNumber).flatMap { MCPServer.isBoolean($0) ? nil : $0.doubleValue } }
+            guard value is [String: Any], Set(range.keys).isSubset(of: ["at_least", "under"]),
+                  bounds.values.allSatisfy({ $0 != nil }),
+                  let length = SearchFilter.Length(atLeast: bounds["at_least"] ?? nil, under: bounds["under"] ?? nil)
+            else {
+                throw InputError("\(key) is {at_least, under} in seconds, either left out but not both: at_least 0 or "
+                                 + "more, under above it, neither over \(Int(SearchFilter.Length.longest)) (ten years) "
+                                 + "(under 15 s: {under: 15}; 5 min or longer: {at_least: 300}).")
+            }
+            return length
+        }
+
+        /// A shape as it's shown: portrait, landscape, square, wide, or an exact ratio "W:H".
+        func shape(_ key: String) throws -> SearchFilter.Shape? {
+            guard let text = try string(key) else { return nil }
+            guard let shape = SearchFilter.Shape(text) else {
+                throw InputError("\(key) is portrait, landscape, square, wide, or an exact ratio W:H in whole numbers "
+                                 + "from 1 to 99 (16:9, 9:16, 4:3).")
+            }
+            return shape
+        }
     }
 
     // MARK: The tools' descriptions
@@ -865,6 +897,19 @@ final class MCPServer {
                                             "east": ["type": "number", "minimum": -180, "maximum": 180]],
                              "required": ["south", "west", "north", "east"], "additionalProperties": false,
                              "description": "Only what was taken inside this box on the map, in degrees."],
+            "length": ["type": "object",
+                       "properties": ["at_least": ["type": "number", "minimum": 0,
+                                                   "maximum": SearchFilter.Length.longest],
+                                      "under": ["type": "number", "exclusiveMinimum": 0,
+                                                "maximum": SearchFilter.Length.longest]],
+                       "minProperties": 1, "additionalProperties": false,
+                       "description": "Only videos and recordings this long, in seconds: at least at_least and "
+                        + "shorter than under, either left out (under 15 s: {under: 15}; 15 s to 1 min: {at_least: 15, "
+                        + "under: 60}; 5 min or longer: {at_least: 300})."],
+            "shape": ["type": "string", "pattern": "^(portrait|landscape|square|wide|[1-9][0-9]?:[1-9][0-9]?)$",
+                      "description": "Only pictures and videos of this shape as they're shown: portrait, landscape, "
+                        + "square (sides within 5 %), wide (2:1 or wider: panoramas, cinema), or an exact ratio W:H "
+                        + "matched within 2 %, its orientation included (16:9 landscape, 9:16 portrait, 4:3, 3:2)."],
             "limit": ["type": "integer", "minimum": 1, "maximum": maxLimit, "default": defaultLimit,
                       "description": "How many results at most."],
         ]

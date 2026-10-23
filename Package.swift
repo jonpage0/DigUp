@@ -11,6 +11,7 @@ let vendor = "\(Context.packageDirectory)/Vendor"
 let llamaModule = "Sources/CLlama"                        // static llama.cpp with Metal (scripts/build-llama.sh)
 let llamaLink: [LinkerSetting] = [.unsafeFlags(["-L\(vendor)/llama/lib"])]
 let engineDependencies: [Target.Dependency] = []
+let sqlite: [Target.Dependency] = []                     // the system's
 let testDependencies: [Target.Dependency] = []
 let engineLink: [LinkerSetting] = []
 let portableTargets: [Target] = []
@@ -30,6 +31,7 @@ let llamaModule = "Sources/CLlamaShared"
 #endif
 let llamaLink: [LinkerSetting] = [.unsafeFlags(["-L\(vendor)/llama/lib"] + runpath)]
 let engineDependencies: [Target.Dependency] = ["CSQLite", "CStb", "CMiniz", "CPDFium"]
+let sqlite: [Target.Dependency] = ["CSQLite"]
 let testDependencies: [Target.Dependency] = ["CMiniz"]   // the portable readers' tests write zips with it
 let engineLink: [LinkerSetting] = [.unsafeFlags(["-L\(vendor)/pdfium/lib"] + runpath)]
 let portableTargets: [Target] = [
@@ -84,7 +86,10 @@ let package = Package(
     targets: portableTargets + [
         // The engine: crawler, extractors, index store, the embedder interface and worker client, search. No UI.
         // Platform/ holds what differs by OS (Apple's frameworks on macOS, the C libraries above elsewhere).
-        .target(name: "DigUpKit", dependencies: engineDependencies, linkerSettings: engineLink),
+        .target(name: "DigUpKit", dependencies: engineDependencies + ["CSQLiteConfig"], linkerSettings: engineLink),
+        // The SQLite settings Swift can't make, sqlite3_db_config being variadic (`Database.reader(of:)`).
+        .target(name: "CSQLiteConfig", dependencies: sqlite,
+                linkerSettings: [.linkedLibrary("sqlite3", .when(platforms: [.macOS]))]),
         // llama.cpp (scripts/build-llama.sh builds it into Vendor/llama) and EmbeddingGemma 2 on it.
         .systemLibrary(name: "CLlama", path: llamaModule),
         .target(name: "LlamaRuntime", dependencies: ["CLlama", "DigUpKit"], linkerSettings: llamaLink),

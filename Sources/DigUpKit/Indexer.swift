@@ -367,7 +367,7 @@ public final class Indexer {
         case .audio(_, let duration, let speech):
             measured.add("audioSecond", units: duration, seconds: seconds - (speech?.seconds ?? 0))
             if let heard = speech?.seconds { measured.add("speechSecond", units: duration, seconds: heard) }
-        case .video(_, _, let duration, _, let speech):
+        case .video(_, _, let duration, _, _, let speech):
             measured.add("videoSecond", units: duration, seconds: seconds - (speech?.seconds ?? 0))
             if let heard = speech?.seconds { measured.add("speechSecond", units: duration, seconds: heard) }
         case .code(let file): measured.add("codeStretch", units: Double(file.pieces.count), seconds: seconds)
@@ -460,8 +460,10 @@ public final class Indexer {
         case doc(chunks: [String], read: Range<Int>, total: Int, characters: Int)
         /// `speech`: what's said in it, when that's read (`IndexOptions.speech`).
         case audio(pieces: [MediaPiece], duration: Double, speech: SpeechRead?)
-        /// `location`: where it was taken, from its own metadata (none read for a Photos library's video).
-        case video(frames: [MediaPiece], sound: [MediaPiece], duration: Double, location: Location?, speech: SpeechRead?)
+        /// `location`: where it was taken, from its own metadata, and `dimensions`, its size as shown and its length
+        /// (neither read for a Photos library's video, which has Photos').
+        case video(frames: [MediaPiece], sound: [MediaPiece], duration: Double, location: Location?,
+                   dimensions: MediaDimensions?, speech: SpeechRead?)
         /// A library's video in iCloud: Photos' stills of it, or its poster (`PhotosLibrary.Reading.isStandIn`), as
         /// pictures for the model.
         case stills([String])
@@ -623,10 +625,11 @@ public final class Indexer {
                     ? try runBlocking { try await AudioExtractor.windows(of: url, window: window, hop: hop, to: folder) }
                         .pieces
                     : []
-                // A library's video has Photos' location (the sync's), the one the user sees and can correct.
-                let location = PhotosLibrary.library(containing: url.path) == nil
-                    ? VideoExtractor.location(of: url) : nil
-                prepared.payload = .video(frames: frames, sound: sound, duration: duration, location: location,
+                // A library's video has Photos' location and size (the sync's), the ones the user sees.
+                let outside = PhotosLibrary.library(containing: url.path) == nil
+                prepared.payload = .video(frames: frames, sound: sound, duration: duration,
+                                          location: outside ? VideoExtractor.location(of: url) : nil,
+                                          dimensions: outside ? VideoExtractor.dimensions(of: url) : nil,
                                           speech: speech(of: url, duration: duration, hasSound: hasAudio,
                                                          options: options, in: folder))
             case .code:
@@ -698,9 +701,9 @@ public final class Indexer {
                                      later: later)
             case .audio(let pieces, let duration, let speech):
                 results[0] = try audio(batch[0], pieces: pieces, duration: duration, speech: speech)
-            case .video(let frames, let sound, let duration, let location, let speech):
+            case .video(let frames, let sound, let duration, let location, let dimensions, let speech):
                 results[0] = try video(batch[0], frames: frames, sound: sound, duration: duration, location: location,
-                                       speech: speech)
+                                       dimensions: dimensions, speech: speech)
             case .stills(let stills):
                 results[0] = try self.stills(batch[0], stills)
             case .code(let code):
@@ -779,6 +782,7 @@ public final class Indexer {
                 if let location = item.image.location, PhotosLibrary.library(containing: file.path) == nil {
                     try store.setLocation(location, of: file.id)
                 }
+                try setDimensions(item.image.dimensions, of: file)
                 let note = item.fromPhotos ? (screenshot || !item.ocr.isEmpty ? "Photos' text \(item.ocr.count) chars" : nil)
                     : screenshot ? "ocr \(item.ocr.count) chars" : nil
                 results[item.slot] = ("done", note)
@@ -912,7 +916,7 @@ public final class Indexer {
         -> (String, String?) {
         guard !pieces.isEmpty || !(speech?.stretches.isEmpty ?? true) else {
             return try skipRecording(file, "silent or shorter than 2 s", note: "silent or too short", duration: duration,
-                                     speech: speech)
+                                     speech: speech, dimensions: Self.length(duration))
         }
         let vectors = pieces.isEmpty ? [] : try fullWorker().embedAudio(pieces.map(\.path))
         let said = try speechVectors(file, speech)
@@ -924,6 +928,7 @@ public final class Indexer {
             var info = ["duration": String(format: "%.1f", duration)]
             try addSpeech(said, read: speech, of: file, info: &info)
             try store.finish(file.id, state: "done", info: info)
+            try setDimensions(Self.length(duration), of: file)
         }
         return ("done", "\(pieces.count) windows, \(Int(duration)) s" + Self.note(speech))
     }
@@ -931,10 +936,11 @@ public final class Indexer {
     /// A video on this Mac: its frames, its windows of sound, and what's said in it. One with neither frames nor a window
     /// of sound is indexed by what's said in it, when something is.
     private func video(_ file: FileRecord, frames: [MediaPiece], sound: [MediaPiece], duration: Double,
-                       location: Location?, speech: SpeechRead?) throws -> (String, String?) {
+                       location: Location?, dimensions: MediaDimensions?, speech: SpeechRead?) throws
+        -> (String, String?) {
         guard !frames.isEmpty || !sound.isEmpty || !(speech?.stretches.isEmpty ?? true) else {
             return try skipRecording(file, "no frames or sound", note: "no frames or sound", duration: duration,
-                                     speech: speech)
+                                     speech: speech, dimensions: dimensions)
         }
         let worker = try fullWorker()
         let frameVectors = try worker.embedImages(frames.map(\.path), budget: options.frameBudget)
@@ -956,6 +962,7 @@ public final class Indexer {
             try addSpeech(said, read: speech, of: file, info: &info)
             try store.finish(file.id, state: "done", info: info)
             if let location { try store.setLocation(location, of: file.id) }
+            try setDimensions(dimensions, of: file)
         }
         return ("done", "\(frames.count) frames, \(sound.count) sound windows, \(Int(duration)) s" + Self.note(speech))
     }
@@ -986,13 +993,29 @@ public final class Indexer {
     }
 
     /// A recording with nothing to index: nothing seen or heard in it, and nothing said. It's left out, with how its
-    /// speech was read in its info (`record`), as a recording that's read is.
+    /// speech was read in its info (`record`), as a recording that's read is, and its size and length.
     private func skipRecording(_ file: FileRecord, _ detail: String, note: String, duration: Double,
-                               speech: SpeechRead?) throws -> (String, String?) {
+                               speech: SpeechRead?, dimensions: MediaDimensions?) throws -> (String, String?) {
         var info = ["duration": String(format: "%.1f", duration)]
         Self.record(speech, in: &info)
-        try store.finish(file.id, state: "skipped", detail: detail, info: info)
+        try store.db.transaction {
+            try store.finish(file.id, state: "skipped", detail: detail, info: info)
+            try setDimensions(dimensions, of: file)
+        }
         return ("skipped", note + Self.note(speech))
+    }
+
+    /// An audio file's length as `media_dimensions` keeps it; none when it has no sound track, which has no time either
+    /// (`AudioExtractor.windows`).
+    private static func length(_ duration: Double) -> MediaDimensions? {
+        MediaDimensions(width: nil, height: nil, duration: duration > 0 ? duration : nil, source: .file)
+    }
+
+    /// Writes a file's size as shown and its length, as it was read (`media_dimensions`, source `file`). A library's
+    /// file has Photos' instead (the sync's): the size and length of the version Photos shows.
+    private func setDimensions(_ dimensions: MediaDimensions?, of file: FileRecord) throws {
+        guard let dimensions, PhotosLibrary.library(containing: file.path) == nil else { return }
+        try store.setDimensions(dimensions, of: file.id)
     }
 
     /// How a recording's speech was read, in its info: how many stretches there are, or why they couldn't be read, the

@@ -4,6 +4,7 @@ import SQLite3   // the system's (3.51 on macOS 26, FTS5 built in)
 #else
 import CSQLite   // the amalgamation in Vendor/sqlite, with FTS5 (scripts/fetch-vendor.sh)
 #endif
+import CSQLiteConfig
 
 /// A thin wrapper over SQLite. One connection, used from one thread.
 public final class Database {
@@ -40,15 +41,61 @@ public final class Database {
 
     /// Opens another program's database to read it (Photos' catalog): read-only, and nothing set on it, not even the
     /// journal mode. A write briefly locking it out is waited for, up to two seconds.
-    public init(readingOnly path: String) throws {
+    public convenience init(readingOnly path: String) throws {
+        try self.init(opening: path, flags: SQLITE_OPEN_READONLY)
+    }
+
+    /// Opens it with these flags and nothing set on it, waiting up to two seconds for a write that locks it out.
+    private init(opening path: String, flags: Int32) throws {
         var db: OpaquePointer?
-        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else {
+        guard sqlite3_open_v2(path, &db, flags, nil) == SQLITE_OK, let db else {
             let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "cannot open \(path)"
             sqlite3_close(db)
             throw Failure(message: message)
         }
         handle = db
         sqlite3_busy_timeout(db, 2000)
+    }
+
+    /// Opens one of DigUp's own databases (an index: `IndexStore(readingOnly:)`, which `digup mcp` reads) only to read
+    /// it: read-only, so nothing in it can change, whether or not DigUp has it open. A database in WAL mode can't be
+    /// read so while its write-ahead log and shared memory aren't beside it, since a read-only connection can't make
+    /// them: SQLite on Linux and Windows takes them away when the last connection closes (macOS's keeps them), and a
+    /// copy of an index may come without them. Then `logMaker(of:)` opens it, which makes them, and closes once the
+    /// read-only one has it open. Nothing is made when the database isn't there.
+    public static func reader(of path: String) throws -> Database {
+        let reader = try Database(readingOnly: path)
+        if try reader.opensItsLog() { return reader }
+        let maker = try logMaker(of: path)
+        return try withExtendedLifetime(maker) {
+            let reader = try Database(readingOnly: path)
+            guard try reader.opensItsLog() else { throw Failure(message: "can't open \(path)'s write-ahead log") }
+            return reader
+        }
+    }
+
+    /// A connection that makes a WAL database's write-ahead log and shared memory, and only that (`reader(of:)`): it
+    /// can only query (`query_only`), and is set before anything else never to move the log into the file when it
+    /// closes (the checkpoint the last connection to close makes): whatever happens after it opens (a writer comes and
+    /// goes, the read-only connection can't open), the file stays as it was.
+    static func logMaker(of path: String) throws -> Database {
+        let maker = try Database(opening: path, flags: SQLITE_OPEN_READWRITE)
+        guard digup_sqlite3_no_checkpoint_on_close(maker.handle) == SQLITE_OK else {
+            throw Failure(message: "can't keep a connection to \(path) from writing it when it closes")
+        }
+        try maker.execute("PRAGMA query_only = ON")
+        guard try maker.opensItsLog() else { throw Failure(message: "can't open \(path)'s write-ahead log") }
+        return maker
+    }
+
+    /// Reads the schema, which opens a WAL database's log: false when the log can't be opened (nor made).
+    private func opensItsLog() throws -> Bool {
+        do {
+            try execute("SELECT count(*) FROM sqlite_master")
+            return true
+        } catch where sqlite3_errcode(handle) == SQLITE_CANTOPEN {
+            return false
+        }
     }
 
     deinit { sqlite3_close_v2(handle) }
@@ -93,6 +140,7 @@ public enum SQLValue {
 
     static func optional(_ text: String?) -> SQLValue { text.map { .text($0) } ?? .null }
     static func optional(_ number: Double?) -> SQLValue { number.map { .double($0) } ?? .null }
+    static func optional(_ number: Int?) -> SQLValue { number.map { .int(Int64($0)) } ?? .null }
 }
 
 public final class Statement {

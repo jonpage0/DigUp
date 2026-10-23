@@ -85,6 +85,36 @@ public struct Location: Sendable, Equatable {
     }
 }
 
+/// A picture's, a video's or a recording's size as it's shown and its length, and who said so. The index keeps at most
+/// one a file (its `media_dimensions` table); a file whose size and length aren't known has none. What the Length and
+/// Shape filters go by (`SearchFilter.length`, `SearchFilter.shape`).
+public struct MediaDimensions: Sendable, Equatable {
+    /// Who said so. Photos, for a Photos library's file: the size of the version Photos shows, upright, and its length,
+    /// whether or not the original is on this Mac (the sync's, from the listing). Any other file: the file itself, as
+    /// indexing reads it (a picture turned the way the camera held it, a video's size through its transform).
+    public enum Source: String, Sendable {
+        case photos, file
+    }
+
+    /// Pixels as shown (after rotation); nil for a sound recording.
+    public let width: Int?
+    public let height: Int?
+    /// Seconds, for a video or a recording; nil for a still picture.
+    public let duration: Double?
+    public let source: Source
+
+    /// Nil when nothing is known: a size is kept when both its sides are above 0, a length when it's a number of
+    /// seconds, 0 or more.
+    public init?(width: Int?, height: Int?, duration: Double?, source: Source) {
+        let sized = (width ?? 0) > 0 && (height ?? 0) > 0
+        let timed = duration.map { $0.isFinite && $0 >= 0 } ?? false
+        guard sized || timed else { return nil }
+        (self.width, self.height) = sized ? (width, height) : (nil, nil)
+        self.duration = timed ? duration : nil
+        self.source = source
+    }
+}
+
 /// Indexing settings. Anything that changes vectors is part of `fingerprint`; an index never mixes settings.
 public struct IndexOptions: Sendable {
     /// This index is the code index: the code folders' source files, their repos' docs and their notebooks, read as

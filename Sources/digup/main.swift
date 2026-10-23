@@ -16,7 +16,8 @@ let usage = """
                                               read before pictures were rated, then the rest of long PDFs and
                                               documents
       digup search [<words>...] [--kind K,K] [--with NAME]... [--album TITLE]... [--favorites] [--origin O]...
-                   [--camera NAME]... [--shot-on NAME]... [--within LAT,LON,LAT,LON] [--sensitive] [-n 10] [--json]
+                   [--camera NAME]... [--shot-on NAME]... [--within LAT,LON,LAT,LON] [--sensitive] [--length S..S]
+                   [--shape SHAPE] [-n 10] [--json]
                                               "code: <words>" searches the code index; with filters and no
                                               words, the newest files they keep; +word or +"a phrase" keeps
                                               only results that have it (in their words, or by what it means)
@@ -62,6 +63,10 @@ let usage = """
                            only files taken inside the box with these two corners (degrees)
       --sensitive          only pictures and videos with a picture rated sensitive, as the app's Sensitive filter
                            keeps them with blurring off (Revealing: low or higher at 0.5 or more)
+      --length S..S        only videos and recordings at least the first number of seconds long and shorter than the
+                           second; either may be left out (..15: under 15 s; 300..: 5 min or longer)
+      --shape SHAPE        only pictures and videos of this shape as they're shown: portrait, landscape, square (sides
+                           within 5 %), wide (2:1 or wider), or an exact ratio W:H within 2 % (16:9, 9:16, 4:3…)
       --include-code       also index loose source code and data files as documents (outside code projects)
       --include-datasets   don't skip folders that look like datasets
       --include-hidden-photos
@@ -99,7 +104,7 @@ struct Arguments {
     static let valued: Set<String> = ["--index", "--limit", "--kind", "-n", "--zgate", "--word-weight", "--new-limit",
                                       "--linger", "--shot-tokens", "--code-stretch", "--encoder-idle", "--to",
                                       "--memory-limit", "--time-limit", "--tries", "--when-quiet", "--within",
-                                      "--defaults-suite"]
+                                      "--defaults-suite", "--length", "--shape"]
     static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude", "--with",
                                         "--album", "--origin", "--camera", "--shot-on"]
 
@@ -199,13 +204,13 @@ struct Arguments {
     var filtered: Bool {
         lists["--with"] != nil || lists["--album"] != nil || flags.contains("--favorites") || values["--within"] != nil
             || lists["--origin"] != nil || lists["--camera"] != nil || lists["--shot-on"] != nil
-            || flags.contains("--sensitive")
+            || flags.contains("--sensitive") || values["--length"] != nil || values["--shape"] != nil
     }
 
     /// The search's filter: --with NAME (every one in it; a name that several people in Photos share means any of
     /// them), --album TITLE (in any of them), --favorites, --origin O, --camera NAME and --shot-on NAME (any of them
     /// each), --within LAT,LON,LAT,LON (two corners of a box), --sensitive (as the app's filter keeps them with
-    /// blurring off).
+    /// blurring off), --length S..S and --shape SHAPE.
     func filter(in store: IndexStore) throws -> SearchFilter {
         var filter = SearchFilter(favorites: flags.contains("--favorites"))
         if let names = lists["--with"] {
@@ -258,6 +263,21 @@ struct Arguments {
                                             longitudes: min(corners[1], corners[3])...max(corners[1], corners[3]))
         }
         if flags.contains("--sensitive") { filter.sensitive = SensitivePosition.off.filterPosition }
+        if let text = values["--length"] {
+            guard let length = SearchFilter.Length(text) else {
+                throw CLIError("--length takes seconds as AT_LEAST..UNDER, either left out (..15, 15..60, 300..), "
+                               + "the first below the second, neither over "
+                               + "\(Int(SearchFilter.Length.longest)) (ten years)")
+            }
+            filter.length = length
+        }
+        if let text = values["--shape"] {
+            guard let shape = SearchFilter.Shape(text) else {
+                throw CLIError("--shape is portrait, landscape, square, wide, or W:H in whole numbers from 1 to 99 "
+                               + "(16:9, 9:16)")
+            }
+            filter.shape = shape
+        }
         return filter
     }
 }
@@ -424,6 +444,7 @@ func index(_ args: Arguments) throws {
     // What older indexes couldn't read: scanned pages' words, SVGs, GIFs' later frames, what's said in recordings.
     try store.readAgainOnce(readsSpeech: indexer.readsSpeech)
     try store.locateOnce()      // where the pictures and videos it read before were taken
+    try store.measureOnce()     // their sizes as shown, and how long its videos and recordings are
     try indexer.checkModel()
     let folders = try args.folders()
     let sync = try indexer.sync(folders)
@@ -553,8 +574,8 @@ func search(_ args: Arguments) throws {
     if let code { query = code }
     guard code == nil || !query.isEmpty else { throw CLIError("search the code for what?") }
     let store = try IndexStore(directory: args.indexFolder, file: code == nil ? IndexStore.mainFile : IndexStore.codeFile)
-    // Photos' people, albums, favorites, origins and cameras, and a box on the map: the main index's. With no words,
-    // the search lists what they keep.
+    // Photos' people, albums, favorites, origins and cameras, a box on the map, a length and a shape: the main index's.
+    // With no words, the search lists what they keep.
     let filter = code == nil ? try args.filter(in: store) : SearchFilter()
     let searcher = try Searcher(store: store, loadVectors: !query.isEmpty)
     let started = Date()

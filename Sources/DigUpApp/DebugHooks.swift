@@ -57,9 +57,10 @@ import SwiftUI
 ///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot
 ///     -debugMap YES           with -debugWindow search: the map shows above the results
 ///     -debugArea "lat1,lon1,lat2,lon2"   with -debugWindow search: results kept to that box of the map
-///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup|sensitive"   with -debugWindow search: these
-///                             filters on (a Photos library's people and albums, by name; Photos' favorites; DigUp's
-///                             own; the Sensitive filter)
+///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup|sensitive|length:15..60|shape:16:9"   with
+///                             -debugWindow search: these filters on (a Photos library's people and albums, by name;
+///                             Photos' favorites; DigUp's own; the Sensitive filter; a Length, in seconds as `digup
+///                             search --length` takes it; a Shape, as `--shape`)
 ///     -debugSaved "<name>"    with -debugWindow search: then open the saved search of that name, as the Saved menu
 ///                             would
 ///     -debugSavedMenu YES     with -debugWindow search: after the snapshot, log the Saved menu's items and draw them
@@ -68,6 +69,8 @@ import SwiftUI
 ///     -debugRequire WORD      with -debugWindow search: after the snapshot, select WORD in the search field, ask the
 ///                             field for its right-click menu (as a right-click on it would), log the menu's first
 ///                             items, choose "Require “WORD”", and draw the window into <snapshot>-required.png
+///     -debugFiltersMenu YES   with -debugWindow search: after the snapshot, log the Filters menu's items and draw them
+///                             into <snapshot>-filtersmenu.png, each submenu's under it (as -debugSavedMenu does)
 ///     -debugSavedSheet save|edit   with -debugWindow search: then open Save This Search… (its name suggested) or
 ///                             Edit Saved Searches…, and draw it into <snapshot>-saved.png; -debugSaveAs NAME
 ///                             then presses Save with that name
@@ -399,6 +402,10 @@ enum DebugHooks {
                                 search.set(.digupFavorites, on: true)
                             } else if kind == "sensitive" {
                                 search.set(.sensitive, on: true)
+                            } else if kind == "length", let length = SearchFilter.Length(String(name)) {
+                                search.set(.length(length), on: true)
+                            } else if kind == "shape", let shape = SearchFilter.Shape(String(name)) {
+                                search.set(.shape(shape), on: true)
                             } else {
                                 log("debug: no filter \"\(part)\"")
                             }
@@ -442,6 +449,7 @@ enum DebugHooks {
                                 log("debug: added; code folders \(settings.codeRoots.map { tildePath($0.path) }) · "
                                     + "skipping \(settings.codeExcluded.map { tildePath($0.path) })")
                             }
+                            filtersMenuStep(app)
                             savedSearchSteps(app) {
                                 requireSteps(app) {
                                     press(keys, app, describe: { windowState(app) }) {
@@ -458,6 +466,33 @@ enum DebugHooks {
                 }
             }
         }
+    }
+
+    /// After the search window's snapshot: `-debugFiltersMenu` logs the Filters menu's items and draws them into
+    /// <snapshot>-filtersmenu.png.
+    private static func filtersMenuStep(_ app: AppController) {
+        guard UserDefaults.standard.bool(forKey: "debugFiltersMenu") else { return }
+        let search = app.searchWindow.search
+        let items = FilterMenuItem.items(search)
+        func described(_ items: [FilterMenuItem]) -> String {
+            items.map { item in
+                switch item {
+                case .toggle(let title, let token, let enabled):
+                    (search.has(token) ? "✓ " : "") + title + (enabled ? "" : " (disabled)")
+                case .submenu(let title, _, let items): "\(title) ▸ [\(described(items))]"
+                case .note(let text): "\(text) (disabled)"
+                case .divider: "—"
+                }
+            }.joined(separator: " | ")
+        }
+        log("filters menu: \(FilterMenuItem.title(on: FilterMenuItem.count(search))) ▾ [\(described(items))]")
+        save("filters menu", { url in
+            let view = NSHostingView(rootView: FiltersMenuDrawing(items: items, search: search))
+            view.frame.size = view.fittingSize
+            let drawing = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            drawing.contentView = view
+            try Snapshot.write(drawing, to: url, cornerRadius: 6)
+        }, to: snapshotPath("filtersmenu"))
     }
 
     /// After the search window's snapshot: `-debugSavedMenu` logs the Saved menu's items and draws them into
@@ -924,6 +959,60 @@ private struct SavedMenuDrawing: View {
         .font(.system(size: 13))
         .foregroundStyle(enabled ? .primary : .tertiary)
         .padding(.horizontal, 14)
+        .frame(height: 22)
+    }
+}
+
+/// The Filters menu's items as a menu shows them, for `-debugFiltersMenu` (an open menu can't be drawn offscreen): a
+/// check by each filter that's on, a submenu's title with ▸ and its items under it, indented, what can't be chosen
+/// dimmed.
+private struct FiltersMenuDrawing: View {
+    let items: [FilterMenuItem]
+    let search: SearchModel
+
+    /// Each item with how deep in submenus it is, a submenu's items right after it.
+    private struct Line: Identifiable {
+        let id: String
+        let depth: Int
+        let item: FilterMenuItem
+    }
+
+    private static func lines(_ items: [FilterMenuItem], depth: Int = 0, under parent: String = "") -> [Line] {
+        items.flatMap { item -> [Line] in
+            let line = Line(id: parent + "/" + item.id, depth: depth, item: item)
+            guard case .submenu(_, _, let inner) = item else { return [line] }
+            return [line] + lines(inner, depth: depth + 1, under: line.id)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Self.lines(items)) { line in
+                let indent = CGFloat(line.depth) * 18
+                switch line.item {
+                case .toggle(let title, let token, let enabled):
+                    row(title, check: search.has(token), enabled: enabled).padding(.leading, indent)
+                case .submenu(let title, _, _): row(title, submenu: true, enabled: true).padding(.leading, indent)
+                case .note(let text): row(text, enabled: false).padding(.leading, indent)
+                case .divider: Divider().padding(.vertical, 5).padding(.leading, 10 + indent).padding(.trailing, 10)
+                }
+            }
+        }
+        .padding(.vertical, 5)
+        .frame(width: 320)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func row(_ title: String, check: Bool = false, submenu: Bool = false, enabled: Bool) -> some View {
+        HStack(spacing: 0) {
+            Text(check ? "✓" : "").frame(width: 16, alignment: .leading)
+            Text(title).lineLimit(1)
+            Spacer()
+            if submenu { Text("▸").foregroundStyle(.secondary) }
+        }
+        .font(.system(size: 13))
+        .foregroundStyle(enabled ? .primary : .tertiary)
+        .padding(.horizontal, 10)
         .frame(height: 22)
     }
 }

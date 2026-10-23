@@ -631,6 +631,8 @@ nonisolated final class Engine: @unchecked Sendable {
             update { $0.activity = .rating(done: int("done"), total: int("total")) }
         case "located":
             log("index: where \(int("files")) files already indexed were taken, read from their metadata")
+        case "measured":
+            log("index: the sizes and lengths of \(int("files")) files already indexed, read from their metadata")
         case "summary":
             if event["rated"] != nil {
                 log("index: rated \(int("rated")) pictures read before in \(int("ms")) ms")

@@ -135,6 +135,88 @@ import Testing
         #expect(try searcher.browse(SearchFilter(), kinds: [.image], limit: 10).map(\.path).count == 3)
     }
 
+    /// What an AI app may not see bears on nothing it searches, the meaning scale included (`Searcher.meaning`): a
+    /// Photos item left out (`photos`) or a picture not rated yet (`SearchFilter.leavingOutSensitive`) neither sets
+    /// the averages and the deviation a note's meaning is measured in, nor so decides whether it stands out.
+    @Test(arguments: [true, false])
+    func whatsLeftOutOfSightDoesntMoveTheMeaningScale(photos: Bool) throws {
+        // A note that means what's asked, among 25 that don't: all of them seen.
+        let store = try IndexStore(directory: index)
+        let query = FakeEmbedder.vector(for: "a zebra crossing a river")
+        var inode: UInt64 = 0
+        func add(_ path: String, _ kind: FileKind, _ vector: [Float]) throws {
+            inode += 1
+            let id = try store.insert(Candidate(path: path, kind: kind, size: 1, mtime: 1, inode: inode, device: 1))
+            let (segment, modality): (SegmentKind, Modality) = kind == .doc ? (.chunk, .text) : (.image, .image)
+            try store.addSegment(file: id, kind: segment, modality: modality, loc: kind == .doc ? 1 : nil,
+                                 vector: vector)
+            try store.finish(id, state: "done")
+        }
+        try add("/notes/zebra.txt", .doc, query)
+        for number in 0..<25 { try add("/notes/\(number).txt", .doc, FakeEmbedder.vector(for: "note \(number)")) }
+        var seen = SearchFilter()
+        if photos { seen.photosOnly = [] } else { seen.leavingOutSensitive = .revealing }
+        func z(_ filter: SearchFilter) throws -> Double? {
+            try Searcher(store: store).search("zebra", queryVector: query, filter: filter)
+                .first { $0.path == "/notes/zebra.txt" }?.z
+        }
+        let before = try #require(try z(seen))
+        #expect(try z(SearchFilter()) == before)
+
+        // Then 40 pictures as unlike the query as can be, which the app may not see: a library's, or not rated yet.
+        let opposite = query.map { -$0 }
+        for number in 0..<40 {
+            try add(photos ? "/L.photoslibrary/originals/F/\(UUID().uuidString).jpeg" : "/pictures/\(number).jpg",
+                    .image, opposite)
+        }
+        // The same, but for the last bits of the products, which depend on how many rows are multiplied at once.
+        let after = try #require(try z(seen))
+        #expect(abs(after - before) < 1e-6)
+        // DigUp's own window sees them all, and its scale moves, as before.
+        #expect(try #require(try z(SearchFilter())) > before)
+    }
+
+    /// Nor does it decide which files match by words, how much of the query each holds, the segment each is shown at,
+    /// or their order (`Searcher.search`'s keyword matching): keyword search's own ranking (bm25) weighs a word by how
+    /// many of all the index's segments have it, and the files it ranked best were the only ones that counted, so a
+    /// word in many files left out made the files the app sees that have it lose to others.
+    @Test(arguments: [true, false])
+    func whatsLeftOutOfSightDoesntDecideWhatMatchesByWords(photos: Bool) throws {
+        // A note that says one word of the query, then 100 that say the other: more than keyword search ranked.
+        let store = try IndexStore(directory: index)
+        var inode: UInt64 = 0
+        func add(_ path: String, _ kind: FileKind, _ text: String) throws {
+            inode += 1
+            let id = try store.insert(Candidate(path: path, kind: kind, size: 1, mtime: 1, inode: inode, device: 1))
+            if kind == .image { try store.addSegment(file: id, kind: .image, modality: .image) }   // not rated yet
+            try store.addSegment(file: id, kind: kind == .doc ? .chunk : .ocr, modality: .text, loc: 1, text: text)
+            try store.finish(id, state: "done")
+        }
+        try add("/notes/target.txt", .doc, "quasar")
+        for number in 0..<100 { try add("/notes/common-\(number).txt", .doc, "zebra") }
+        var seen = SearchFilter()
+        if photos { seen.photosOnly = [] } else { seen.leavingOutSensitive = .revealing }
+        struct Found: Equatable {
+            let path: String, rank: Int?, segment: Int64, excerpt: String?
+        }
+        func found(_ limit: Int) throws -> [Found] {
+            try Searcher(store: store, loadVectors: false)
+                .search("quasar zebra", queryVector: nil, filter: seen, limit: limit)
+                .map { Found(path: $0.path, rank: $0.keywordRank, segment: $0.segmentID, excerpt: $0.excerpt) }
+        }
+        let first = try found(1), all = try found(150)
+        #expect(first.map(\.path) == ["/notes/target.txt"] && first[0].excerpt == "«quasar»")
+        #expect(all.count == 101)   // every file the app sees that holds half the query
+
+        // Then 200 pictures that say the first word, which the app may not see: a library's, or not rated yet.
+        for number in 0..<200 {
+            try add(photos ? "/L.photoslibrary/originals/F/\(UUID().uuidString).jpeg" : "/pictures/\(number).jpg",
+                    .image, "quasar")
+        }
+        #expect(try found(1) == first)
+        #expect(try found(150) == all)
+    }
+
     @Test func anIndexOpenedToReadIsReadAndNeverChanged() throws {
         let index = folder.appendingPathComponent("index")
         let made = try IndexStore(directory: index)
@@ -155,6 +237,56 @@ import Testing
         try Database(readingOnly: older.appendingPathComponent(IndexStore.mainFile).path)
             .query("PRAGMA user_version") { version = $0.int(0) }
         #expect(version == 4)
+    }
+
+    @Test func anIndexNothingElseHasOpenIsReadAndTheReaderNeverWritesIt() throws {
+        let index = folder.appendingPathComponent("index")
+        let file = index.appendingPathComponent(IndexStore.mainFile)
+        func candidate(_ number: UInt64) -> Candidate {
+            Candidate(path: "/\(number).txt", kind: .doc, size: 1, mtime: 1, inode: number, device: 1)
+        }
+        try IndexStore(directory: index).insert(candidate(1))
+        // DigUp quit: its last connection closed, and its write-ahead log and shared memory went with it (as SQLite
+        // does on Linux and Windows; macOS's keeps them, so they're taken away here).
+        for sidecar in ["-wal", "-shm"] { try? FileManager.default.removeItem(atPath: file.path + sidecar) }
+        let written = try Data(contentsOf: file)
+        var reading: IndexStore? = try IndexStore(readingOnly: index)
+        #expect(try reading?.counts(keeping: SearchFilter()) == [.doc: ["pending": 1]])
+        // The indexing helper comes, writes and goes while it's read: what it wrote is read. Closing last, the reader
+        // moves nothing into the file (the helper's writes wait in the log for the next writer).
+        try IndexStore(directory: index).insert(candidate(2))
+        #expect(try reading?.counts(keeping: SearchFilter()) == [.doc: ["pending": 2]])
+        #expect(throws: (any Error).self) { try reading?.insert(candidate(3)) }
+        reading = nil
+        #expect(try Data(contentsOf: file) == written)
+        #expect(try IndexStore(directory: index).counts(keeping: SearchFilter()) == [.doc: ["pending": 2]])
+    }
+
+    @Test func theConnectionThatMakesTheLogNeverMovesItIntoTheFileWhateverHappensNext() throws {
+        let index = folder.appendingPathComponent("index")
+        let file = index.appendingPathComponent(IndexStore.mainFile)
+        func candidate(_ number: UInt64) -> Candidate {
+            Candidate(path: "/\(number).txt", kind: .doc, size: 1, mtime: 1, inode: number, device: 1)
+        }
+        try IndexStore(directory: index).insert(candidate(1))
+        for sidecar in ["-wal", "-shm"] { try? FileManager.default.removeItem(atPath: file.path + sidecar) }
+        let written = try Data(contentsOf: file)
+        // `Database.reader(of:)` with nothing else having the index open: the log maker opens it.
+        var maker: Database? = try Database.logMaker(of: file.path)
+        // The indexing helper writes and goes: what it wrote waits in the log, since the maker still has it open.
+        try IndexStore(directory: index).insert(candidate(2))
+        #expect(try Data(contentsOf: file) == written)
+        #if !os(Windows)
+        // Then the read-only connection meant to take over can't open (made unreadable for the moment)…
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: file.path)
+        #expect(throws: (any Error).self) { try Database(readingOnly: file.path) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+        #endif
+        // …and the maker closes last: it moves nothing into the file, which the helper's next connection does.
+        maker = nil
+        #expect(try Data(contentsOf: file) == written)
+        #expect(try IndexStore(readingOnly: index).counts(keeping: SearchFilter()) == [.doc: ["pending": 2]])
+        #expect(try Data(contentsOf: file) == written)
     }
 
     @Test func aiAccessIsOffUntilTurnedOn() throws {

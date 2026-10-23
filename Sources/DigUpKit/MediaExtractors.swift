@@ -54,3 +54,18 @@ enum VideoExtractor {}
 
 /// Durations from the files themselves (`duration`), for when the file system's metadata hasn't got them.
 enum MediaInfo {}
+
+extension MediaDimensions {
+    /// A file's size as it's shown and its length, from its metadata alone, as indexing would read them: a picture's
+    /// size turned by its orientation (`ImageExtractor.dimensions`), a video's size through its transform and its
+    /// length (`VideoExtractor.dimensions`), a recording's length. Nil for any other kind of file, or when they can't
+    /// be read.
+    static func read(_ url: URL, kind: FileKind) -> MediaDimensions? {
+        switch kind {
+        case .image, .screenshot: ImageExtractor.dimensions(of: url)
+        case .video: VideoExtractor.dimensions(of: url)
+        case .audio: MediaDimensions(width: nil, height: nil, duration: MediaInfo.duration(of: url), source: .file)
+        case .pdf, .doc, .code: nil
+        }
+    }
+}
