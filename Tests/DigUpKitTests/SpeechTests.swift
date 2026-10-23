@@ -3,8 +3,21 @@ import Testing
 @testable import DigUpKit
 
 /// What's said in a recording as stretches of speech (`Speech.stretches(of:)`): consecutive sentences up to about 30 s
-/// or 60 words, never across a silence longer than 2 s, each from its first word's start to its last word's end.
-@Suite struct SpeechTests {
+/// or 60 words, never across a silence longer than 2 s, each from its first word's start to its last word's end; and
+/// what's left when the reader fails.
+@Suite final class SpeechTests {
+    /// In Caches, not the temporary folder: the crawl reports /private/var/… for /var/… (`LongFilesTests`).
+    let folder: URL = {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let url = caches.appendingPathComponent("DigUpTests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }()
+
+    deinit {
+        try? FileManager.default.removeItem(at: folder)
+    }
+
     typealias Token = Speech.Sentence.Token
 
     /// A sentence as parakeet-mlx gives one: `words` words from `start`, one every `pace` seconds (each half as long),
@@ -42,4 +55,38 @@ import Testing
         #expect(stretches.map { [$0.start, $0.end] } == [[0, 2.25], [4.75, 10.75]])
         #expect(stretches.first?.text == "word word word word word.")
     }
+
+    /// parakeet-mlx offline before it has its model, say: not a fact about the recording.
+    struct Offline: Error {}
+
+    #if canImport(AVFoundation)
+    /// A recording whose speech the reader failed on, for a reason of the reader's own, is read again later: not at once
+    /// (the next helper would fail the same way), once a while has passed, and when it fails again, not at once either.
+    /// One that ffmpeg can't decode stays as it is until it changes.
+    @Test func aRecordingTheReaderFailedOnIsReadAgainLater() throws {
+        let files = folder.appendingPathComponent("files")
+        try FileManager.default.createDirectory(at: files, withIntermediateDirectories: true)
+        let tone = (0..<48_000).map { Int16(9000 * sin(Double($0) * 2 * .pi * 440 / AudioExtractor.sampleRate)) }
+        for name in ["talk.wav", "noise.wav"] {
+            try AudioExtractor.writeWAV(tone[...], to: files.appendingPathComponent(name))
+        }
+        var options = IndexOptions()
+        options.speech = Speech.Reader { recording, _, _ in
+            if recording.lastPathComponent == "noise.wav" {
+                throw Speech.Failure(description: "ffmpeg couldn't decode it", ofRecording: true)
+            }
+            throw Offline()
+        }
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        let indexer = try Indexer(store: store, options: options, makeEmbedder: { FakeEmbedder() })
+        _ = try indexer.sync([files])
+        #expect(try indexer.run()["done"] == 2)   // their sound is read whatever the reader does
+        #expect(try store.readAgainOnce(readsSpeech: true) == 0)
+        try store.setMeta("fork_speech_retry", "0 0")   // as if the reader had failed long ago
+        #expect(try store.readAgainOnce(readsSpeech: true) == 1)
+        #expect(try store.pending(limit: nil).map { ($0.path as NSString).lastPathComponent } == ["talk.wav"])
+        _ = try indexer.run()   // and fails again
+        #expect(try store.readAgainOnce(readsSpeech: true) == 0)
+    }
+    #endif
 }

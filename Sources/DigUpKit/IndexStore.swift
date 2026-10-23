@@ -577,7 +577,8 @@ public final class IndexStore {
     /// read again unless it has frames already ("gifs_framed"; a GIF that isn't animated is read again once as well, as
     /// telling them apart would mean reading every one), and, once `readsSpeech` (parakeet-mlx is here), the recordings
     /// read before what's said in them was (`recordingsWithoutSpeech`, `speechReadKey`). Only where this machine does
-    /// each. Returns how many files.
+    /// each. With `readsSpeech`, also the recordings the reader of speech failed on, now and then (`speechRetry`).
+    /// Returns how many files.
     @discardableResult
     public func readAgainOnce(readsSpeech: Bool) throws -> Int {
         var files = Set<Int64>(), flags: [String] = []
@@ -601,10 +602,13 @@ public final class IndexStore {
             files.formUnion(try recordingsWithoutSpeech().map(\.id))
             flags.append(Self.speechReadKey)
         }
-        guard !flags.isEmpty else { return 0 }
+        let retry = readsSpeech ? try speechRetry(now: Date().timeIntervalSince1970) : nil
+        files.formUnion(retry?.files ?? [])
+        guard !flags.isEmpty || retry?.changed == true else { return 0 }
         try db.transaction {
             for file in files { try requeue(file) }
             for flag in flags { try setMeta(flag, "1") }
+            if let retry, retry.changed { try setMeta(Self.speechRetryKey, retry.state) }
         }
         return files.count
     }
@@ -614,9 +618,42 @@ public final class IndexStore {
     static let speechReadKey = "fork_speech_read"
 
     /// A recording's info (`Indexer`): how many stretches of speech were read in it ("0": nothing is said), or why what's
-    /// said in it couldn't be read. A recording read with no reader of speech has neither.
+    /// said in it couldn't be read, the recording's own failure (`speechProblemInfo`: ffmpeg can't decode it, settled
+    /// until it changes) or the reader's (`readerProblemInfo`: parakeet-mlx failing, its model not downloaded, its time
+    /// limit; read again later, `speechRetry`). A recording read with no reader of speech has none of them.
     static let speechInfo = "speech"
     static let speechProblemInfo = "speech_problem"
+    static let readerProblemInfo = "speech_reader_problem"
+
+    /// `meta` "fork_speech_retry": while some recordings wait to be read again because the reader failed on them, when
+    /// the wait began (seconds since 1970) and how many times they've been read again since, "<since> <tries>"
+    /// (`speechRetry`).
+    static let speechRetryKey = "fork_speech_retry"
+    /// The first wait before reading them again, in seconds; each wait after is twice the one before, up to the longest.
+    static let firstSpeechRetry = 3600.0
+    static let longestSpeechRetry = 86_400.0
+
+    /// The recordings the reader of speech failed on (`readerProblemInfo`) to read again now, and `meta`
+    /// "fork_speech_retry" as it is after (`changed`: not as it was). They wait `firstSpeechRetry`, then twice as long
+    /// each time they fail again, up to `longestSpeechRetry`: a reader that's back (the network, a reinstall) reads them
+    /// within the hour, and one that's broken for good reads them again once a day, not at every start of a helper.
+    /// With none waiting, the waits start over.
+    func speechRetry(now: Double) throws -> (files: [Int64], state: String?, changed: Bool) {
+        var failed: [Int64] = []
+        try db.query("""
+            SELECT id FROM files WHERE kind IN (\(Self.sqlList([.audio, .video]))) AND state = 'done'
+            AND json_extract(info, '$.\(Self.readerProblemInfo)') IS NOT NULL
+            """) { failed.append($0.int(0)) }
+        let stored = try meta(Self.speechRetryKey)
+        guard !failed.isEmpty else { return ([], nil, stored != nil) }
+        let wait = (stored ?? "").split(separator: " ").compactMap { Double($0) }
+        guard wait.count == 2 else { return ([], "\(Int(now)) 0", true) }   // the first seen: the wait begins
+        let (since, tries) = (wait[0], wait[1])
+        guard now - since >= min(Self.firstSpeechRetry * pow(2, tries), Self.longestSpeechRetry) else {
+            return ([], stored, false)
+        }
+        return (failed, "\(Int(now)) \(Int(tries) + 1)", true)
+    }
 
     /// A recording on this Mac read before what's said in it was (`Speech`), and how long it is.
     public struct UnheardRecording: Sendable {
@@ -626,8 +663,8 @@ public final class IndexStore {
     }
 
     /// The recordings on this Mac read without their speech: audio and video files read while there was no reader of
-    /// speech (their info has neither `speechInfo` nor `speechProblemInfo`). Not a video in iCloud, read from Photos'
-    /// stills or its poster: its sound isn't here.
+    /// speech (their info has none of `speechInfo`, `speechProblemInfo` and `readerProblemInfo`). Not a video in iCloud,
+    /// read from Photos' stills or its poster: its sound isn't here.
     public func recordingsWithoutSpeech() throws -> [UnheardRecording] {
         let standIns = PhotosLibrary.Reading.allCases.filter(\.isStandIn).map { "'\($0.rawValue)'" }.joined(separator: ",")
         var recordings: [UnheardRecording] = []
@@ -636,6 +673,7 @@ public final class IndexStore {
             WHERE kind IN (\(Self.sqlList([.audio, .video]))) AND state = 'done'
             AND json_extract(info, '$.\(Self.speechInfo)') IS NULL
             AND json_extract(info, '$.\(Self.speechProblemInfo)') IS NULL
+            AND json_extract(info, '$.\(Self.readerProblemInfo)') IS NULL
             AND id NOT IN (SELECT file FROM photos_assets WHERE reading IN (\(standIns)))
             """) { row in
             guard let kind = FileKind(rawValue: row.text(1) ?? "") else { return }

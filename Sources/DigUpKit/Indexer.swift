@@ -451,10 +451,13 @@ public final class Indexer {
         case code(CodeExtractor.File)
     }
 
-    /// What a recording was heard to say (`Speech`) and how long reading it took, or why it couldn't be read.
+    /// What a recording was heard to say (`Speech`) and how long reading it took, or why it couldn't be read: the
+    /// recording's own failure (`Speech.Failure.ofRecording`), settled until it changes, or the reader's, which reads it
+    /// again later (`IndexStore.readAgainOnce`).
     enum SpeechRead: Sendable {
         case said([Speech.Stretch], seconds: Double)
-        case failed(String)
+        case unreadable(String)
+        case readerFailed(String)
 
         var stretches: [Speech.Stretch] {
             if case .said(let stretches, _) = self { stretches } else { [] }
@@ -643,8 +646,10 @@ public final class Indexer {
         do {
             return .said(Speech.stretches(of: try reader.read(url, folder, duration)),
                          seconds: Date().timeIntervalSince(started))
+        } catch let failure as Speech.Failure where failure.ofRecording {
+            return .unreadable("\(failure)")
         } catch {
-            return .failed("\(error)")
+            return .readerFailed("\(error)")
         }
     }
 
@@ -938,8 +943,9 @@ public final class Indexer {
     }
 
     /// Writes a recording's stretches of speech (`speechVectors`) as `speech` segments, their words for keyword search
-    /// and to show, and puts in its info how many there are, or why they couldn't be read. A recording read without a
-    /// reader has neither, which is how the read-again pass finds it (`IndexStore.recordingsWithoutSpeech`).
+    /// and to show, and puts in its info how many there are, or why they couldn't be read, the recording's failure apart
+    /// from the reader's. A recording read without a reader has none of them, which is how the read-again pass finds it
+    /// (`IndexStore.recordingsWithoutSpeech`), and one the reader failed on is read again later.
     private func addSpeech(_ said: [(Speech.Stretch, [Float]?)], read speech: SpeechRead?, of file: FileRecord,
                            info: inout [String: String]) throws {
         for (stretch, vector) in said {
@@ -948,7 +954,8 @@ public final class Indexer {
         }
         switch speech {
         case .said(let stretches, _): info[IndexStore.speechInfo] = "\(stretches.count)"
-        case .failed(let why): info[IndexStore.speechProblemInfo] = why
+        case .unreadable(let why): info[IndexStore.speechProblemInfo] = why
+        case .readerFailed(let why): info[IndexStore.readerProblemInfo] = why
         case nil: break
         }
     }
@@ -959,7 +966,8 @@ public final class Indexer {
         case .said(let stretches, _):
             stretches.isEmpty ? ", nothing said"
                 : ", \(stretches.count) \(stretches.count == 1 ? "stretch" : "stretches") of speech"
-        case .failed(let why): ", speech not read: \(why)"
+        case .unreadable(let why): ", speech not read: \(why)"
+        case .readerFailed(let why): ", speech not read for now (read again later): \(why)"
         case nil: ""
         }
     }

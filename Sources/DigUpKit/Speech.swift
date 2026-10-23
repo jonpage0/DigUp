@@ -103,15 +103,46 @@ public enum Speech {
         let read: @Sendable (_ recording: URL, _ scratch: URL, _ duration: Double) throws -> [Sentence]
     }
 
+    /// Why a recording's speech couldn't be read.
     public struct Failure: Error, CustomStringConvertible {
         public let description: String
+        /// The recording's own failure: ffmpeg can't decode it. That's settled until the recording changes. Any other
+        /// failure is the reader's (parakeet-mlx or ffmpeg missing or failing, the model not downloaded, the time
+        /// limit), not a fact about the recording, and the recording is read again later (`IndexStore.readAgainOnce`).
+        var ofRecording = false
     }
 
-    /// parakeet-mlx as the reader, or nil when it or ffmpeg isn't installed.
+    /// parakeet-mlx as the reader, or nil when it or ffmpeg isn't installed. Once it has failed for a reason of its own
+    /// (not the recording's, `Failure.ofRecording`), it isn't run again in this process: every recording after would wait
+    /// for the same failure (a stuck download for the whole time limit), so each says it at once, and is read again
+    /// later.
     public static func parakeetReader() -> Reader? {
         guard let program = parakeet, let ffmpeg else { return nil }
+        let broken = BrokenReader()
         return Reader { recording, scratch, duration in
-            try run(program, ffmpeg: ffmpeg, on: recording, in: scratch, timeout: max(shortestWait, duration))
+            if let failure = broken.failure { throw failure }
+            do {
+                let wait = max(shortestWait, duration)
+                return try run(program, ffmpeg: ffmpeg, on: recording, in: scratch, timeout: wait)
+            } catch let failure as Failure where failure.ofRecording {
+                throw failure
+            } catch {
+                let failure = error as? Failure ?? Failure(description: "parakeet-mlx couldn't read it: \(error)")
+                broken.failure = failure
+                throw failure
+            }
+        }
+    }
+
+    /// The reader's own failure, once it has failed (`parakeetReader`): the indexer reads one recording at a time, and
+    /// prepares the next on another thread.
+    private final class BrokenReader: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Failure?
+
+        var failure: Failure? {
+            get { lock.withLock { stored } }
+            set { lock.withLock { stored = newValue } }
         }
     }
 
@@ -146,9 +177,9 @@ public enum Speech {
         environment["PATH"] = folder + (environment["PATH"].map { ":" + $0 } ?? "")
         process.environment = environment
         process.standardInput = FileHandle.nullDevice
-        let said = try FileHandle(forWritingTo: output)
-        process.standardOutput = said
-        process.standardError = said
+        let handle = try FileHandle(forWritingTo: output)
+        process.standardOutput = handle
+        process.standardError = handle
         let ended = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in ended.signal() }
         try process.run()
@@ -160,10 +191,20 @@ public enum Speech {
             throw Failure(description: "parakeet-mlx took more than \(Int(timeout / 60)) minutes")
         }
         guard let data = try? Data(contentsOf: work.appendingPathComponent("speech.json")) else {
-            let lines = ((try? String(contentsOf: output, encoding: .utf8)) ?? "").split(separator: "\n")
-                .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            let last = lines.last { $0.contains("Error") } ?? lines.last ?? "it stopped (\(process.terminationStatus))"
-            throw Failure(description: "parakeet-mlx couldn't read it: \(last)")
+            // What it said, as one line (it wraps its output at 80 columns when that's a file), without the paragraph
+            // it ends with ("… transcription complete. Outputs saved in …").
+            let said = ((try? String(contentsOf: output, encoding: .utf8)) ?? "").components(separatedBy: "\n\n")
+                .filter { !$0.contains("transcription complete") }.joined(separator: " ")
+                .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            // ffmpeg couldn't decode the recording (its last error says why): the recording's failure. Anything else
+            // is the reader's, and parakeet-mlx's own error says why.
+            if said.contains("Failed to load audio") {
+                let why = said.range(of: "Error", options: .backwards).map { String(said[$0.lowerBound...]) } ?? said
+                throw Failure(description: "ffmpeg couldn't decode it: \(why.prefix(300))", ofRecording: true)
+            }
+            let why = said.range(of: "Error").map { String(said[$0.lowerBound...]) }
+                ?? (said.isEmpty ? "it stopped (\(process.terminationStatus))" : said)
+            throw Failure(description: "parakeet-mlx couldn't read it: \(why.prefix(300))")
         }
         return try JSONDecoder().decode(Transcript.self, from: data).sentences
     }

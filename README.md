@@ -281,6 +281,9 @@ long that pass takes, and setup's estimate (`digup estimate`) counts the time re
   Word by word timings aren't kept.
 - only what's on this Mac is read: a Photos video that's only in iCloud is read for what's said once it's downloaded
   (Download Original), not from Photos' stills of it.
+- when parakeet-mlx itself fails (no network for its first download, say), the recordings it failed on are read again
+  later: after an hour, then twice as long each time it fails again, at most a day apart. A recording ffmpeg can't
+  decode stays as it is until it changes.
 
 ## AI apps
 
