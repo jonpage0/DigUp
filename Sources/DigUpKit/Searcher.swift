@@ -569,7 +569,11 @@ public final class Searcher {
         // Only the files an AI app may see count for a word's prefix matching (`SearchFilter.exclusions`).
         let patterns = try identifier.map { [CodeLookup.phrase($0)] }
             ?? wordPatterns(terms, prefixLast: prefixLast, within: filter.exclusions.query)
-        if !patterns.isEmpty {
+        // An AI app's search: which files match, how far, and where, from the files it sees alone (`wordsInSight`).
+        let inSight = filter.exclusions.query != nil
+        if !patterns.isEmpty, inSight {
+            (words, coverage) = try wordsInSight(patterns, within: narrowing, allowed: allowed)
+        } else if !patterns.isEmpty {
             var seen = Set<Int64>()
             // The filter narrows the matches before they're cut to the best 1,000: else a file it keeps could be
             // outranked by that many matches it doesn't, and never be seen.
@@ -619,7 +623,12 @@ public final class Searcher {
             .prefix(limit) {
             let rank = hits.count
             let semantic = best[file]
-            let keyword = wordRank[file]
+            var keyword = wordRank[file]
+            // An AI app's: the words quoted for the files shown alone (`wordsInSight` matches every file it sees).
+            if inSight, let match = keyword, match.1.snippet == nil {
+                let quoted = try snippet(ofSegment: match.1.segment, patterns, terms: terms)
+                keyword = (match.0, (match.1.file, match.1.segment, quoted))
+            }
             // Point at the best meaning segment if it stands out; else at the segment the words matched.
             let useMeaning = semantic.map { $0.z >= zGate || keyword == nil } ?? false
             guard var segmentID = useMeaning ? semantic.map({ rowSegment[$0.row] }) : keyword?.1.segment else { continue }
@@ -1079,6 +1088,66 @@ public final class Searcher {
             SELECT 1 FROM fts JOIN segments s ON s.id = fts.rowid WHERE fts MATCH ? AND s.file IN (\(kept.sql)) LIMIT 1
             """, [.text(pattern)] + kept.values) { _ in found = true }
         return found
+    }
+
+    /// Keyword matches for a caller who doesn't see every file (an AI app's, `SearchFilter.exclusions`), none of them
+    /// decided by a file it may not see (MCP-PLAN.md): keyword search's own ranking (bm25) weighs a word by how many of
+    /// all the index's segments have it, so it isn't used, and no match is left out by a cap. Every segment of the
+    /// files `narrowing` keeps (and `allowed`) that holds one of `patterns` counts (`segmentsHolding`): each file at
+    /// its segment that holds the most of them (of those that hold as many, the first), in order of how much of the
+    /// query the file holds (`coverage`, as `search` has it), then of how much that segment does, then of id. Their
+    /// words are quoted later, for the files shown (`snippet`).
+    private func wordsInSight(_ patterns: [String], within narrowing: (sql: String, values: [SQLValue])?,
+                              allowed: (Int64) -> Bool)
+        throws -> (words: [(file: Int64, segment: Int64, snippet: String?)], coverage: [Int64: Double]) {
+        var coverage: [Int64: Double] = [:]
+        var held: [Int64: (file: Int64, patterns: Int)] = [:]   // by segment
+        for found in try segmentsHolding(patterns, within: narrowing) {
+            for file in Set(found.map(\.file)) where allowed(file) {
+                coverage[file, default: 0] += 1 / Double(patterns.count)
+            }
+            for (file, segment) in found where allowed(file) {
+                held[segment, default: (file, 0)].patterns += 1
+            }
+        }
+        var best: [Int64: (segment: Int64, patterns: Int)] = [:]   // by file
+        for (segment, match) in held {
+            if let current = best[match.file], current.patterns > match.patterns
+                || current.patterns == match.patterns && current.segment < segment { continue }
+            best[match.file] = (segment, match.patterns)
+        }
+        let ordered = best.sorted { first, second in
+            (coverage[first.key] ?? 0, first.value.patterns, second.key)
+                > (coverage[second.key] ?? 0, second.value.patterns, first.key)
+        }
+        return (ordered.map { (file: $0.key, segment: $0.value.segment, snippet: nil) }, coverage)
+    }
+
+    /// The segments of the files `kept` keeps (nil: every file) that hold each of `patterns`: every one of them, in no
+    /// order of keyword search's, so that nothing outside `kept` bears on which they are (`wordsInSight`).
+    private func segmentsHolding(_ patterns: [String], within kept: (sql: String, values: [SQLValue])?) throws
+        -> [[(file: Int64, segment: Int64)]] {
+        try patterns.map { pattern in
+            var found: [(file: Int64, segment: Int64)] = []
+            try store.db.query("""
+                SELECT s.file, s.id FROM fts JOIN segments s ON s.id = fts.rowid
+                WHERE fts MATCH ?\(kept.map { " AND s.file IN (\($0.sql))" } ?? "")
+                """, [.text(pattern)] + (kept?.values ?? [])) { found.append(($0.int(0), $0.int(1))) }
+            return found
+        }
+    }
+
+    /// A keyword match's words in its segment, quoted as `search` quotes them: marked, as they're written (FTS5's
+    /// snippet, which looks at the segment alone).
+    private func snippet(ofSegment segment: Int64, _ patterns: [String], terms: [String]) throws -> String? {
+        var snippet: String?
+        try store.db.query("""
+            SELECT snippet(fts, 1, '«', '»', '…', 12), original FROM fts WHERE fts MATCH ? AND rowid = ?
+            """, [.text(patterns.joined(separator: " OR ")), .int(segment)]) { row in
+            // Text that normalizing changed is quoted as it's written (with its hamza, harakat, joiners).
+            snippet = row.text(1).flatMap { SearchText.snippet($0, terms: terms) } ?? row.text(0)
+        }
+        return snippet
     }
 
     /// The query's words as an FTS5 OR-query.

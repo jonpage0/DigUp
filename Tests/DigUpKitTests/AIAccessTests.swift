@@ -176,6 +176,47 @@ import Testing
         #expect(try #require(try z(SearchFilter())) > before)
     }
 
+    /// Nor does it decide which files match by words, how much of the query each holds, the segment each is shown at,
+    /// or their order (`Searcher.search`'s keyword matching): keyword search's own ranking (bm25) weighs a word by how
+    /// many of all the index's segments have it, and the files it ranked best were the only ones that counted, so a
+    /// word in many files left out made the files the app sees that have it lose to others.
+    @Test(arguments: [true, false])
+    func whatsLeftOutOfSightDoesntDecideWhatMatchesByWords(photos: Bool) throws {
+        // A note that says one word of the query, then 100 that say the other: more than keyword search ranked.
+        let store = try IndexStore(directory: index)
+        var inode: UInt64 = 0
+        func add(_ path: String, _ kind: FileKind, _ text: String) throws {
+            inode += 1
+            let id = try store.insert(Candidate(path: path, kind: kind, size: 1, mtime: 1, inode: inode, device: 1))
+            if kind == .image { try store.addSegment(file: id, kind: .image, modality: .image) }   // not rated yet
+            try store.addSegment(file: id, kind: kind == .doc ? .chunk : .ocr, modality: .text, loc: 1, text: text)
+            try store.finish(id, state: "done")
+        }
+        try add("/notes/target.txt", .doc, "quasar")
+        for number in 0..<100 { try add("/notes/common-\(number).txt", .doc, "zebra") }
+        var seen = SearchFilter()
+        if photos { seen.photosOnly = [] } else { seen.leavingOutSensitive = .revealing }
+        struct Found: Equatable {
+            let path: String, rank: Int?, segment: Int64, excerpt: String?
+        }
+        func found(_ limit: Int) throws -> [Found] {
+            try Searcher(store: store, loadVectors: false)
+                .search("quasar zebra", queryVector: nil, filter: seen, limit: limit)
+                .map { Found(path: $0.path, rank: $0.keywordRank, segment: $0.segmentID, excerpt: $0.excerpt) }
+        }
+        let first = try found(1), all = try found(150)
+        #expect(first.map(\.path) == ["/notes/target.txt"] && first[0].excerpt == "«quasar»")
+        #expect(all.count == 101)   // every file the app sees that holds half the query
+
+        // Then 200 pictures that say the first word, which the app may not see: a library's, or not rated yet.
+        for number in 0..<200 {
+            try add(photos ? "/L.photoslibrary/originals/F/\(UUID().uuidString).jpeg" : "/pictures/\(number).jpg",
+                    .image, "quasar")
+        }
+        #expect(try found(1) == first)
+        #expect(try found(150) == all)
+    }
+
     @Test func anIndexOpenedToReadIsReadAndNeverChanged() throws {
         let index = folder.appendingPathComponent("index")
         let made = try IndexStore(directory: index)
