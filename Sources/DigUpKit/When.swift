@@ -142,23 +142,11 @@ extension SearchFilter {
 
         /// When it starts in `zone`: its midnight, or its first moment where a change of the clocks skips midnight. A
         /// day the zone skipped altogether crossing the date line (Samoa's 2011-12-30, Kwajalein's 1993-08-21) has no
-        /// moment there: it gets the next day's start, which `init(_:in:)` reads as the next day.
+        /// moment there: it gets the next day's start, which `init(_:in:)` reads as the next day (a date picker there
+        /// shows it as the next day too).
         public func start(in zone: TimeZone = .current) -> Date {
             Self.calendar(in: zone).date(from: DateComponents(year: year, month: month, day: day))
                 ?? Date(timeIntervalSince1970: Double(daysSince1970 * 86_400))
-        }
-
-        /// The zone a date picker shows days in (Custom Range…'s), whatever zone the Mac is in: UTC, where every day
-        /// of the calendar is a day of the clock. In a zone that skipped a day no moment shows it, so a range ending on
-        /// it can't be shown there, and came back a day longer (cold review WHEN-2).
-        public static let pickerZone = TimeZone.gmt
-
-        /// The moment a date picker in `pickerZone` is given to show it: its start there.
-        public var pickerDate: Date { start(in: Self.pickerZone) }
-
-        /// The day a date picker in `pickerZone` shows for `date`; nil when that's no day of `years`.
-        public init?(pickerDate date: Date) {
-            self.init(date, in: Self.pickerZone)
         }
 
         static func calendar(in zone: TimeZone) -> Calendar {

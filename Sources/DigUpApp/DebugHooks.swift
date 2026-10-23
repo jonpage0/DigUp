@@ -507,8 +507,8 @@ enum DebugHooks {
 
     /// After the search window's snapshot: `-debugWhenSheet YES|use` opens When's Custom Range…, picks
     /// `-debugWhenThrough DAY` on its Through picker if given (as a click on that day of its calendar would), logs the
-    /// days its pickers show and what Use would put on, and draws it into <snapshot>-when.png; `use` then presses Use
-    /// and logs the tokens.
+    /// days its pickers show, the zone they show them in and the day they take for today, and what Use would put on,
+    /// and draws it into <snapshot>-when.png; `use` then presses Use and logs the tokens.
     private static func whenSheetStep(_ app: AppController, then done: @escaping () -> Void) {
         let defaults = UserDefaults.standard
         guard let mode = defaults.string(forKey: "debugWhenSheet") else { return done() }
@@ -522,10 +522,15 @@ enum DebugHooks {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 if let range = sheet.range {
-                    log("debug: custom range: the pickers show " + sheet.datePickers.map(shown).joined(separator: ", ")
-                        + " (in \(TimeZone.current.identifier)); Use "
-                        + (range.when.map { "puts on \($0.text)" } ?? "can't be pressed")
-                        + (range.problem.map { " (\($0))" } ?? ""))
+                    let pickers = sheet.datePickers
+                    let shows = pickers.map(shown).joined(separator: ", ")
+                    let zones = Set(pickers.map(zone)).map(\.identifier).sorted().joined(separator: ", ")
+                    let todays = Set(pickers.map(today)).sorted().joined(separator: ", ")
+                    let here = "the Mac: \(TimeZone.current.identifier), today \(SearchFilter.Day(Date())?.text ?? "-")"
+                    let use = range.when.map { "puts on \($0.text)" } ?? "can't be pressed"
+                    let why = range.problem.map { " (\($0))" } ?? ""
+                    log("debug: custom range: the pickers show \(shows) in \(zones), today there \(todays) (\(here)); "
+                        + "Use \(use)\(why)")
                 }
                 save("custom range sheet", { try sheet.snapshot(to: $0) }, to: snapshotPath("when"))
                 guard mode == "use", let use = sheet.use else { return done() }
@@ -543,7 +548,7 @@ enum DebugHooks {
     /// zone, then its action.
     private static func pick(_ day: SearchFilter.Day, on picker: NSDatePicker) {
         var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = picker.timeZone ?? picker.calendar?.timeZone ?? .current
+        calendar.timeZone = zone(of: picker)
         guard let date = calendar.date(from: DateComponents(year: day.year, month: day.month, day: day.day)) else {
             return
         }
@@ -551,11 +556,26 @@ enum DebugHooks {
         _ = picker.sendAction(picker.action, to: picker.target)
     }
 
+    /// The zone `picker` shows days in, and so where its calendar marks today.
+    private static func zone(of picker: NSDatePicker) -> TimeZone {
+        picker.timeZone ?? picker.calendar?.timeZone ?? .current
+    }
+
     /// The day `picker` shows, "2011-12-30", as its own calendar and zone write it.
     private static func shown(_ picker: NSDatePicker) -> String {
+        written(picker.dateValue, in: zone(of: picker))
+    }
+
+    /// The day `picker`'s calendar marks as today: now, in its zone.
+    private static func today(_ picker: NSDatePicker) -> String {
+        written(Date(), in: zone(of: picker))
+    }
+
+    /// "2011-12-30": the day `date` is on in `zone`.
+    private static func written(_ date: Date, in zone: TimeZone) -> String {
         var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = picker.timeZone ?? picker.calendar?.timeZone ?? .current
-        let parts = calendar.dateComponents([.year, .month, .day], from: picker.dateValue)
+        calendar.timeZone = zone
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 

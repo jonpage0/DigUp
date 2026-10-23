@@ -66,9 +66,10 @@ final class CustomWhenSheet {
 /// The days Custom Range… is asking for: a first day and a last one, each on or left open. They're days of the
 /// calendar, as a When keeps them, not moments: an end whose picker isn't touched stays the day it was, so a range
 /// opened here and used as it is comes back as it was, and Use puts on the kit's When of them
-/// (`SearchFilter.When(first:last:)`), never one the saved searches' reader refuses. The pickers show days in
-/// `SearchFilter.Day.pickerZone`, where every day is one (the Mac's zone may have skipped one: Samoa's 2011-12-30),
-/// so a day picked is the day shown.
+/// (`SearchFilter.When(first:last:)`), never one the saved searches' reader refuses. The pickers show days in the
+/// Mac's zone and calendar, so the day their calendar marks Today is today here, and a day picked is the day shown
+/// here. One old oddity is left: an end on a day this zone skipped crossing the date line (Samoa's 2011-12-30) has no
+/// moment here, so its picker shows the next day; untouched, the end keeps the day it was (cold review WHEN-3).
 @Observable
 final class CustomWhenRange {
     var from: SearchFilter.Day
@@ -80,17 +81,11 @@ final class CustomWhenRange {
     static let defaultDays = 30
 
     /// The days From offers: every day a When takes (`SearchFilter.Day.years`).
-    static var fromDays: ClosedRange<Date> { SearchFilter.Day.first.pickerDate...SearchFilter.Day.last.pickerDate }
+    static var fromDays: ClosedRange<Date> { SearchFilter.Day.first.start()...SearchFilter.Day.last.start() }
     /// The days Through offers: every one but the last, which has no day after it for the range to stop before (the
-    /// moment before it starts is on the day before, in the pickers' zone).
+    /// moment before it starts is on the day before, here).
     static var throughDays: ClosedRange<Date> {
-        SearchFilter.Day.first.pickerDate...SearchFilter.Day.last.pickerDate.addingTimeInterval(-1)
-    }
-    /// The calendar the pickers show days in: the user's, in `SearchFilter.Day.pickerZone`.
-    static var pickerCalendar: Calendar {
-        var calendar = Calendar.current
-        calendar.timeZone = SearchFilter.Day.pickerZone
-        return calendar
+        SearchFilter.Day.first.start()...SearchFilter.Day.last.start().addingTimeInterval(-1)
     }
 
     /// `current`'s days, or for the last so many days, those days up to today; without one, the past month.
@@ -110,11 +105,11 @@ final class CustomWhenRange {
         }
     }
 
-    /// One end's picker selection: its day as the picker is given it, and the day picked when one is; an end whose
-    /// picker isn't touched keeps its day as it is.
+    /// One end's picker selection: its day as the picker is given it (when it starts here), and the day picked, here,
+    /// when one is; an end whose picker isn't touched keeps its day as it is.
     func picker(for end: ReferenceWritableKeyPath<CustomWhenRange, SearchFilter.Day>) -> Binding<Date> {
-        Binding(get: { self[keyPath: end].pickerDate },
-                set: { if let day = SearchFilter.Day(pickerDate: $0) { self[keyPath: end] = day } })
+        Binding(get: { self[keyPath: end].start() },
+                set: { if let day = SearchFilter.Day($0) { self[keyPath: end] = day } })
     }
 
     /// What Use puts on: from the first day through the last; nil with neither end, a last day with no day after it,
@@ -157,9 +152,6 @@ private struct CustomWhenView: View {
                         .disabled(!range.hasThrough)
                 }
             }
-            // The days as they are, wherever the Mac is (`SearchFilter.Day.pickerZone`).
-            .environment(\.timeZone, SearchFilter.Day.pickerZone)
-            .environment(\.calendar, CustomWhenRange.pickerCalendar)
             Text(range.problem ?? "Files from these days, both included: when Photos or the camera says it was taken, "
                  + "else when the file was last changed. Turn an end off to leave it open.")
                 .font(.system(size: 11))

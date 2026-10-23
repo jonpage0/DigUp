@@ -205,62 +205,76 @@ import Testing
     @Test func noRangeCustomRangeMakesIsOneTheReaderRefuses() throws {
         let last = SearchFilter.Day.last
         #expect(SearchFilter.When(first: try day("9999-12-30"), last: last) == nil)
-        // Through's latest moment is on the day before the last, as its picker shows it.
-        #expect(SearchFilter.Day(pickerDate: last.pickerDate.addingTimeInterval(-1)) == (try day("9999-12-30")))
-        // Every range made from what the pickers give at the ends of what they offer, and just past them (no day:
-        // the end keeps its day), is read back as written.
+        // Every range made from what the pickers give, wherever the Mac is, at the ends of what they offer and just
+        // past them (no day: the end keeps its day), is read back as written; Through's latest moment is on the day
+        // before the last.
         let encoder = JSONEncoder(), decoder = JSONDecoder()
-        let first = SearchFilter.Day.first.pickerDate
-        let edges = [first.addingTimeInterval(-1), first, try day("1583-01-02").pickerDate,
-                     try day("2011-12-30").pickerDate, try day("2026-07-01").pickerDate,
-                     try day("9999-12-30").pickerDate, last.pickerDate, last.pickerDate.addingTimeInterval(86_400 * 2)]
-        let days = edges.compactMap(SearchFilter.Day.init(pickerDate:))
-        #expect(days.count == edges.count - 2)
-        for from in days.map(Optional.some) + [nil] {
-            for through in days.map(Optional.some) + [nil] {
-                guard let made = SearchFilter.When(first: from, last: through) else { continue }
-                #expect((try? decoder.decode(SearchFilter.When.self, from: encoder.encode(made))) == made,
-                        "\(made.text)")
+        for zone in Self.zones {
+            let first = SearchFilter.Day.first.start(in: zone)
+            #expect(SearchFilter.Day(last.start(in: zone).addingTimeInterval(-1), in: zone) == (try day("9999-12-30")))
+            let edges = [first.addingTimeInterval(-1), first, try day("1583-01-02").start(in: zone),
+                         try day("2011-12-30").start(in: zone), try day("2026-07-01").start(in: zone),
+                         try day("9999-12-30").start(in: zone), last.start(in: zone),
+                         last.start(in: zone).addingTimeInterval(86_400 * 2)]
+            let days = edges.compactMap { SearchFilter.Day($0, in: zone) }
+            #expect(days.count == edges.count - 2, "\(zone.identifier)")
+            for from in days.map(Optional.some) + [nil] {
+                for through in days.map(Optional.some) + [nil] {
+                    guard let made = SearchFilter.When(first: from, last: through) else { continue }
+                    #expect((try? decoder.decode(SearchFilter.When.self, from: encoder.encode(made))) == made,
+                            "\(made.text) in \(zone.identifier)")
+                }
             }
         }
     }
 
-    /// And a range opened in it comes back as it was when nothing is changed (the cold review: "..0001-01-01" came
-    /// back as "..0002-01-01"; WHEN-2: in Samoa "2011-12-29..2011-12-31", whose last day is the one Samoa skipped,
-    /// came back "2011-12-29..2012-01-01"), its ends untouched or given to their pickers and back.
+    /// The ranges the cold reviews opened in Custom Range…: "..0001-01-01" (came back "..0002-01-01"), and in Samoa
+    /// "2011-12-29..2011-12-31", whose last day is the one Samoa skipped (came back "2011-12-29..2012-01-01").
+    static let opened = ["2026-07-01..2026-08-01", "2026-07-31..2026-08-01", "..2026-08-01", "2026-07-01..",
+                         "2018-11-03..2018-11-05", "..1583-01-02", "1583-01-01..1583-01-02", "9999-12-30..9999-12-31",
+                         "9999-12-31..", "..0001-01-01", "1582-10-10..1582-10-20", "2011-12-29..2011-12-31",
+                         "..2011-12-31", "2011-12-30..2011-12-31", "2011-12-30..", "1993-08-20..1993-08-22",
+                         "1993-08-21..1993-08-22"]
+
+    /// A range opened in it comes back as it was when its ends aren't touched, wherever the Mac is: they're kept as
+    /// days, not as the moments its pickers show them at.
     @Test func aRangeOpenedInCustomRangeComesBackAsItWas() throws {
-        for text in ["2026-07-01..2026-08-01", "2026-07-31..2026-08-01", "..2026-08-01", "2026-07-01..",
-                     "2018-11-03..2018-11-05", "..1583-01-02", "1583-01-01..1583-01-02", "9999-12-30..9999-12-31",
-                     "9999-12-31..", "..0001-01-01", "1582-10-10..1582-10-20", "2011-12-29..2011-12-31",
-                     "..2011-12-31", "2011-12-30..2011-12-31", "2011-12-30..", "1993-08-20..1993-08-22",
-                     "1993-08-21..1993-08-22"] {
+        for text in Self.opened {
             guard let opened = SearchFilter.When(text) else { continue }   // the reader refuses it: never opened
             #expect(SearchFilter.When(first: opened.firstDay, last: opened.lastDay) == opened, "\(text)")
-            let picked = (opened.firstDay.flatMap { SearchFilter.Day(pickerDate: $0.pickerDate) },
-                          opened.lastDay.flatMap { SearchFilter.Day(pickerDate: $0.pickerDate) })
-            #expect(SearchFilter.When(first: picked.0, last: picked.1) == opened, "\(text), picked")
         }
     }
 
-    /// A day picked is the day its picker shows, wherever the Mac is: the pickers show days in a zone where every day
-    /// is one (`Day.pickerZone`). In the Mac's own zone a day it skipped crossing the date line has no moment, its
-    /// start is the next day's, and a range ending on it came back a day longer (WHEN-2).
-    @Test func aDayPickedIsTheDayItsPickerShows() throws {
-        var pickers = Calendar(identifier: .gregorian)
-        pickers.timeZone = SearchFilter.Day.pickerZone
-        let skipped = [("Pacific/Apia", "2011-12-30"), ("Pacific/Kwajalein", "1993-08-21")]
-        for text in ["1583-01-01", "2011-12-29", "2011-12-31", "2018-11-04", "2024-02-29", "9999-12-31"]
-            + skipped.map(\.1) {
-            let day = try day(text)
-            let shown = pickers.dateComponents([.year, .month, .day], from: day.pickerDate)
-            #expect([shown.year, shown.month, shown.day] == [day.year, day.month, day.day], "\(text)")
-            #expect(SearchFilter.Day(pickerDate: day.pickerDate) == day, "\(text)")
-            // Any moment of that day in the pickers' zone is that day.
-            #expect(SearchFilter.Day(pickerDate: day.pickerDate.addingTimeInterval(86_399)) == day, "\(text)")
+    /// Its pickers show days in the Mac's zone (their calendar's Today is today here, cold review WHEN-3), and a day
+    /// picked is the day shown here. A range whose ends are given to them and picked again as shown comes back as
+    /// it was, but for the one old oddity: a day the Mac's zone skipped crossing the date line (Samoa's 2011-12-30,
+    /// Kwajalein's 1993-08-21) has no moment here, its start is the next day's, and its picker shows the next day.
+    @Test func aDayPickedIsTheDayItsPickerShowsHere() throws {
+        let skipped: [String: SearchFilter.Day] = ["Pacific/Apia": try day("2011-12-30"),
+                                                   "Pacific/Kwajalein": try day("1993-08-21")]
+        func shown(_ day: SearchFilter.Day, in zone: TimeZone) -> SearchFilter.Day? {
+            SearchFilter.Day(day.start(in: zone), in: zone)
         }
-        for (name, text) in skipped {
-            let zone = try #require(TimeZone(identifier: name)), day = try day(text)
-            #expect(SearchFilter.Day(day.start(in: zone), in: zone) == day.adding(days: 1), "\(text) in \(name)")
+        for zone in Self.zones {
+            let skip = skipped[zone.identifier]
+            for text in ["1583-01-01", "2011-12-29", "2011-12-30", "2011-12-31", "1993-08-21", "2018-11-04",
+                         "2024-02-29", "9999-12-31"] {
+                let day = try day(text)
+                #expect(shown(day, in: zone) == (day == skip ? day.adding(days: 1) : day),
+                        "\(text) in \(zone.identifier)")
+                // Any moment of a day here is that day.
+                if day != skip, let next = day.adding(days: 1) {
+                    #expect(SearchFilter.Day(next.start(in: zone).addingTimeInterval(-1), in: zone) == day,
+                            "\(text) in \(zone.identifier)")
+                }
+            }
+            for text in Self.opened {
+                guard let opened = SearchFilter.When(text) else { continue }
+                let picked = SearchFilter.When(first: opened.firstDay.flatMap { shown($0, in: zone) },
+                                               last: opened.lastDay.flatMap { shown($0, in: zone) })
+                let touchesSkip = skip.map { [opened.firstDay, opened.lastDay].contains($0) } ?? false
+                #expect((picked == opened) != touchesSkip, "\(text) in \(zone.identifier)")
+            }
         }
     }
 
