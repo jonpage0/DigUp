@@ -180,6 +180,33 @@ import Testing
         #expect(try IndexStore(directory: index).counts(keeping: SearchFilter()) == [.doc: ["pending": 2]])
     }
 
+    @Test func theConnectionThatMakesTheLogNeverMovesItIntoTheFileWhateverHappensNext() throws {
+        let index = folder.appendingPathComponent("index")
+        let file = index.appendingPathComponent(IndexStore.mainFile)
+        func candidate(_ number: UInt64) -> Candidate {
+            Candidate(path: "/\(number).txt", kind: .doc, size: 1, mtime: 1, inode: number, device: 1)
+        }
+        try IndexStore(directory: index).insert(candidate(1))
+        for sidecar in ["-wal", "-shm"] { try? FileManager.default.removeItem(atPath: file.path + sidecar) }
+        let written = try Data(contentsOf: file)
+        // `Database.reader(of:)` with nothing else having the index open: the log maker opens it.
+        var maker: Database? = try Database.logMaker(of: file.path)
+        // The indexing helper writes and goes: what it wrote waits in the log, since the maker still has it open.
+        try IndexStore(directory: index).insert(candidate(2))
+        #expect(try Data(contentsOf: file) == written)
+        #if !os(Windows)
+        // Then the read-only connection meant to take over can't open (made unreadable for the moment)…
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: file.path)
+        #expect(throws: (any Error).self) { try Database(readingOnly: file.path) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+        #endif
+        // …and the maker closes last: it moves nothing into the file, which the helper's next connection does.
+        maker = nil
+        #expect(try Data(contentsOf: file) == written)
+        #expect(try IndexStore(readingOnly: index).counts(keeping: SearchFilter()) == [.doc: ["pending": 2]])
+        #expect(try Data(contentsOf: file) == written)
+    }
+
     @Test func aiAccessIsOffUntilTurnedOn() throws {
         let suite = "DigUpTests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))

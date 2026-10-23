@@ -4,6 +4,7 @@ import SQLite3   // the system's (3.51 on macOS 26, FTS5 built in)
 #else
 import CSQLite   // the amalgamation in Vendor/sqlite, with FTS5 (scripts/fetch-vendor.sh)
 #endif
+import CSQLiteConfig
 
 /// A thin wrapper over SQLite. One connection, used from one thread.
 public final class Database {
@@ -60,21 +61,31 @@ public final class Database {
     /// it: read-only, so nothing in it can change, whether or not DigUp has it open. A database in WAL mode can't be
     /// read so while its write-ahead log and shared memory aren't beside it, since a read-only connection can't make
     /// them: SQLite on Linux and Windows takes them away when the last connection closes (macOS's keeps them), and a
-    /// copy of an index may come without them. Then a connection that can only query (`query_only`) opens it, which
-    /// makes them, and closes once the read-only one has it open: never the last to have it open, it never moves the
-    /// log into the file (the checkpoint the last connection to close makes), and the read-only one can't. Nothing is
-    /// made when the database isn't there.
+    /// copy of an index may come without them. Then `logMaker(of:)` opens it, which makes them, and closes once the
+    /// read-only one has it open. Nothing is made when the database isn't there.
     public static func reader(of path: String) throws -> Database {
         let reader = try Database(readingOnly: path)
         if try reader.opensItsLog() { return reader }
-        let maker = try Database(opening: path, flags: SQLITE_OPEN_READWRITE)
-        try maker.execute("PRAGMA query_only = ON")
-        guard try maker.opensItsLog() else { throw Failure(message: "can't open \(path)'s write-ahead log") }
+        let maker = try logMaker(of: path)
         return try withExtendedLifetime(maker) {
             let reader = try Database(readingOnly: path)
             guard try reader.opensItsLog() else { throw Failure(message: "can't open \(path)'s write-ahead log") }
             return reader
         }
+    }
+
+    /// A connection that makes a WAL database's write-ahead log and shared memory, and only that (`reader(of:)`): it
+    /// can only query (`query_only`), and is set before anything else never to move the log into the file when it
+    /// closes (the checkpoint the last connection to close makes): whatever happens after it opens (a writer comes and
+    /// goes, the read-only connection can't open), the file stays as it was.
+    static func logMaker(of path: String) throws -> Database {
+        let maker = try Database(opening: path, flags: SQLITE_OPEN_READWRITE)
+        guard digup_sqlite3_no_checkpoint_on_close(maker.handle) == SQLITE_OK else {
+            throw Failure(message: "can't keep a connection to \(path) from writing it when it closes")
+        }
+        try maker.execute("PRAGMA query_only = ON")
+        guard try maker.opensItsLog() else { throw Failure(message: "can't open \(path)'s write-ahead log") }
+        return maker
     }
 
     /// Reads the schema, which opens a WAL database's log: false when the log can't be opened (nor made).
