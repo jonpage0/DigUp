@@ -157,6 +157,29 @@ import Testing
         #expect(version == 4)
     }
 
+    @Test func anIndexNothingElseHasOpenIsReadAndTheReaderNeverWritesIt() throws {
+        let index = folder.appendingPathComponent("index")
+        let file = index.appendingPathComponent(IndexStore.mainFile)
+        func candidate(_ number: UInt64) -> Candidate {
+            Candidate(path: "/\(number).txt", kind: .doc, size: 1, mtime: 1, inode: number, device: 1)
+        }
+        try IndexStore(directory: index).insert(candidate(1))
+        // DigUp quit: its last connection closed, and its write-ahead log and shared memory went with it (as SQLite
+        // does on Linux and Windows; macOS's keeps them, so they're taken away here).
+        for sidecar in ["-wal", "-shm"] { try? FileManager.default.removeItem(atPath: file.path + sidecar) }
+        let written = try Data(contentsOf: file)
+        var reading: IndexStore? = try IndexStore(readingOnly: index)
+        #expect(try reading?.counts(keeping: SearchFilter()) == [.doc: ["pending": 1]])
+        // The indexing helper comes, writes and goes while it's read: what it wrote is read. Closing last, the reader
+        // moves nothing into the file (the helper's writes wait in the log for the next writer).
+        try IndexStore(directory: index).insert(candidate(2))
+        #expect(try reading?.counts(keeping: SearchFilter()) == [.doc: ["pending": 2]])
+        #expect(throws: (any Error).self) { try reading?.insert(candidate(3)) }
+        reading = nil
+        #expect(try Data(contentsOf: file) == written)
+        #expect(try IndexStore(directory: index).counts(keeping: SearchFilter()) == [.doc: ["pending": 2]])
+    }
+
     @Test func aiAccessIsOffUntilTurnedOn() throws {
         let suite = "DigUpTests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))

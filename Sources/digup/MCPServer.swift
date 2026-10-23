@@ -9,12 +9,12 @@ import Foundation
 ///   and `server/discover` says what this server speaks;
 /// - 2025-11-25, 2025-06-18 and 2025-03-26: `initialize` settles the revision for the rest of the process.
 ///
-/// Read-only: the index is opened only to be read (`IndexStore(readingOnly:)`), and no tool changes, moves, opens or
-/// uploads a file. What AI apps may see is the user's to say in the app (Settings → AI apps, `AIAccess`), read from its
-/// settings at every call and enforced here, not left to the client: with access off every call fails; Photos
-/// libraries, Photos' hidden items, code, pictures and pictures rated sensitive (or not rated yet) each stay out until
-/// allowed, and what's out is never returned, counted or read. Each tool call is a line of `<index>/mcp.log`
-/// (`AICall`), never with what was searched for.
+/// Read-only: the index is opened only to be read, whether or not DigUp has it open (`IndexStore(readingOnly:)`), and
+/// no tool changes, moves, opens or uploads a file. What AI apps may see is the user's to say in the app (Settings → AI
+/// apps, `AIAccess`), read from its settings at every call and enforced here, not left to the client: with access off
+/// every call fails; Photos libraries, Photos' hidden items, code, pictures and pictures rated sensitive (or not rated
+/// yet) each stay out until allowed, and what's out is never returned, counted or read. Each tool call is a line of
+/// `<index>/mcp.log` (`AICall`), never with what was searched for.
 final class MCPServer {
     /// The revision named in each request's `_meta`.
     static let statelessVersions = ["2026-07-28"]

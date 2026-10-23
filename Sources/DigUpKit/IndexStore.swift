@@ -75,13 +75,14 @@ public final class IndexStore {
         try migrateForkFacts()
     }
 
-    /// Opens an index only to read it (`digup mcp`): nothing is created, migrated or written. An index that isn't
-    /// there, or that the app hasn't brought up to this DigUp's schema yet (it does when it opens it), is refused, not
-    /// changed.
+    /// Opens an index only to read it (`digup mcp`), whether or not DigUp has it open: nothing in it is created,
+    /// migrated or written (`Database.reader(of:)`; SQLite's write-ahead log and shared memory beside it are made when
+    /// they aren't there). An index that isn't there, or that the app hasn't brought up to this DigUp's schema yet (it
+    /// does when it opens it), is refused, not changed.
     public init(readingOnly directory: URL, file name: String = IndexStore.mainFile) throws {
         self.directory = directory
         file = directory.appendingPathComponent(name)
-        db = try Database(readingOnly: file.path)
+        db = try Database.reader(of: file.path)
         var version: Int64 = 0
         try db.query("PRAGMA user_version") { version = $0.int(0) }
         guard version == Self.schemaVersion, try forkFactsStepped() >= Self.forkFactsVersion else {

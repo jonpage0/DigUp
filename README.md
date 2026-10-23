@@ -322,7 +322,8 @@ can search your files through DigUp, if you let them. DigUp's helper speaks MCP 
 (`DigUp.app/Contents/Helpers/digup mcp`), so nothing listens on the network. It's off until you turn it on in
 Settings → AI apps, which also shows each of those apps' own command or config entry for it, with a Copy button.
 DigUp never changes an app's settings: you run the command or add the entry yourself, and the app asks before it uses
-DigUp, as you set it up there.
+DigUp, as you set it up there. The helper reads the index whether DigUp is open or not, and never writes to it: it
+opens the index read-only, first making SQLite's log and shared-memory files beside it when they aren't there.
 
 They get four tools, all read-only:
 
