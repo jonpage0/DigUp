@@ -941,12 +941,15 @@ public final class IndexStore {
     }
 
     /// The people and pets named in the indexed libraries, by name. Two of one name stay two, as Photos keeps them.
-    public func photosPeople() throws -> [PhotosPerson] {
+    /// With a filter, only those in a file it keeps, counted so (`digup mcp`: the ones in what an AI app may see).
+    public func photosPeople(keptBy filter: SearchFilter = SearchFilter()) throws -> [PhotosPerson] {
         var people: [PhotosPerson] = []
+        let kept = filter.query
         try db.query("""
             SELECT p.id, p.library, p.uuid, p.name, COUNT(l.file) FROM photos_people p
-            LEFT JOIN photos_person_files l ON l.person = p.id GROUP BY p.id ORDER BY p.name COLLATE NOCASE, p.id
-            """) {
+            LEFT JOIN photos_person_files l ON l.person = p.id\(kept.map { " AND l.file IN (\($0.sql))" } ?? "")
+            GROUP BY p.id\(kept == nil ? "" : " HAVING COUNT(l.file) > 0") ORDER BY p.name COLLATE NOCASE, p.id
+            """, kept?.values ?? []) {
             people.append(PhotosPerson(id: $0.int(0), library: $0.text(1) ?? "", uuid: $0.text(2) ?? "",
                                        name: $0.text(3) ?? "", files: Int($0.int(4))))
         }
@@ -954,13 +957,15 @@ public final class IndexStore {
     }
 
     /// The albums of the indexed libraries: the ones in no folder first, then folder by folder (by the folders' names,
-    /// outermost first), each folder's by title.
-    public func photosAlbums() throws -> [PhotosAlbum] {
+    /// outermost first), each folder's by title. With a filter, only those with a file it keeps, counted so.
+    public func photosAlbums(keptBy filter: SearchFilter = SearchFilter()) throws -> [PhotosAlbum] {
         var albums: [PhotosAlbum] = []
+        let kept = filter.query
         try db.query("""
             SELECT a.id, a.library, a.uuid, a.title, a.folders, COUNT(l.file) FROM photos_albums a
-            LEFT JOIN photos_album_files l ON l.album = a.id GROUP BY a.id ORDER BY a.id
-            """) {
+            LEFT JOIN photos_album_files l ON l.album = a.id\(kept.map { " AND l.file IN (\($0.sql))" } ?? "")
+            GROUP BY a.id\(kept == nil ? "" : " HAVING COUNT(l.file) > 0") ORDER BY a.id
+            """, kept?.values ?? []) {
             albums.append(PhotosAlbum(id: $0.int(0), library: $0.text(1) ?? "", uuid: $0.text(2) ?? "",
                                       title: $0.text(3) ?? "", folders: Self.folders(fromJSON: $0.text(4)),
                                       files: Int($0.int(5))))
@@ -1034,15 +1039,22 @@ public final class IndexStore {
         return paths
     }
 
-    /// The indexed files of the Photos libraries, by library (as the files spell it): each one's path and the asset it
-    /// shows.
-    public func photosFiles() throws -> [String: [(path: String, uuid: String)]] {
-        var files: [String: [(path: String, uuid: String)]] = [:]
-        try db.query("SELECT f.path FROM photos_assets a JOIN files f ON f.id = a.file") { row in
-            guard let path = row.text(0), let asset = PhotosLibrary.asset(ofFile: path) else { return }
-            files[asset.library, default: []].append((path, asset.uuid))
+    /// The indexed files of the Photos libraries whose asset `visible` vouches for, given each library (as the files
+    /// spell it): `digup mcp`'s Photos files an AI app may see while hidden items are kept from it
+    /// (`PhotosLibrary.visibleAssets`). Found by path, whatever the index knows of them yet (an index brought up to new
+    /// Photos facts has none until its next sync); a file that's no asset's is never among them.
+    public func photosFiles(shownBy visible: (String) -> Set<String>) throws -> Set<String> {
+        var paths: [String] = []
+        try db.query("SELECT path FROM files WHERE path LIKE ?", [.text(PhotosLibrary.filesPattern)]) {
+            if let path = $0.text(0) { paths.append(path) }
         }
-        return files
+        var shown: [String: Set<String>] = [:]
+        return Set(paths.filter { path in
+            guard let asset = PhotosLibrary.asset(ofFile: path) else { return false }
+            let assets = shown[asset.library] ?? visible(asset.library)
+            shown[asset.library] = assets
+            return assets.contains(asset.uuid)
+        })
     }
 
     /// The library videos read from what Photos keeps of them while their originals are in iCloud, with what that is

@@ -94,16 +94,26 @@ public struct AICall: Codable, Sendable, Equatable {
         return decoder
     }()
 
-    /// Adds the call to the end of the index folder's log.
+    /// Adds the call to the end of the index folder's log. Each AI app runs a helper of its own, all writing this log:
+    /// the line goes in one write to a file opened to append, which the system puts at the end as one step, so lines
+    /// written at once neither overwrite nor split each other.
     public static func append(_ call: AICall, in index: URL) throws {
-        let url = index.appendingPathComponent(fileName)
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-        let handle = try FileHandle(forWritingTo: url)
+        let line = try encoder.encode(call) + Data("\n".utf8)
+        let path = index.appendingPathComponent(fileName).path
+        #if os(Windows)
+        // The C runtime's append isn't one step across processes on Windows; the shells there don't offer AI apps yet.
+        if !FileManager.default.fileExists(atPath: path) { FileManager.default.createFile(atPath: path, contents: nil) }
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
         defer { try? handle.close() }
         try handle.seekToEnd()
-        try handle.write(contentsOf: try encoder.encode(call) + Data("\n".utf8))
+        try handle.write(contentsOf: line)
+        #else
+        let file = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
+        guard file >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(file) }
+        let written = line.withUnsafeBytes { write(file, $0.baseAddress, $0.count) }
+        guard written == line.count else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        #endif
     }
 
     /// The last `count` calls in the index folder's log, oldest first; a line that can't be read is passed over.

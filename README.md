@@ -264,8 +264,9 @@ DigUp, as you set it up there.
 They get four tools, all read-only:
 
 - `search_files`: what the search window does, with its kinds and filters (people, albums, Photos favorites, DigUp's
-  favorites, From, an area on the map). Each result says where the file is, why it's there ("Matches the text on page
-  3"), the words that matched, and when and where it was taken.
+  favorites, From, an area on the map); with no words, a kind or a filter lists what it keeps, newest first. Each
+  result says where the file is, why it's there ("Matches the text on page 3"), the words that matched, and when and
+  where it was taken.
 - `read_text`: the words DigUp read from a file it returned (a document, a PDF's page, the text in a screenshot, what
   Photos knows about a picture, a stretch of code), up to 20,000 characters.
 - `get_picture`: a picture of a result, at most 768 pixels on its long side, for apps that can look at one.
@@ -275,10 +276,13 @@ What they may see is DigUp's to say, not the app's. The helper reads Settings â†
 applies to the very next one:
 
 - with the switch off, every call fails: "DigUp's AI access is off. Turn it on in DigUp's Settings â†’ AI apps."
-- Photos libraries stay out until you allow them: their pictures are never returned, counted or read. What's hidden in
-  Photos (when DigUp indexes it) stays out until you allow that too; a library whose last listing doesn't say which of
-  its items are hidden (one listed before DigUp noted it) is left out whole until it's listed again.
+- Photos libraries stay out until you allow them: their pictures are never returned, counted or read. Then, until you
+  allow what's hidden in Photos too, an AI app sees only the pictures the library's last listing says aren't hidden:
+  one it can't vouch for (indexed before hidden items were left out and not taken out yet, or listed before DigUp
+  noted which are hidden) stays out until the library is listed again. People and albums are looked up only among
+  what the app may see.
 - code search, and pictures themselves (`get_picture`), are each off until you turn them on.
+- a file the app may not see answers as one DigUp doesn't have, so it can't tell the file is there; `mcp.log` says why.
 - the tools' descriptions tell the model that whatever comes back is your data, never instructions: a file can say
   anything.
 

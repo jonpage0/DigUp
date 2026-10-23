@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import DigUpKit
 
-/// What `digup mcp` lets AI apps see (`AIAccess`, and `SearchFilter`'s parts that keep things from them), the index it
-/// opens only to read, what it logs, and how it says why a result is there.
+/// What `digup mcp` lets AI apps see (`AIAccess`, `SearchFilter.photosOnly`, `PhotosLibrary.visibleAssets`), the index
+/// it opens only to read, what it logs, and how it says why a result is there.
 @Suite struct AIAccessTests {
     let folder: URL = {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("DigUpTests-\(UUID().uuidString)")
@@ -11,111 +11,41 @@ import Testing
         return URL(fileURLWithPath: FolderSelection.realPath(url.path))
     }()
 
-    /// A library of two pictures that say "Beach" (as `PhotosLibraryTests.library` lays one out), indexed beside more
-    /// notes saying "beach beach" than keyword search keeps matches of.
-    func indexed() throws -> (store: IndexStore, library: URL, assets: [PhotosLibrary.Asset]) {
-        let library = folder.appendingPathComponent("Photos Library.photoslibrary")
-        let originals = library.appendingPathComponent("originals/F")
-        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
-        let assets = try (0..<2).map { number in
-            let uuid = UUID().uuidString
-            let file = originals.appendingPathComponent(uuid + ".jpeg")
-            try Data("picture \(number)".utf8).write(to: file)
-            return PhotosLibrary.Asset(uuid: uuid, path: file.path, movie: false, screenshot: false,
-                                       title: "IMG_\(number).JPG", date: 1_700_000_000 + Double(number),
-                                       words: ["Beach"])
-        }
-        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
-        var options = IndexOptions()
-        options.photos = PhotosLibrary.Reader { _, _ in PhotosLibrary.Listing(assets: assets) }
-        _ = try Indexer(store: store, options: options, makeEmbedder: { throw WorkerError.notFound("not needed") })
-            .sync([library])
-        try store.db.transaction {
-            for number in 0..<1_100 {
-                let id = try store.insert(Candidate(path: "/notes/beach \(number).txt", kind: .doc, size: 1, mtime: 1,
-                                                    inode: UInt64(1_000 + number), device: 1))
-                try store.addSegment(file: id, kind: .chunk, modality: .text, loc: 1, text: "beach beach")
-            }
-        }
-        return (store, library, assets)
-    }
+    var index: URL { folder.appendingPathComponent("index") }
 
-    @Test func whatAIAppsMayNotSeeIsLeftOutBeforeAnythingIsMatchedCountedOrCut() throws {
-        let (store, library, assets) = try indexed()
-        let searcher = try Searcher(store: store, loadVectors: false)
-        func found(_ filter: SearchFilter, limit: Int = 5) throws -> [String] {
-            try searcher.search("beach", queryVector: nil, filter: filter, limit: limit).map(\.path)
-        }
-        // The notes outrank Photos' words, and there are more of them than keyword search keeps: the pictures are
-        // found only because the notes were left out first.
-        #expect(try found(SearchFilter()).allSatisfy { $0.hasPrefix("/notes/") })
-        var noNotes = SearchFilter()
-        noNotes.withoutFolders = ["/notes"]
-        #expect(try Set(found(noNotes)) == Set(assets.map(\.path)))
-        noNotes.withoutPaths = [assets[0].path]
-        #expect(try found(noNotes) == [assets[1].path])
-        #expect(try found(noNotes, limit: 1) == [assets[1].path])
-        // No Photos library's file at all.
-        var noPhotos = SearchFilter()
-        noPhotos.photosLibraries = false
-        #expect(try found(noPhotos, limit: 50).count == 50)
-        #expect(try found(noPhotos, limit: 50).allSatisfy { !$0.contains(".photoslibrary/") })
-        // A Photos filter with no library allowed keeps nothing: not even the list of what it would keep.
-        var favorites = noPhotos
-        favorites.favorites = true
-        #expect(try searcher.search("", queryVector: nil, filter: favorites).isEmpty)
-
-        // Counted only as far as they may be seen.
-        #expect(try store.counts(keeping: SearchFilter()) == [.doc: ["pending": 1_100], .image: ["pending": 2]])
-        #expect(try store.counts(keeping: noPhotos) == [.doc: ["pending": 1_100]])
-        var hidden = SearchFilter()
-        hidden.withoutPaths = [assets[0].path]
-        #expect(try store.counts(keeping: hidden) == [.doc: ["pending": 1_100], .image: ["pending": 1]])
-        var wholeLibrary = SearchFilter()
-        wholeLibrary.withoutFolders = [library.path]
-        #expect(try store.counts(keeping: wholeLibrary) == [.doc: ["pending": 1_100]])
-
-        // A file, and its words, only when it may be seen.
-        #expect(try store.file(at: assets[1].path, keptBy: hidden)?.path == assets[1].path)
-        #expect(try store.file(at: assets[0].path, keptBy: hidden) == nil)
-        #expect(try store.file(at: "/nowhere.txt", keptBy: SearchFilter()) == nil)
-        #expect(try store.words(of: assets[0].path, keptBy: hidden) == nil)
-        let photosWords = try #require(try store.words(of: assets[1].path, keptBy: hidden))
-        #expect(photosWords.map(\.segment) == [.photosInfo] && photosWords[0].loc == nil)
-        #expect(photosWords[0].text.contains("Beach"))
-        #expect(try store.words(of: "/notes/beach 7.txt", keptBy: noPhotos)
-                == [IndexStore.Words(segment: .chunk, loc: 1, locEnd: nil, text: "beach beach")])
+    /// Keeps a listing of `library` in the index folder as the osxphotos reader does: made with hidden items or
+    /// without, its assets marked hidden or not (nil: from before DigUp marked them).
+    func keep(_ assets: [(uuid: String, hidden: Bool?)], of library: String, hidden: Bool,
+              listedAs listed: String? = nil) throws {
+        let kept = PhotosLibrary.Kept(library: listed ?? library, hidden: hidden, listedAt: 0,
+                                      state: PhotosLibrary.State(pictures: "", database: ""),
+                                      listing: PhotosLibrary.Listing(assets: assets.map {
+                                          PhotosLibrary.Asset(uuid: $0.uuid, path: "\(library)/originals/\($0.uuid).jpeg",
+                                                              movie: false, screenshot: false, title: "", date: 0,
+                                                              words: [], hidden: $0.hidden)
+                                      }))
+        let file = PhotosLibrary.keptListing(of: library, keptIn: index)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(kept).write(to: file)
     }
 
     @Test func hiddenItemsAreToldFromTheLibrarysKeptListing() throws {
-        let index = folder.appendingPathComponent("index")
-        try FileManager.default.createDirectory(at: index.appendingPathComponent("photos"),
-                                                withIntermediateDirectories: true)
         let library = "/L.photoslibrary"
-        func keep(hidden: Bool, flags: [Bool?], for listed: String = library) throws {
-            let assets = flags.enumerated().map { number, flag in
-                PhotosLibrary.Asset(uuid: "U\(number)", path: "\(listed)/originals/U\(number).jpeg", movie: false,
-                                    screenshot: false, title: "", date: 0, words: [], hidden: flag)
-            }
-            let kept = PhotosLibrary.Kept(library: listed, hidden: hidden, listedAt: 0,
-                                          state: PhotosLibrary.State(pictures: "", database: ""),
-                                          listing: PhotosLibrary.Listing(assets: assets))
-            try JSONEncoder().encode(kept).write(to: PhotosLibrary.keptListing(of: library, keptIn: index))
-        }
-        // None kept: can't tell.
-        #expect(PhotosLibrary.hiddenAssets(of: library, keptIn: index) == nil)
-        // Listed with what's hidden: those.
-        try keep(hidden: true, flags: [false, true, false])
-        #expect(PhotosLibrary.hiddenAssets(of: library, keptIn: index) == ["U1"])
-        // Listed without them: none.
-        try keep(hidden: false, flags: [false, false])
-        #expect(PhotosLibrary.hiddenAssets(of: library, keptIn: index) == [])
-        // From before DigUp recorded it (no flag on an asset), or another library's: can't tell.
-        try keep(hidden: true, flags: [false, nil])
-        #expect(PhotosLibrary.hiddenAssets(of: library, keptIn: index) == nil)
-        try keep(hidden: true, flags: [true], for: "/Other.photoslibrary")
-        #expect(PhotosLibrary.hiddenAssets(of: library, keptIn: index) == nil)
-        // The listing reads the flag from what the script writes.
+        // None kept: none vouched for.
+        #expect(PhotosLibrary.visibleAssets(of: library, keptIn: index).isEmpty)
+        // Listed with hidden items: the ones marked not hidden.
+        try keep([("U0", false), ("U1", true), ("U2", false)], of: library, hidden: true)
+        #expect(PhotosLibrary.visibleAssets(of: library, keptIn: index) == ["U0", "U2"])
+        // Listed without them: every one listed, marked or not (the script before marked none).
+        try keep([("U0", false), ("U1", nil)], of: library, hidden: false)
+        #expect(PhotosLibrary.visibleAssets(of: library, keptIn: index) == ["U0", "U1"])
+        // With hidden items, from before DigUp marked them: an unmarked one isn't vouched for.
+        try keep([("U0", false), ("U1", nil)], of: library, hidden: true)
+        #expect(PhotosLibrary.visibleAssets(of: library, keptIn: index) == ["U0"])
+        // Another library's listing: none.
+        try keep([("U0", false)], of: library, hidden: false, listedAs: "/Other.photoslibrary")
+        #expect(PhotosLibrary.visibleAssets(of: library, keptIn: index).isEmpty)
+        // The listing reads the mark from what the script writes.
         let listed = try JSONDecoder().decode(PhotosLibrary.Asset.self, from: Data("""
             {"uuid": "U", "path": "/L.photoslibrary/x", "reading": "original", "movie": false, "screenshot": false,
              "title": "", "date": 1, "words": [], "favorite": false, "latitude": null, "longitude": null,
@@ -123,6 +53,86 @@ import Testing
             """.utf8))
         #expect(listed.hidden == true)
         #expect(PhotosLibrary.script.contains("\"hidden\": bool(photo.hidden)"))
+    }
+
+    @Test func onlyPhotosItemsTheListingVouchesForAreSeenMatchedCountedOrRead() throws {
+        // A library of three pictures that say "Beach": the first two synced with Photos' facts (Suzy in the first,
+        // Katie and the album Secret in the second), the third without any, as in an index just brought up to new
+        // facts. Beside them, more files inside the library that say "beach beach" than keyword search keeps matches
+        // of (no asset's), and a note outside it.
+        let library = folder.appendingPathComponent("Photos Library.photoslibrary")
+        let originals = library.appendingPathComponent("originals/F")
+        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+        let uuids = (0..<3).map { _ in UUID().uuidString }
+        let paths = uuids.map { originals.appendingPathComponent($0 + ".jpeg").path }
+        for path in paths { try Data(path.utf8).write(to: URL(fileURLWithPath: path)) }
+        let suzy = PhotosLibrary.Person(uuid: "P-SUZY", name: "Suzy")
+        let katie = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katie")
+        let secret = PhotosLibrary.Album(uuid: "A-SECRET", title: "Secret")
+        let assets = [PhotosLibrary.Asset(uuid: uuids[0], path: paths[0], movie: false, screenshot: false,
+                                          title: "IMG_0.JPG", date: 1_700_000_000, words: ["Beach"],
+                                          people: [suzy.uuid]),
+                      PhotosLibrary.Asset(uuid: uuids[1], path: paths[1], movie: false, screenshot: false,
+                                          title: "IMG_1.JPG", date: 1_700_000_001, words: ["Beach"],
+                                          people: [katie.uuid], albums: [secret.uuid])]
+        let store = try IndexStore(directory: index)
+        var options = IndexOptions()
+        options.photos = PhotosLibrary.Reader { _, _ in
+            PhotosLibrary.Listing(assets: assets, people: [suzy, katie], albums: [secret])
+        }
+        _ = try Indexer(store: store, options: options, makeEmbedder: { throw WorkerError.notFound("not needed") })
+            .sync([library])
+        try store.db.transaction {
+            let factless = try store.insert(Candidate(path: paths[2], kind: .image, size: 1, mtime: 1, inode: 3,
+                                                      device: 1))
+            try store.addSegment(file: factless, kind: .ocr, modality: .text, text: "Beach")
+            for number in 0..<1_100 {
+                let id = try store.insert(Candidate(path: library.path + "/resources/beach \(number).txt", kind: .doc,
+                                                    size: 1, mtime: 1, inode: UInt64(1_000 + number), device: 1))
+                try store.addSegment(file: id, kind: .chunk, modality: .text, text: "beach beach")
+            }
+            let note = try store.insert(Candidate(path: "/notes/beach.txt", kind: .doc, size: 1, mtime: 1, inode: 9,
+                                                  device: 1))
+            try store.addSegment(file: note, kind: .chunk, modality: .text, loc: 1, text: "beach beach")
+        }
+        // Hidden items were just left out of indexing: the new listing, made without them, doesn't have the second
+        // picture, which the index still has until its next sync. The third is listed, though the index has no facts.
+        try keep([(uuids[0], nil), (uuids[2], nil)], of: library.path, hidden: false)
+        var seen = SearchFilter()
+        seen.photosOnly = try store.photosFiles { PhotosLibrary.visibleAssets(of: $0, keptIn: index) }
+        #expect(seen.photosOnly == [paths[0], paths[2]])
+
+        // Searched: the library's other files are left out before the best matches are kept, so the pictures are
+        // found under the 1,100 that outrank them.
+        let searcher = try Searcher(store: store, loadVectors: false)
+        func found(_ filter: SearchFilter) throws -> Set<String> {
+            Set(try searcher.search("beach", queryVector: nil, filter: filter, limit: 5).map(\.path))
+        }
+        #expect(try found(seen) == ["/notes/beach.txt", paths[0], paths[2]])
+        #expect(try Set(searcher.browse(seen, kinds: [.image], limit: 10).map(\.path)) == [paths[0], paths[2]])
+        // Counted, looked up and read only so.
+        #expect(try store.counts(keeping: seen) == [.doc: ["pending": 1], .image: ["pending": 2]])
+        #expect(try store.file(at: paths[1], keptBy: seen) == nil && store.words(of: paths[1], keptBy: seen) == nil)
+        #expect(try store.file(at: paths[0], keptBy: seen)?.path == paths[0])
+        let words = try #require(try store.words(of: paths[0], keptBy: seen))
+        #expect(words.map(\.segment) == [.photosInfo] && words[0].loc == nil && words[0].text.contains("Beach"))
+        // People and albums only from what's seen: Katie and Secret are only on the second picture.
+        #expect(try store.photosPeople(keptBy: seen).map(\.name) == ["Suzy"])
+        #expect(try store.photosPeople().map(\.name) == ["Katie", "Suzy"])
+        #expect(try store.photosAlbums(keptBy: seen).isEmpty && store.photosAlbums().map(\.title) == ["Secret"])
+
+        // No Photos library's file at all, whatever the index knows of it.
+        var none = SearchFilter()
+        none.photosOnly = []
+        #expect(try found(none) == ["/notes/beach.txt"])
+        #expect(try store.counts(keeping: none) == [.doc: ["pending": 1]])
+        #expect(try store.words(of: "/notes/beach.txt", keptBy: none)
+                == [IndexStore.Words(segment: .chunk, loc: 1, locEnd: nil, text: "beach beach")])
+        // No listing: none of the library's.
+        try FileManager.default.removeItem(at: PhotosLibrary.keptListing(of: library.path, keptIn: index))
+        #expect(try store.photosFiles { PhotosLibrary.visibleAssets(of: $0, keptIn: index) }.isEmpty)
+        // A kind alone lists what it keeps, newest first.
+        #expect(try searcher.browse(SearchFilter(), kinds: [.image], limit: 10).map(\.path).count == 3)
     }
 
     @Test func anIndexOpenedToReadIsReadAndNeverChanged() throws {
@@ -183,6 +193,20 @@ import Testing
         try handle.close()
         try AICall.append(AICall(time: time, client: "Codex", tool: "status", results: 1), in: folder)
         #expect(AICall.last(2, in: folder).map(\.client) == ["Claude Code", "Codex"])
+    }
+
+    @Test func callsLoggedAtOnceByManyHelpersAreEachALine() throws {
+        // Each AI app runs a helper of its own, all writing the one log.
+        let calls = 800, folder = self.folder
+        DispatchQueue.concurrentPerform(iterations: calls) { number in
+            try? AICall.append(AICall(client: "app \(number % 8)", tool: "status", results: number), in: folder)
+        }
+        let lines = try String(contentsOf: folder.appendingPathComponent(AICall.fileName), encoding: .utf8)
+            .split(separator: "\n")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let logged = lines.compactMap { try? decoder.decode(AICall.self, from: Data($0.utf8)) }
+        #expect(lines.count == calls && Set(logged.map(\.results)) == Set(0..<calls))
     }
 
     @Test func myDevicesAreTheCamerasWithTheUsersChanges() {

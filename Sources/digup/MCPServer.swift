@@ -37,14 +37,14 @@ final class MCPServer {
         static let unsupportedVersion = -32022
     }
 
-    /// Why a call was refused: what `mcp.log` says, and what the AI app is told. A hidden item answers as a file
-    /// DigUp doesn't have, so the AI app doesn't learn that it's there.
+    /// Why a call was refused: what `mcp.log` says, and what the AI app is told where it asked for what it can't have
+    /// (code search, pictures, a Photos library's file by its path). A file kept from it otherwise answers as one DigUp
+    /// doesn't have (`Outcome.unseen`), so it can't learn that the file is there.
     enum Refusal: String {
         case off = "access off"
         case photos = "Photos off"
-        case hidden = "hidden in Photos"
-        /// A library whose last listing doesn't say which of its items are hidden: kept out whole.
-        case hiddenUnknown = "Photos' hidden items not known"
+        /// Hidden in Photos, or an item its library's last listing doesn't vouch for (`PhotosLibrary.visibleAssets`).
+        case hidden = "hidden in Photos, or not known not to be"
         case code = "code off"
         case pictures = "pictures off"
 
@@ -53,7 +53,7 @@ final class MCPServer {
             case .off: "DigUp's AI access is off. Turn it on in DigUp's Settings → AI apps."
             case .photos: "Photos libraries are off for AI apps. The user can turn them on in DigUp's "
                 + "Settings → AI apps."
-            case .hidden, .hiddenUnknown: MCPServer.notFound
+            case .hidden: MCPServer.notFound
             case .code: "Code search is off for AI apps. The user can turn it on in DigUp's Settings → AI apps."
             case .pictures: "Pictures are off for AI apps. The user can turn on “Pictures themselves” in DigUp's "
                 + "Settings → AI apps."
@@ -65,6 +65,8 @@ final class MCPServer {
 
     /// `read_text`'s words at most, in characters.
     static let readLimit = 20_000
+    /// The latest `moment` asked for, in seconds: far past any recording's end, and a time a clock can still say.
+    static let latestMoment = Double(Int32.max)
     /// `search_files`' results: by default, and at most.
     static let defaultLimit = 10
     static let maxLimit = 50
@@ -92,8 +94,8 @@ final class MCPServer {
     private var code: OpenIndex?
     /// The query encoder, kept for the session once a search needed it.
     private var encoder: (any Embedder)?
-    /// Each Photos library's hidden assets as last read, with when its kept listing was changed then.
-    private var hidden: [String: (changed: Date?, assets: Set<String>?)] = [:]
+    /// Each Photos library's assets its last listing vouches for, with when the listing was changed then.
+    private var shown: [String: (changed: Date?, assets: Set<String>)] = [:]
 
     init(index: URL, suite: String) {
         self.index = index
@@ -130,7 +132,9 @@ final class MCPServer {
 
     // MARK: Messages
 
-    /// The reply to one line: nil for a notification or a client's reply, which get none.
+    /// The reply to one line: nil for a notification or a reply to a request (this server sends none), which get none.
+    /// A request JSON-RPC 2.0 wouldn't call one (no "jsonrpc": "2.0", a method that isn't a string, an id that isn't
+    /// a string or a number, which MCP also asks of it) is answered Invalid Request.
     private func reply(to line: String) -> [String: Any]? {
         guard let message = try? JSONSerialization.jsonObject(with: Data(line.utf8)) else {
             return failure(NSNull(), Code.parse, "Parse error")
@@ -138,8 +142,14 @@ final class MCPServer {
         guard let request = message as? [String: Any] else {
             return failure(NSNull(), Code.invalidRequest, "Invalid Request: one message per line, not a batch")
         }
-        guard let method = request["method"] as? String else { return nil }
-        guard let id = request["id"], !(id is NSNull) else { return nil }
+        if request["method"] == nil, request["result"] != nil || request["error"] != nil { return nil }
+        guard let id = request["id"] else { return nil }
+        guard id is String || (id as? NSNumber).map({ !Self.isBoolean($0) }) == true else {
+            return failure(NSNull(), Code.invalidRequest, "Invalid Request: an id is a string or a number")
+        }
+        guard request["jsonrpc"] as? String == "2.0", let method = request["method"] as? String else {
+            return failure(id, Code.invalidRequest, "Invalid Request: a request has \"jsonrpc\": \"2.0\" and a method")
+        }
         let params = request["params"] as? [String: Any] ?? [:]
         if method == "initialize" { return initialize(id, params) }
 
@@ -219,6 +229,11 @@ final class MCPServer {
         return ["jsonrpc": "2.0", "id": id, "error": error]
     }
 
+    /// True or false: Foundation reads JSON's booleans as numbers, of their own C type.
+    static func isBoolean(_ number: NSNumber) -> Bool {
+        String(cString: number.objCType) == "c"
+    }
+
     // MARK: Tools
 
     /// What a tool call answers, and what the log keeps of it.
@@ -245,6 +260,13 @@ final class MCPServer {
         static func refused(_ refusal: Refusal) -> Outcome {
             var outcome = error(refusal.message)
             outcome.refused = refusal
+            return outcome
+        }
+
+        /// A file the AI app may not see, or that the index doesn't have: told alike, the reason only logged.
+        static func unseen(_ reason: Refusal?) -> Outcome {
+            var outcome = error(MCPServer.notFound)
+            outcome.refused = reason
             return outcome
         }
 
@@ -336,47 +358,39 @@ final class MCPServer {
     }
 
     /// What AI apps may see of the main index, as the filter every search, count and lookup starts from: no Photos
-    /// library's file until Photos is allowed, then none of its hidden items until those are. A library whose last
-    /// listing doesn't say which are hidden (none kept, or one from before DigUp recorded it) is kept out whole.
+    /// library's file until Photos is allowed, then, until hidden items are too, only the files whose assets their
+    /// library's last listing vouches for (`PhotosLibrary.visibleAssets`), found by path: one the listing doesn't
+    /// name, or of a library with no listing, stays out.
     private func visible(to access: AIAccess, in store: IndexStore) throws -> SearchFilter {
         var filter = SearchFilter()
-        guard access.photos else {
-            filter.photosLibraries = false
-            return filter
-        }
-        guard !access.hiddenPhotos else { return filter }
-        for (library, files) in try store.photosFiles() {
-            guard let hidden = hiddenAssets(of: library) else {
-                filter.withoutFolders.append(library)
-                continue
-            }
-            filter.withoutPaths.formUnion(files.filter { hidden.contains($0.uuid) }.map(\.path))
+        if !access.photos {
+            filter.photosOnly = []
+        } else if !access.hiddenPhotos {
+            filter.photosOnly = try store.photosFiles(shownBy: visibleAssets(of:))
         }
         return filter
     }
 
-    /// `PhotosLibrary.hiddenAssets`, read again only when the library's kept listing changed.
-    private func hiddenAssets(of library: String) -> Set<String>? {
+    /// `PhotosLibrary.visibleAssets`, read again only when the library's kept listing changed.
+    private func visibleAssets(of library: String) -> Set<String> {
         let listing = PhotosLibrary.keptListing(of: library, keptIn: index)
         let changed = try? FileManager.default.attributesOfItem(atPath: listing.path)[.modificationDate] as? Date
-        if let kept = hidden[library], kept.changed == changed { return kept.assets }
-        let assets = PhotosLibrary.hiddenAssets(of: library, keptIn: index)
-        hidden[library] = (changed, assets)
+        if let kept = shown[library], kept.changed == changed { return kept.assets }
+        let assets = PhotosLibrary.visibleAssets(of: library, keptIn: index)
+        shown[library] = (changed, assets)
         return assets
     }
 
-    /// A path the AI app may not see, or that the index doesn't have: answered alike (except a Photos library's with
-    /// Photos off, which the AI app named itself), with the reason in the log.
-    private func unseen(_ path: String, access: AIAccess, allowed: SearchFilter) throws -> Outcome {
-        if !access.photos, PhotosLibrary.library(containing: path) != nil { return .refused(.photos) }
-        if allowed.withoutPaths.contains(path) { return .refused(.hidden) }
-        if allowed.withoutFolders.contains(where: { FolderSelection.isInside(path, $0) }) {
-            return .refused(.hiddenUnknown)
-        }
+    /// The answer for a path the AI app may not see, or that the index doesn't have. Alike, but for a Photos library's
+    /// path while Photos is off, which tells nothing of what's there (it's said of any such path); the log keeps why.
+    private func unseen(_ path: String, access: AIAccess) throws -> Outcome {
+        let ofPhotos = PhotosLibrary.library(containing: path) != nil
+        if ofPhotos, !access.photos { return .refused(.photos) }
+        if ofPhotos, try mainIndex().store.file(at: path, keptBy: SearchFilter()) != nil { return .unseen(.hidden) }
         if !access.code, try codeIndex()?.store.file(at: path, keptBy: SearchFilter()) != nil {
-            return .refused(.code)
+            return .unseen(.code)
         }
-        return .error(Self.notFound)
+        return .unseen(nil)
     }
 
     // MARK: search_files
@@ -410,14 +424,17 @@ final class MCPServer {
 
         let photosOnly = people != nil || albums != nil || photosFavorites || from != nil
         if photosOnly, !access.photos { return .refused(.photos) }
-        guard !query.isEmpty || photosOnly || digupFavorites || area != nil else {
-            throw InputError("Say what to look for (query), or give a filter to list what it keeps.")
+        guard !query.isEmpty || photosOnly || digupFavorites || area != nil || kind != nil else {
+            throw InputError("Say what to look for (query), or give a kind or a filter to list what it keeps.")
         }
         let main = try mainIndex()
         let store = main.store
         var filter = try visible(to: access, in: store)
+        // Names are looked up only among what the AI app may see: one that's only on items kept from it answers as a
+        // name that's nowhere.
+        let allowed = filter
         if let people {
-            let known = try store.photosPeople()
+            let known = try store.photosPeople(keptBy: allowed)
             filter.people = try people.map { name in
                 let ids = Set(known.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame }.map(\.id))
                 guard !ids.isEmpty else { throw InputError("No one called “\(name)” in Photos' People.") }
@@ -425,7 +442,7 @@ final class MCPServer {
             }
         }
         if let albums {
-            let known = try store.photosAlbums()
+            let known = try store.photosAlbums(keptBy: allowed)
             filter.albums = try Set(albums.flatMap { title in
                 let ids = known.filter { $0.title.caseInsensitiveCompare(title) == .orderedSame }.map(\.id)
                 guard !ids.isEmpty else { throw InputError("No album called “\(title)” in Photos.") }
@@ -448,8 +465,8 @@ final class MCPServer {
         return try search(query, in: main, kinds: kinds, filter: filter, limit: limit, prompt: Prompts.query)
     }
 
-    /// Finds them by meaning and words (words alone when the model can't run or the index has no vectors), and says
-    /// each as MCP-PLAN.md's `search_files` does.
+    /// Finds them by meaning and words (words alone when the model can't run or the index has no vectors), or with no
+    /// words lists what the kind and filter keep, newest first, and says each as MCP-PLAN.md's `search_files` does.
     private func search(_ query: String, in open: OpenIndex, kinds: Set<FileKind>?, filter: SearchFilter, limit: Int,
                         prompt: (String) -> String) throws -> Outcome {
         let searcher = try open.current()
@@ -463,7 +480,8 @@ final class MCPServer {
                 note = "Searched by words only: DigUp's model can't search by meaning now (\(error))."
             }
         }
-        let hits = try searcher.search(query, queryVector: vector, kinds: kinds, filter: filter, limit: limit)
+        let hits = try (query.isEmpty ? searcher.browse(filter, kinds: kinds, limit: limit)
+                        : searcher.search(query, queryVector: vector, kinds: kinds, filter: filter, limit: limit))
             .filter { FileManager.default.fileExists(atPath: $0.path) }
         let places = try open.store.locations(of: hits.map(\.path))
         var fields: [String: Any] = ["results": hits.map { Self.describe($0, place: places[$0.path]?.place) }]
@@ -555,7 +573,7 @@ final class MCPServer {
         let allowed = try visible(to: access, in: store)
         var found = try store.words(of: path, keptBy: allowed)
         if found == nil, access.code { found = try codeIndex()?.store.words(of: path, keptBy: SearchFilter()) }
-        guard let words = found else { return try unseen(path, access: access, allowed: allowed) }
+        guard let words = found else { return try unseen(path, access: access) }
         if moment != nil {
             return .error("DigUp keeps no words of a recording yet, only what's seen and heard in it: "
                           + "leave out moment.")
@@ -587,7 +605,7 @@ final class MCPServer {
         let input = try Input(arguments, allowed: ["path", "page", "moment"])
         guard let given = try input.string("path"), !given.isEmpty else { throw InputError("Which file (path)?") }
         let page = try input.integer("page", in: 1...Int.max)
-        let moment = try input.number("moment", from: 0)
+        let moment = try input.number("moment", in: 0...Self.latestMoment)
         guard page == nil || moment == nil else { throw InputError("Give a page or a moment, not both.") }
         let path = PhotosLibrary.library(containing: given) == nil ? FolderSelection.realPath(given) : given
         return (path, page, moment)
@@ -615,9 +633,7 @@ final class MCPServer {
         let (path, page, moment) = try Self.pathAndPlace(arguments)
         let store = try mainIndex().store
         let allowed = try visible(to: access, in: store)
-        guard let file = try store.file(at: path, keptBy: allowed) else {
-            return try unseen(path, access: access, allowed: allowed)
-        }
+        guard let file = try store.file(at: path, keptBy: allowed) else { return try unseen(path, access: access) }
         let kind: PreviewImages.Kind, loc: Double?
         switch file.kind {
         case .image, .screenshot: (kind, loc) = (.image, nil)
@@ -703,24 +719,31 @@ final class MCPServer {
 
         func bool(_ key: String) throws -> Bool? {
             guard let value = value(key) else { return nil }
-            guard let flag = value as? Bool else { throw InputError("\(key) is true or false.") }
-            return flag
+            guard let flag = value as? NSNumber, MCPServer.isBoolean(flag) else {
+                throw InputError("\(key) is true or false.")
+            }
+            return flag.boolValue
         }
 
+        /// A JSON number that isn't true or false (which Foundation reads as numbers too).
+        private func numeric(_ key: String) -> NSNumber? {
+            (value(key) as? NSNumber).flatMap { MCPServer.isBoolean($0) ? nil : $0 }
+        }
+
+        /// A whole number in `range`: one too big to be one (2⁶³, 1e300) is a wrong argument, not a crash.
         func integer(_ key: String, in range: ClosedRange<Int>) throws -> Int? {
-            guard let value = value(key) else { return nil }
-            guard let number = (value as? NSNumber)?.doubleValue, number == number.rounded(),
-                  Double(range.lowerBound) <= number, number <= Double(range.upperBound) else {
+            guard value(key) != nil else { return nil }
+            guard let number = numeric(key).flatMap({ Int(exactly: $0.doubleValue) }), range.contains(number) else {
                 throw InputError("\(key) is a whole number from \(range.lowerBound)"
                                  + (range.upperBound == Int.max ? " up." : " to \(range.upperBound)."))
             }
-            return Int(number)
+            return number
         }
 
-        func number(_ key: String, from lowest: Double) throws -> Double? {
-            guard let value = value(key) else { return nil }
-            guard let number = (value as? NSNumber)?.doubleValue, number.isFinite, number >= lowest else {
-                throw InputError("\(key) is a number from \(Int(lowest)) up.")
+        func number(_ key: String, in range: ClosedRange<Double>) throws -> Double? {
+            guard value(key) != nil else { return nil }
+            guard let number = numeric(key)?.doubleValue, range.contains(number) else {
+                throw InputError("\(key) is a number from \(Int(range.lowerBound)) to \(Int(range.upperBound)).")
             }
             return number
         }
@@ -737,7 +760,9 @@ final class MCPServer {
         func area(_ key: String) throws -> SearchFilter.Area? {
             guard let value = value(key) else { return nil }
             let box = value as? [String: Any] ?? [:]
-            let edges = ["south", "west", "north", "east"].compactMap { (box[$0] as? NSNumber)?.doubleValue }
+            let edges = ["south", "west", "north", "east"].compactMap { edge in
+                (box[edge] as? NSNumber).flatMap { MCPServer.isBoolean($0) ? nil : $0.doubleValue }
+            }
             guard box.count == 4, edges.count == 4, -90 <= edges[0], edges[0] <= edges[2], edges[2] <= 90,
                   -180 <= edges[1], edges[1] <= edges[3], edges[3] <= 180 else {
                 throw InputError("\(key) is {south, west, north, east} in degrees: south up to north (-90 to 90), "
@@ -766,7 +791,8 @@ final class MCPServer {
     private static var pathAndPlaceProperties: [String: Any] {
         ["path": ["type": "string", "description": "A path search_files returned."],
          "page": ["type": "integer", "minimum": 1, "description": "A PDF's page, from 1."],
-         "moment": ["type": "number", "minimum": 0, "description": "Seconds into a recording."]]
+         "moment": ["type": "number", "minimum": 0, "maximum": latestMoment,
+                    "description": "Seconds into a recording."]]
     }
 
     /// The four tools (MCP-PLAN.md, "Tools").

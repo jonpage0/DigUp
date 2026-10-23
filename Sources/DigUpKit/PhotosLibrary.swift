@@ -46,6 +46,9 @@ public enum PhotosLibrary {
         return String(path[..<end.upperBound].dropLast())
     }
 
+    /// Any file inside a library, as an SQL `LIKE` pattern (case-insensitive, as `library(containing:)`).
+    public static let filesPattern = "%." + fileExtension + "/%"
+
     /// The Photos asset a file of a library shows: the library, and the asset's uuid from the file's name. Nil for any
     /// other file.
     public static func asset(ofFile path: String) -> (library: String, uuid: String)? {
@@ -181,7 +184,7 @@ public enum PhotosLibrary {
         /// The device that took it, from the EXIF Photos kept ("iPhone 15 Pro"); nil when there's none.
         public let camera: String?
         /// Hidden in Photos (its Hidden album: listed only with `IndexOptions.includeHiddenPhotos`); nil in a listing
-        /// kept from before DigUp recorded it. What AI apps don't see until they're allowed (`hiddenAssets`).
+        /// kept from before DigUp recorded it. What AI apps don't see until they're allowed (`visibleAssets`).
         public let hidden: Bool?
 
         public init(uuid: String, path: String, movie: Bool, screenshot: Bool, title: String, date: Double,
@@ -400,21 +403,17 @@ public enum PhotosLibrary {
                               skipped: kept.listing.skipped)
     }
 
-    /// The assets hidden in Photos among a library's last listing (kept in the index folder), by uuid: none when it was
-    /// listed without them. Nil when no kept listing says: none is kept, or it's from before DigUp recorded which are
-    /// hidden (a listing from the script before is made again at the next sync, `Kept.isCurrent`). `digup mcp` keeps
-    /// these from AI apps until they're allowed, and a library it can't tell about altogether.
-    public static func hiddenAssets(of library: String, keptIn index: URL) -> Set<String>? {
+    /// The assets a library's last listing (kept in the index folder) says aren't hidden in Photos, by uuid: each one
+    /// listed when it was listed without hidden items, else each one marked not hidden. None when no listing is kept.
+    /// `digup mcp` lets AI apps see only these until hidden items are allowed: an asset the listing doesn't vouch for
+    /// stays out, even while the index still has it (hidden items just left out of indexing, the sync that takes them
+    /// out not done yet), as does each one of a listing with hidden items from before DigUp marked which they are (made
+    /// again at the next sync, `Kept.isCurrent`).
+    public static func visibleAssets(of library: String, keptIn index: URL) -> Set<String> {
         let file = keptListing(of: library, keptIn: index)
         guard let data = try? Data(contentsOf: file), let kept = try? JSONDecoder().decode(Kept.self, from: data),
-              kept.library == library else { return nil }
-        guard kept.hidden else { return [] }
-        var hidden = Set<String>()
-        for asset in kept.listing.assets {
-            guard let flag = asset.hidden else { return nil }
-            if flag { hidden.insert(asset.uuid) }
-        }
-        return hidden
+              kept.library == library else { return [] }
+        return Set(kept.listing.assets.filter { !kept.hidden || $0.hidden == false }.map(\.uuid))
     }
 
     /// A listing is used again while the library's pictures are as they were, and while it's younger than this when the

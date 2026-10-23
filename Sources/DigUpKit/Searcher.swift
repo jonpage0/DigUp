@@ -97,13 +97,11 @@ public struct SearchFilter: Sendable, Equatable {
     public var paths: Set<String>?
     /// Only files taken inside this box (`IndexStore.locations`).
     public var area: Area?
-    /// What an AI app may not see (`digup mcp`, `AIAccess`), left out before anything is matched, counted or cut to
-    /// the best, so it's never in a result or a count. False: no file of a Photos library.
-    public var photosLibraries = true
-    /// No file under these folders (a Photos library whose hidden items can't be told apart from the others).
-    public var withoutFolders: [String] = []
-    /// Not these files (Photos' hidden items).
-    public var withoutPaths: Set<String> = []
+    /// Of the Photos libraries' files, only these, by path; every other file of a library is left out (each of them,
+    /// when it's empty). Nil keeps them all. What an AI app may see of the libraries (`digup mcp`, `AIAccess`): left out
+    /// before anything is matched, counted or cut to the best, so it's never in a result or a count, and found by path,
+    /// whatever the index knows of the file yet.
+    public var photosOnly: Set<String>?
 
     /// A box on the map, in degrees: south to north, west to east.
     public struct Area: Sendable, Equatable {
@@ -124,7 +122,7 @@ public struct SearchFilter: Sendable, Equatable {
 
     public var isEmpty: Bool {
         people.isEmpty && albums == nil && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
-            && paths == nil && area == nil && photosLibraries && withoutFolders.isEmpty && withoutPaths.isEmpty
+            && paths == nil && area == nil && photosOnly == nil
     }
 
     /// A part of the query that keeps no file (`IN ()` isn't SQL).
@@ -175,19 +173,16 @@ public struct SearchFilter: Sendable, Equatable {
             values += [.double(area.latitudes.lowerBound), .double(area.latitudes.upperBound),
                        .double(area.longitudes.lowerBound), .double(area.longitudes.upperBound)]
         }
-        if !photosLibraries {
-            parts.append("SELECT id FROM files WHERE path NOT LIKE ?")   // as `PhotosLibrary.library(containing:)`
-            values.append(.text("%." + PhotosLibrary.fileExtension + "/%"))
-        }
-        for folder in withoutFolders {
-            let ranges = IndexStore.pathRanges(under: folder)
-            parts.append("SELECT id FROM files WHERE NOT ("
-                         + ranges.map { _ in "(path >= ? AND path < ?)" }.joined(separator: " OR ") + ")")
-            values += ranges.flatMap { [SQLValue.text($0.from), .text($0.to)] }
-        }
-        if !withoutPaths.isEmpty {
-            parts.append("SELECT id FROM files WHERE path NOT IN (\(placeholders(withoutPaths)))")
-            values += withoutPaths.map { .text($0) }
+        if let photosOnly {
+            // As `PhotosLibrary.library(containing:)`; the paths kept go as one value (a library has thousands).
+            parts.append("SELECT id FROM files WHERE path NOT LIKE ?"
+                         + (photosOnly.isEmpty ? "" : " OR path IN (SELECT value FROM json_each(?))"))
+            values.append(.text(PhotosLibrary.filesPattern))
+            if !photosOnly.isEmpty {
+                // A list of strings always encodes; were it not to, none would be kept.
+                let list = try? JSONSerialization.data(withJSONObject: Array(photosOnly), options: .withoutEscapingSlashes)
+                values.append(.text(list.map { String(decoding: $0, as: UTF8.self) } ?? "[]"))
+            }
         }
         return parts.isEmpty ? nil : (parts.joined(separator: " INTERSECT "), values)
     }
@@ -432,18 +427,20 @@ public final class Searcher {
         return hits
     }
 
-    /// A search with no words and a filter: the newest files the filter keeps (of `kinds`), by when Photos says a
-    /// library's picture was taken, else by the file's modification date. Each points at its Photos facts, else at
-    /// its name.
-    private func browse(_ filter: SearchFilter, kinds: Set<FileKind>?, limit: Int) throws -> [SearchHit] {
-        guard let query = filter.query else { return [] }
-        let ofKinds = kinds.map { " AND f.kind IN (\(IndexStore.sqlList($0)))" } ?? ""
+    /// What a filter keeps, with no words: the newest files it keeps (of `kinds`), by when Photos says a library's
+    /// picture was taken, else by the file's modification date; an empty filter keeps every file (`digup mcp`'s kind
+    /// alone). Each points at its Photos facts, else at its name.
+    public func browse(_ filter: SearchFilter, kinds: Set<FileKind>?, limit: Int) throws -> [SearchHit] {
+        let kept = filter.query
+        let conditions = [kept.map { "f.id IN (\($0.sql))" }, kinds.map { "f.kind IN (\(IndexStore.sqlList($0)))" }]
+            .compactMap { $0 }
         var files: [Int64] = []
         try store.db.query("""
             SELECT f.id FROM files f
             LEFT JOIN segments s ON s.file = f.id AND s.kind = '\(SegmentKind.photosInfo.rawValue)'
-            WHERE f.id IN (\(query.sql))\(ofKinds) ORDER BY coalesce(s.loc, f.mtime) DESC, f.id DESC LIMIT ?
-            """, query.values + [.int(Int64(limit))]) { files.append($0.int(0)) }
+            \(conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND "))
+            ORDER BY coalesce(s.loc, f.mtime) DESC, f.id DESC LIMIT ?
+            """, (kept?.values ?? []) + [.int(Int64(limit))]) { files.append($0.int(0)) }
         return try files.map { file in
             let row = try fileRow(file)
             var segment = (id: Int64(0), kind: SegmentKind.name)
