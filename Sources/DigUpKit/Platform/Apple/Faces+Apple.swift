@@ -62,14 +62,13 @@ public final class RecognizedFaces: FaceReader, @unchecked Sendable {
 
     public var identity: String { recognizer.identity }
 
-    /// A named face's box is Photos' (`Faces.Box(_:width:height:)`), whatever Vision makes of it; a face found here
-    /// has Vision's.
+    /// A named face's box is Photos' (`FacePicture.box(of:)`), whatever Vision makes of it; a face found here has
+    /// Vision's.
     public func faces(inPictureAt url: URL, named: [PhotosLibrary.FaceBox]?) throws -> [Faces.Found] {
         let picture = try FacePicture(contentsOf: url, photosFaces: named)
-        let (width, height) = (Double(picture.image.width), Double(picture.image.height))
         return zip(picture.faces.indices, recognizer.embeddings(of: picture)).compactMap { index, print in
             guard let print else { return nil }
-            let box = if let named { Faces.Box(named[index], width: width, height: height) }
+            let box = if let named { picture.box(of: named[index]) }
                 else { Faces.Box(vision: picture.faces[index].box) }
             return box.map { Faces.Found(box: $0, print: print, named: named == nil ? nil : index) }
         }
@@ -131,6 +130,9 @@ public final class FacePicture {
 
     public let image: CGImage
     public let faces: [Face]
+    /// The picture's own size in pixels, upright (its stored width and height, turned by its orientation), whatever
+    /// size `image` was read at: what Photos' boxes are converted with (`box(of:)`).
+    public let pixels: (width: Int, height: Int)
     /// The picture's requests share one handler: Vision keeps what it made of the picture for the next.
     let handler: VNImageRequestHandler
 
@@ -150,6 +152,15 @@ public final class FacePicture {
         else { throw Faces.Failure(description: "can't read \(url.lastPathComponent)") }
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         (self.image, self.handler) = (image, handler)
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
+        if let stored = properties[kCGImagePropertyPixelWidth] as? Int,
+           let storedHeight = properties[kCGImagePropertyPixelHeight] as? Int, stored > 0, storedHeight > 0 {
+            // Orientations 5 to 8 turn the picture a quarter: its sides swap.
+            let turned = (5...8).contains(properties[kCGImagePropertyOrientation] as? Int ?? 1)
+            pixels = turned ? (storedHeight, stored) : (stored, storedHeight)
+        } else {
+            pixels = (image.width, image.height)
+        }
         let (width, height) = (Double(image.width), Double(image.height))
         let found: [VNFaceObservation]
         if let photosFaces {
@@ -171,6 +182,13 @@ public final class FacePicture {
         }
         faces = found.map { Face(box: $0.boundingBox, points: Self.points(of: $0, width: width, height: height),
                                  observation: $0) }
+    }
+
+    /// Where Photos says `face` is, as the index keeps it: converted with the picture's own size (`pixels`), not the
+    /// size it was read at, which is rounded to whole pixels (10000 × 253 is read at 2048 × 52). The faces pass works
+    /// it out again from the size the index has of the file (`Indexer.NamedFace.areKept`), the same numbers.
+    public func box(of face: PhotosLibrary.FaceBox) -> Faces.Box? {
+        Faces.Box(face, width: Double(pixels.width), height: Double(pixels.height))
     }
 
     /// The face's five points (`Face.points`), or nil.

@@ -147,15 +147,17 @@ import ImageIO
     }
 
     #if canImport(ImageIO)
-    /// Writes a 400×300 JPEG, with GPS tags when `point` is given (degrees, south and west below zero), written as a
-    /// camera writes them: unsigned degrees, and the hemisphere apart.
-    static func writeJPEG(_ url: URL, at point: (latitude: Double, longitude: Double)? = nil) throws {
-        guard let context = CGContext(data: nil, width: 400, height: 300, bitsPerComponent: 8, bytesPerRow: 0,
-                                      space: CGColorSpaceCreateDeviceRGB(),
+    /// Writes a JPEG of `size` (400×300 unless said), with GPS tags when `point` is given (degrees, south and west
+    /// below zero), written as a camera writes them: unsigned degrees, and the hemisphere apart; and an EXIF
+    /// `orientation` when given (6: stored turned, shown a quarter turn clockwise).
+    static func writeJPEG(_ url: URL, at point: (latitude: Double, longitude: Double)? = nil,
+                          size: (width: Int, height: Int) = (400, 300), orientation: Int? = nil) throws {
+        guard let context = CGContext(data: nil, width: size.width, height: size.height, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
         else { throw ExtractError.unreadable("no context") }
         context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.8, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: 400, height: 300))
+        context.fill(CGRect(x: 0, y: 0, width: size.width, height: size.height))
         guard let image = context.makeImage(),
               let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil)
         else { throw ExtractError.unreadable(url.path) }
@@ -168,6 +170,7 @@ import ImageIO
                 kCGImagePropertyGPSLongitudeRef: point.longitude < 0 ? "W" : "E",
             ] as [CFString: Any]
         }
+        if let orientation { properties[kCGImagePropertyOrientation] = orientation }
         CGImageDestinationAddImage(destination, image, properties as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { throw ExtractError.unreadable(url.path) }
     }

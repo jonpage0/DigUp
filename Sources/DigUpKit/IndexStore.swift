@@ -1731,9 +1731,9 @@ public final class IndexStore {
         return found
     }
 
-    /// The named faces the index has in a picture: each one's person and box, and the picture's width and height in
-    /// pixels as it was read (`files.info`; as stored, so maybe on its side). What the faces pass compares with the
-    /// faces Photos names now (`Indexer.NamedFace.areKept`).
+    /// The named faces the index has in a picture: each one's person and box, and the picture's own width and height in
+    /// pixels (`files.info`, from its file's properties when it was read: as stored, so maybe on its side). What the
+    /// faces pass compares with the faces Photos names now (`Indexer.NamedFace.areKept`).
     struct NamedFacesKept {
         var faces: [(person: Int64, box: Faces.Box)] = []
         var pixels: (width: Double, height: Double)?

@@ -644,7 +644,12 @@ final class FakeFaceReader: FaceReader, @unchecked Sendable {
             return stored.count == 1 && abs(stored[0].box.x - box.x) < 1e-9 && abs(stored[0].box.y - box.y) < 1e-9
                 && abs(stored[0].box.width - box.width) < 1e-9 && abs(stored[0].box.height - box.height) < 1e-9
         }
-        name(0.5 + 1e-9, 0.5 - 1e-9, 0.3)   // as it was, but for rounding
+        name(0.5 + 1e-12, 0.5 - 1e-12, 0.3)   // as it was, but for the last bits of its numbers
+        #expect(try synced().facesWaiting() == 0)
+        // Moved by 0.0015 of the picture's width, and nothing else: Photos' box is another one.
+        name(0.5015, 0.5, 0.3)
+        #expect(try synced().readFaces() == 1)
+        #expect(try kept(0.5015, 0.5, 0.3))
         #expect(try synced().facesWaiting() == 0)
         // A little to the right, and half as big: its center is still inside the box kept.
         name(0.505, 0.5, 0.15)
@@ -666,6 +671,61 @@ final class FakeFaceReader: FaceReader, @unchecked Sendable {
         #expect(try named(in: path, indexed).first.map { abs($0.box.x + $0.box.width - 1) < 1e-9 } == true)
         #expect(try synced().facesWaiting() == 0)
     }
+
+    #if canImport(Vision) && canImport(CoreML)
+    /// Reads a picture's named faces as the index does (`FacePicture`, its `box(of:)`), each with the same print: where
+    /// they are, not who.
+    final class BoxesReader: FaceReader, @unchecked Sendable {
+        let identity = "boxes 1"
+
+        func faces(inPictureAt url: URL, named: [PhotosLibrary.FaceBox]?) throws -> [Faces.Found] {
+            guard let named else { return [] }
+            let picture = try FacePicture(contentsOf: url, photosFaces: named)
+            return named.enumerated().compactMap { index, face in
+                picture.box(of: face).map { Faces.Found(box: $0, print: [1, 0, 0, 0], named: index) }
+            }
+        }
+    }
+
+    /// A named face in a picture read at fewer pixels than it has (far longer than it's high: 10000 × 253 is read at
+    /// 2048 × 52, its short side rounded), cut at its top edge, or in a picture stored turned: later helpers keep it as
+    /// it was, and don't read it again each.
+    @Test func aNamedFaceInAThinOrTurnedPictureIsntReadAgain() throws {
+        for (number, (size, orientation)) in [((10000, 253), nil), ((5000, 101), nil), ((300, 400), 6)].enumerated() {
+            let library = folder.appendingPathComponent("\(number)/Photos Library.photoslibrary")
+            let originals = library.appendingPathComponent("originals/F")
+            for made in [originals, library.appendingPathComponent("database")] {
+                try FileManager.default.createDirectory(at: made, withIntermediateDirectories: true)
+            }
+            try Data("SQLite format 3".utf8).write(to: library.appendingPathComponent("database/Photos.sqlite"))
+            let uuid = UUID().uuidString
+            let picture = originals.appendingPathComponent(uuid + ".jpeg")
+            try ImageTests.writeJPEG(picture, size: (width: size.0, height: size.1), orientation: orientation)
+            let face = orientation == nil ? PhotosLibrary.FaceBox(person: Self.katie, x: 0.5, y: 0.9, size: 0.03795)
+                : PhotosLibrary.FaceBox(person: Self.katie, x: 0.4, y: 0.6, size: 0.2)
+            let listing = PhotosLibrary.Listing(assets: [
+                PhotosLibrary.Asset(uuid: uuid, path: picture.path, movie: false, screenshot: false, title: "",
+                                    date: 1_700_000_000, words: [], people: [Self.katie.uuid], faces: [face]),
+            ], people: [Self.katie])
+            let store = try IndexStore(directory: folder.appendingPathComponent("\(number)/index"))
+            func indexer() throws -> Indexer {
+                var options = IndexOptions()
+                options.photos = PhotosLibrary.Reader { _, _ in listing }
+                let indexer = try Indexer(store: store, options: options, faces: BoxesReader(),
+                                          makeEmbedder: { FakeEmbedder() })
+                _ = try indexer.sync([library])
+                return indexer
+            }
+            let states = try indexer().run()
+            #expect(states["done"] == 1, "picture \(number): \(states)")
+            var boxes: [Double] = []
+            try store.db.query("SELECT y, y + height FROM faces") { boxes += [$0.double(0), $0.double(1)] }
+            #expect(boxes.count == 2, "picture \(number)")
+            if orientation == nil { #expect(boxes.first == 0, "cut at the top: picture \(number)") }
+            for helper in 1...2 { #expect(try indexer().facesWaiting() == 0, "picture \(number), helper \(helper)") }
+        }
+    }
+    #endif
 
     /// What you say while the faces pass runs holds for what it reads next: a correction saved between two pictures
     /// (and `face_matches` made again with it, as the app does at once) isn't undone by the pass matching later

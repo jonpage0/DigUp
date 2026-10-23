@@ -429,33 +429,29 @@ public final class Indexer {
         let person: Int64
         let box: PhotosLibrary.FaceBox
 
-        /// How far each edge of a kept box may be from the box Photos' face converts to (`Faces.Box(_:width:height:)`)
-        /// and still be that box, in fractions of the picture's sides: what rounding leaves. The kept box was converted
-        /// from Photos' numbers too, in the picture as read for faces; the picture's shape here is the one a kept box
-        /// gives exactly, else its pixels as indexed, which can differ from the picture read for faces (scaled to 2048
-        /// pixels at most) by the rounding of its short side to whole pixels: half a pixel of 250 or more.
-        static let sameBox = 0.002
+        /// How far a kept box's numbers may be from the box Photos' face converts to and still be that box: nothing
+        /// but the last bits of a floating-point number. The kept box was converted (`FacePicture.box(of:)`) with the
+        /// same function from the same numbers: Photos' face and the picture's own pixel size, which the index keeps
+        /// (`files.info`), so the same face gives the same box exactly.
+        static let sameBox = 1e-9
 
         /// The index has these faces as Photos names them now: as many, and each one's person on a face kept whose box
-        /// is the one Photos' converts to (`sameBox`), one face apiece. So Photos naming someone else in a picture,
-        /// the same people on each other's faces, or a face's box moved, grown or shrunk, reads it again.
+        /// is the one Photos' converts to now (`sameBox`), one face apiece. So Photos naming someone else in a picture,
+        /// the same people on each other's faces, or any change to a face's box, reads it again. The picture's pixels
+        /// are as stored, so they're tried both ways up (a picture stored turned); without them, nothing can be
+        /// worked out, and the picture is read again.
         static func areKept(_ named: [NamedFace], in kept: IndexStore.NamedFacesKept) -> Bool {
             guard named.count == kept.faces.count else { return false }
-            // The picture's shape, width over height, as it was read upright: the one a kept box not cut at an edge
-            // gives (Photos' face is a square, so its box's height over its width), else its pixels either way up.
-            var shapes = kept.faces.compactMap { face -> Double? in
-                let box = face.box
-                return box.x > 0 && box.y > 0 && box.x + box.width < 1 && box.y + box.height < 1
-                    ? box.height / box.width : nil
-            }
-            if let pixels = kept.pixels { shapes += [pixels.width / pixels.height, pixels.height / pixels.width] }
+            guard !named.isEmpty else { return true }
+            guard let pixels = kept.pixels else { return false }
+            let sizes = [(pixels.width, pixels.height), (pixels.height, pixels.width)]
             func same(_ a: Faces.Box, _ b: Faces.Box) -> Bool {
-                abs(a.x - b.x) <= sameBox && abs(a.y - b.y) <= sameBox
-                    && abs(a.x + a.width - b.x - b.width) <= sameBox && abs(a.y + a.height - b.y - b.height) <= sameBox
+                abs(a.x - b.x) <= sameBox && abs(a.y - b.y) <= sameBox && abs(a.width - b.width) <= sameBox
+                    && abs(a.height - b.height) <= sameBox
             }
             var left = kept.faces
             for face in named {
-                let boxes = shapes.compactMap { Faces.Box(face.box, width: $0, height: 1) }
+                let boxes = sizes.compactMap { Faces.Box(face.box, width: $0.0, height: $0.1) }
                 guard let found = left.firstIndex(where: { kept in
                     kept.person == face.person && boxes.contains { same($0, kept.box) }
                 }) else { return false }
