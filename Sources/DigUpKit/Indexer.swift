@@ -406,18 +406,35 @@ public final class Indexer {
         let person: Int64
         let box: PhotosLibrary.FaceBox
 
-        /// The index has these faces as Photos names them now: as many, and each one's person on the face where Photos
-        /// puts it (a face kept whose box holds its center; one face apiece). So Photos naming someone else in a
-        /// picture, or the same people on each other's faces, reads it again.
-        static func areKept(_ named: [NamedFace], in kept: [(person: Int64, box: Faces.Box)]) -> Bool {
-            guard named.count == kept.count else { return false }
-            var left = kept
+        /// How far each edge of a kept box may be from the box Photos' face converts to (`Faces.Box(_:width:height:)`)
+        /// and still be that box, in fractions of the picture's sides: what rounding leaves. The kept box was converted
+        /// from Photos' numbers too, in the picture as read for faces; the picture's shape here is the one a kept box
+        /// gives exactly, else its pixels as indexed, which can differ from the picture read for faces (scaled to 2048
+        /// pixels at most) by the rounding of its short side to whole pixels: half a pixel of 250 or more.
+        static let sameBox = 0.002
+
+        /// The index has these faces as Photos names them now: as many, and each one's person on a face kept whose box
+        /// is the one Photos' converts to (`sameBox`), one face apiece. So Photos naming someone else in a picture,
+        /// the same people on each other's faces, or a face's box moved, grown or shrunk, reads it again.
+        static func areKept(_ named: [NamedFace], in kept: IndexStore.NamedFacesKept) -> Bool {
+            guard named.count == kept.faces.count else { return false }
+            // The picture's shape, width over height, as it was read upright: the one a kept box not cut at an edge
+            // gives (Photos' face is a square, so its box's height over its width), else its pixels either way up.
+            var shapes = kept.faces.compactMap { face -> Double? in
+                let box = face.box
+                return box.x > 0 && box.y > 0 && box.x + box.width < 1 && box.y + box.height < 1
+                    ? box.height / box.width : nil
+            }
+            if let pixels = kept.pixels { shapes += [pixels.width / pixels.height, pixels.height / pixels.width] }
+            func same(_ a: Faces.Box, _ b: Faces.Box) -> Bool {
+                abs(a.x - b.x) <= sameBox && abs(a.y - b.y) <= sameBox
+                    && abs(a.x + a.width - b.x - b.width) <= sameBox && abs(a.y + a.height - b.y - b.height) <= sameBox
+            }
+            var left = kept.faces
             for face in named {
-                // Photos' center is from the bottom-left; the index's boxes are from the top-left.
-                let (x, y) = (face.box.x, 1 - face.box.y)
-                guard let found = left.firstIndex(where: {
-                    $0.person == face.person && (($0.box.x)...($0.box.x + $0.box.width)).contains(x)
-                        && (($0.box.y)...($0.box.y + $0.box.height)).contains(y)
+                let boxes = shapes.compactMap { Faces.Box(face.box, width: $0, height: 1) }
+                guard let found = left.firstIndex(where: { kept in
+                    kept.person == face.person && boxes.contains { same($0, kept.box) }
                 }) else { return false }
                 left.remove(at: found)
             }
@@ -779,11 +796,12 @@ public final class Indexer {
     }
 
     /// Writes the faces read in a picture (inside the caller's transaction), and matches the ones outside Photos as the
-    /// run found the named faces and the corrections when it first needed them (`matching`).
+    /// run found the named faces when it first needed them, and the corrections as they are (`matching`, made again
+    /// when they were saved since: `IndexStore.faceMatching(_:)`).
     private func keep(_ rows: [IndexStore.FaceRow], ofSegment segment: Int64, of file: Int64) throws {
         let outside = Self.outside(rows, written: try store.setFaces(rows, ofSegment: segment), of: file)
         guard !outside.isEmpty else { return }
-        let matching = try self.matching ?? store.faceMatching()
+        let matching = try store.faceMatching(self.matching)
         self.matching = matching
         try store.matchFaces(outside, with: matching)
     }
@@ -1025,7 +1043,8 @@ public final class Indexer {
         guard faces != nil else { return nil }
         let stored = try store.namedFaces()
         let differ = namedFaces.compactMap { file, named -> Int64? in
-            !NamedFace.areKept(named, in: stored[file] ?? []) && triedNamed[file] != named ? file : nil
+            !NamedFace.areKept(named, in: stored[file] ?? IndexStore.NamedFacesKept()) && triedNamed[file] != named
+                ? file : nil
         }
         let read = try store.facesRead()
         let outside = try store.picturesOutsideWithoutFaces(read).filter { !triedAway.contains($0.file.id) }
@@ -1067,7 +1086,7 @@ public final class Indexer {
             report(picture, rows, since: started)
         }
         try store.rebuildFaceMatchesIfChanged()
-        let matching = try store.faceMatching()
+        var matching = try store.faceMatching()
         var read = work.read, finished = true
         for picture in work.outside {
             guard !shouldStop() else {
@@ -1086,6 +1105,7 @@ public final class Indexer {
             try store.db.transaction {
                 if let rows {
                     let ids = try store.setFaces(rows, ofSegment: picture.segment)
+                    matching = try store.faceMatching(matching)   // corrections saved since: as they are now
                     try store.matchFaces(Self.outside(rows, written: ids, of: id), with: matching)
                 }
                 try store.setFacesRead(read)
