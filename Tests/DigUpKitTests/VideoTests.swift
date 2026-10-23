@@ -50,4 +50,25 @@ import Testing
         #expect(Location(iso6709: "+2547.44-08007.80/", source: .quicktime) == nil)   // degrees and minutes: not read
         #expect(Location(iso6709: "", source: .quicktime) == nil)
     }
+
+    /// Videos/turned.mp4: two seconds of 320 × 192, red on the left half, stored wide and turned a quarter on playback,
+    /// as a phone's portrait video is (its track's transform). Made with `ffmpeg -f lavfi -i
+    /// "color=black:s=320x192:r=5:d=2,drawbox=w=160:h=192:color=0xFF0000:t=fill" -c:v libx264 -preset veryslow
+    /// -pix_fmt yuv420p flat.mp4`, then `ffmpeg -display_rotation 90 -i flat.mp4 -c copy turned.mp4`.
+    static let turned = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .appendingPathComponent("Videos/turned.mp4")
+
+    /// A video's size as it's shown and its length, from its metadata (`media_dimensions`): a turned one's sides
+    /// swapped. Off the Mac, its length alone.
+    @Test func aVideosSizeIsAsItsShown() {
+        #if canImport(AVFoundation)
+        let turned = VideoExtractor.dimensions(of: Self.turned)
+        #expect(turned?.width == 192 && turned?.height == 320 && abs((turned?.duration ?? 0) - 2) < 0.05)
+        // A transport stream has no index of its length: AVFoundation makes its 12 s 11.4.
+        let shots = VideoExtractor.dimensions(of: Self.shots)
+        #expect(shots?.width == 320 && shots?.height == 192 && abs((shots?.duration ?? 0) - 12) < 1)
+        #else
+        #expect(VideoExtractor.dimensions(of: Self.turned)?.width == nil)
+        #endif
+    }
 }

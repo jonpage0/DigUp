@@ -451,7 +451,8 @@ private struct SensitiveSettings: View {
     /// What each position blurs, with what ADULT-CONTENT-EVAL.md measured it catches.
     static func detail(_ position: SensitivePosition) -> String {
         switch position {
-        case .off: "Pictures show as they are. The Sensitive filter, beside the kinds, keeps the revealing ones."
+        case .off: "Pictures show as they are. The Sensitive filter, in the search window's Filters menu, keeps the "
+            + "revealing ones."
         case .anythingRevealing: "Swimwear, lingerie and anything more, even when the detector isn't sure: nearly "
             + "every nude picture, and the most ordinary pictures blurred with them."
         case .revealing: "Revealing pictures the detector is fairly sure of: about 9 in 10 nude pictures."
