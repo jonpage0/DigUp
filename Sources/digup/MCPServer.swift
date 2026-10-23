@@ -133,8 +133,10 @@ final class MCPServer {
     // MARK: Messages
 
     /// The reply to one line: nil for a notification or a reply to a request (this server sends none), which get none.
-    /// A request JSON-RPC 2.0 wouldn't call one (no "jsonrpc": "2.0", a method that isn't a string, an id that isn't
-    /// a string or a number, which MCP also asks of it) is answered Invalid Request.
+    /// Anything else JSON-RPC 2.0 doesn't call a request (no "jsonrpc": "2.0", a method that isn't a string, params
+    /// that are neither an object nor a list, an id that's neither a string nor a whole number, as MCP asks) is
+    /// answered Invalid Request, with its id when that's one; params as a list, which no MCP method takes, are Invalid
+    /// params.
     private func reply(to line: String) -> [String: Any]? {
         guard let message = try? JSONSerialization.jsonObject(with: Data(line.utf8)) else {
             return failure(NSNull(), Code.parse, "Parse error")
@@ -143,13 +145,16 @@ final class MCPServer {
             return failure(NSNull(), Code.invalidRequest, "Invalid Request: one message per line, not a batch")
         }
         if request["method"] == nil, request["result"] != nil || request["error"] != nil { return nil }
-        guard let id = request["id"] else { return nil }
-        guard id is String || (id as? NSNumber).map({ !Self.isBoolean($0) }) == true else {
-            return failure(NSNull(), Code.invalidRequest, "Invalid Request: an id is a string or a number")
+        let id = request["id"].flatMap { Self.isRequestID($0) ? $0 : nil }
+        guard request["jsonrpc"] as? String == "2.0", let method = request["method"] as? String,
+              request["params"].map({ $0 is [String: Any] || $0 is [Any] }) ?? true,
+              request["id"] == nil || id != nil else {
+            return failure(id ?? NSNull(), Code.invalidRequest,
+                           "Invalid Request: a request has \"jsonrpc\": \"2.0\", a method, params that are an object "
+                           + "if any, and an id that's a string or a whole number")
         }
-        guard request["jsonrpc"] as? String == "2.0", let method = request["method"] as? String else {
-            return failure(id, Code.invalidRequest, "Invalid Request: a request has \"jsonrpc\": \"2.0\" and a method")
-        }
+        guard let id else { return nil }   // a notification
+        if request["params"] is [Any] { return failure(id, Code.invalidParams, "Invalid params: they're an object") }
         let params = request["params"] as? [String: Any] ?? [:]
         if method == "initialize" { return initialize(id, params) }
 
@@ -232,6 +237,13 @@ final class MCPServer {
     /// True or false: Foundation reads JSON's booleans as numbers, of their own C type.
     static func isBoolean(_ number: NSNumber) -> Bool {
         String(cString: number.objCType) == "c"
+    }
+
+    /// A request's id as MCP has it: a string or a whole number (never null, true or 1.5).
+    static func isRequestID(_ id: Any) -> Bool {
+        if id is String { return true }
+        guard let number = id as? NSNumber, !isBoolean(number) else { return false }
+        return number.doubleValue == number.doubleValue.rounded()
     }
 
     // MARK: Tools
@@ -413,8 +425,7 @@ final class MCPServer {
             guard people == nil, albums == nil, !photosFavorites, !digupFavorites, from == nil, area == nil else {
                 throw InputError("Code search takes no Photos, favorites or map filters.")
             }
-            query = codeWords ?? query
-            guard !query.isEmpty else { throw InputError("Say what to look for in the code (query).") }
+            query = codeWords ?? query   // none ("code:" alone, or the kind alone): the newest code files
             guard let code = try codeIndex() else {
                 return .error("Code search isn't set up in DigUp: the user can choose code folders in its Settings.")
             }
@@ -799,8 +810,8 @@ final class MCPServer {
     static func toolList() -> [[String: Any]] {
         let searchProperties: [String: Any] = [
             "query": ["type": "string",
-                      "description": "What to look for, in plain words. May be empty when a filter is given. "
-                        + "\"code: …\" searches code."],
+                      "description": "What to look for, in plain words. May be empty when a kind or a filter is "
+                        + "given. \"code: …\" searches code."],
             "kind": ["type": "string", "enum": kindNames.values.sorted(), "description": "Only files of this kind."],
             "people": ["type": "array", "items": ["type": "string"], "minItems": 1,
                        "description": "Only pictures that show all of these people, by their names in Photos."],
@@ -826,8 +837,8 @@ final class MCPServer {
                  description: "Searches the user's files on this Mac with DigUp, by what they mean and by their "
                     + "words: documents, PDFs, pictures, screenshots, audio and video, and, when the user allows it, "
                     + "Photos libraries and code. Each result says where the file is, why it matched (\"Matches the "
-                    + "text on page 3\"), the matching words, and when and where it was taken. Without words, the "
-                    + "filters list what they keep, newest first.",
+                    + "text on page 3\"), the matching words, and when and where it was taken. Without words, a kind "
+                    + "or the filters list what they keep, newest first.",
                  properties: searchProperties),
             tool("read_text", title: "Read a file's words",
                  description: "The words DigUp read from one file search_files returned: a document's text, a PDF's "
