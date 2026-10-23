@@ -90,7 +90,7 @@ final class IndexService: @unchecked Sendable {
             if again > 0 { emit(["event": "rescan", "files": again]) }
             let located = try main.store.locateOnce()    // where the pictures and videos it read before were taken
             if located > 0 { emit(["event": "located", "files": located]) }
-            let measured = try main.store.measureOnce()   // their sizes as shown, and how long recordings are
+            let measured = try main.store.measureOnce()   // sizes as shown, and how long videos and recordings are
             if measured > 0 { emit(["event": "measured", "files": measured]) }
             for part in parts {
                 try part.indexer.checkModel()   // a new model: everything is queued again
