@@ -89,11 +89,12 @@ public enum Faces {
     }
 
     /// How well a recognizer's embeddings tell named people apart, and keep everyone else out (`digup faces-eval`).
-    /// Each named face is called by the nearest of the other named faces (leave-one-out): it's called that face's
-    /// person, with their similarity. A face whose person has no other face is left out (`alone`): no call could be
-    /// right. Each other face (one nobody named) is called by its nearest named face too: at a threshold that call
-    /// would wrongly say it's a named person. (Photos may have left some faces of a named person unnamed: those count
-    /// as wrong here, so the others' rate is at most what it says.)
+    /// People are told apart by Photos' id for them: two of one name are two people. Each named face is called by the
+    /// nearest of the other named faces (leave-one-out): it's called that face's person, with their similarity. A
+    /// face whose person has no other face is left out (`alone`): no call could be right. Each other face (one nobody
+    /// named) is called by its nearest named face too: at a threshold that call would wrongly say it's a named person.
+    /// (Photos may have left some faces of a named person unnamed: those count as wrong here, so the others' rate is at
+    /// most what it says.)
     public struct Measure {
         public struct Call: Equatable, Sendable {
             /// The nearest other face is the same person's.
@@ -108,18 +109,20 @@ public enum Faces {
         /// Named faces left out: their person has no other face.
         public let alone: Int
 
-        public init(named: [(person: String, embedding: [Float])], others: [[Float]],
+        public init(named: [(person: PhotosLibrary.Person, embedding: [Float])], others: [[Float]],
                     similarity: ([Float], [Float]) -> Float) {
             var faces: [String: Int] = [:]
-            for face in named { faces[face.person, default: 0] += 1 }
+            for face in named { faces[face.person.uuid, default: 0] += 1 }
             var calls: [Call] = []
-            for (index, face) in named.enumerated() where faces[face.person, default: 0] > 1 {
-                var best: (person: String, similarity: Float)?
+            for (index, face) in named.enumerated() where faces[face.person.uuid, default: 0] > 1 {
+                var best: (person: PhotosLibrary.Person, similarity: Float)?
                 for (other, candidate) in named.enumerated() where other != index {
                     let alike = similarity(face.embedding, candidate.embedding)
                     if best.map({ alike > $0.similarity }) ?? true { best = (candidate.person, alike) }
                 }
-                if let best { calls.append(Call(right: best.person == face.person, similarity: best.similarity)) }
+                if let best {
+                    calls.append(Call(right: best.person.uuid == face.person.uuid, similarity: best.similarity))
+                }
             }
             self.calls = calls
             self.others = others.compactMap { face in named.map { similarity(face, $0.embedding) }.max() }
@@ -175,13 +178,14 @@ extension PhotosLibrary {
     /// (each within 0.005), and on 264 random faces of a real library's previews, portrait photos turned by their
     /// orientation among them (252 had one of Vision's within a quarter of the face's size).
     public struct FaceBox: Sendable, Equatable {
-        /// The name someone gave them in Photos; nil for a face nobody named.
-        public let person: String?
+        /// Who it is, when someone named them in Photos: Photos' id for them and their name (two people can share a
+        /// name, and stay two). Nil for a face nobody named.
+        public let person: Person?
         public let x: Double
         public let y: Double
         public let size: Double
 
-        public init(person: String?, x: Double, y: Double, size: Double) {
+        public init(person: Person?, x: Double, y: Double, size: Double) {
             (self.person, self.x, self.y, self.size) = (person, x, y, size)
         }
     }
@@ -196,10 +200,12 @@ extension PhotosLibrary {
         var current: (uuid: String, original: String, edited: Bool, faces: [FaceBox])?
         // ZDETECTIONTYPE 1 is a person's face (Photos groups the others, 3 and 4 in a real library, apart from people);
         // a size of 0 is a body whose face wasn't seen.
-        // A video's faces are its asset's (ZKIND 1), or on a stretch of it (ZASSETFORTEMPORALDETECTEDFACES).
+        // A video's faces are its asset's (ZKIND 1), or on a stretch of it (ZASSETFORTEMPORALDETECTEDFACES). A person
+        // is told apart by ZPERSONUUID (by its row, should one have none), never by name.
         try database.query("""
             SELECT a.ZUUID, a.ZKIND, a.ZTRASHEDSTATE, a.ZDIRECTORY, a.ZFILENAME, a.ZADJUSTMENTSSTATE,
-                   f.ZASSETFORTEMPORALDETECTEDFACES IS NOT NULL, f.ZCENTERX, f.ZCENTERY, f.ZSIZE, p.ZFULLNAME
+                   f.ZASSETFORTEMPORALDETECTEDFACES IS NOT NULL, f.ZCENTERX, f.ZCENTERY, f.ZSIZE, p.ZFULLNAME,
+                   COALESCE(p.ZPERSONUUID, 'Z_PK ' || p.Z_PK)
             FROM ZDETECTEDFACE f
             LEFT JOIN ZASSET a ON a.Z_PK = f.ZASSETFORFACE
             LEFT JOIN ZPERSON p ON p.Z_PK = f.ZPERSONFORFACE
@@ -218,8 +224,8 @@ extension PhotosLibrary {
                 left["in the trash", default: 0] += 1
                 return
             }
-            let name = row.text(10)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let face = FaceBox(person: name.flatMap { $0.isEmpty ? nil : $0 },
+            let name = row.text(10)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let face = FaceBox(person: name.isEmpty ? nil : row.text(11).map { Person(uuid: $0, name: name) },
                                x: row.double(7), y: row.double(8), size: row.double(9))
             if current?.uuid == uuid {
                 current?.faces.append(face)

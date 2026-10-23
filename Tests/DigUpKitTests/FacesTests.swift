@@ -38,10 +38,12 @@ import CoreGraphics
     /// Two people of two faces each, one person of one face, and two faces nobody named: each named face is called by
     /// the nearest of the others, each unnamed one by the nearest named face.
     @Test func eachFaceIsCalledByItsNearestNamedFace() {
-        let named: [(person: String, embedding: [Float])] = [
-            ("A", [1, 0]), ("A", [0.6, 0.8]),     // nearer B's faces (0.91 at most) than A's other (0.6): called B
-            ("B", [0, 1]), ("B", [0.2, 0.9]),
-            ("C", [-1, 0]),                       // no other face of C's: left out
+        let (a, b, c) = (PhotosLibrary.Person(uuid: "A", name: "A"), PhotosLibrary.Person(uuid: "B", name: "B"),
+                         PhotosLibrary.Person(uuid: "C", name: "C"))
+        let named: [(person: PhotosLibrary.Person, embedding: [Float])] = [
+            (a, [1, 0]), (a, [0.6, 0.8]),     // nearer B's faces (0.91 at most) than A's other (0.6): called B
+            (b, [0, 1]), (b, [0.2, 0.9]),
+            (c, [-1, 0]),                     // no other face of C's: left out
         ]
         let measure = Faces.Measure(named: named, others: [[0.7, 0.7], [-0.5, -0.5]], similarity: Faces.cosine)
         #expect(measure.alone == 1)
@@ -53,6 +55,22 @@ import CoreGraphics
         // At 0.8, only the face nearly on A's [0.6, 0.8] (0.99) is still called someone.
         #expect(measure.rates(at: 0.8).others == 0.5)
         #expect(measure.rates(at: 0.995) == Faces.Measure.Rates(right: 0, wrong: 0, uncalled: 1, others: 0))
+    }
+
+    /// Two people Photos keeps apart though they share a name are two people: the one with a single face is left out,
+    /// and a face whose nearest is the other one's is called wrong.
+    @Test func peopleOfOneNameStayTwoPeople() {
+        let sam = PhotosLibrary.Person(uuid: "S1", name: "Sam")
+        let otherSam = PhotosLibrary.Person(uuid: "S2", name: "Sam")
+        let ana = PhotosLibrary.Person(uuid: "A", name: "Ana")
+        let named: [(person: PhotosLibrary.Person, embedding: [Float])] = [
+            (sam, [1, 0]),                                  // no other face of this Sam's: left out
+            (otherSam, [0.9, 0.1]), (otherSam, [0, 1]),     // the first is nearest the other Sam's [1, 0]: wrong
+            (ana, [-1, 0]), (ana, [-0.9, -0.1]),
+        ]
+        let measure = Faces.Measure(named: named, others: [], similarity: Faces.cosine)
+        #expect(measure.alone == 1)
+        #expect(measure.calls.map(\.right) == [false, true, true, true])
     }
 
     #if canImport(Vision) && canImport(CoreML)

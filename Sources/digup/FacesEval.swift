@@ -56,10 +56,27 @@ func facesEval(_ args: Arguments) throws {
     print("photos read: \(number(pictures)) of \(number(photos.count)) (the rest have no picture on this Mac, or none "
           + "that could be read: \(number(unread)) faces); reading one and Vision's landmarks on its faces: "
           + String(format: "%.1f ms", reading * 1000 / Double(max(pictures, 1))))
-    let people = Dictionary(grouping: photos.flatMap(\.faces).compactMap(\.person), by: { $0 }).mapValues(\.count)
+    let people = namedPeople(in: photos)
     for (engine, run) in zip(engines, results) {
         print("")
         report(engine, run, people: people, others: faces - named)
+    }
+}
+
+/// The people named in the library's photos, told apart by Photos' id for them, most faces first: what a report calls
+/// each (their name, and where people share it, a number after it by the same order: "Sam #2"; never the id), their
+/// id, and their faces.
+private func namedPeople(in photos: [PhotosLibrary.PhotoFaces]) -> [(label: String, uuid: String, faces: Int)] {
+    let people = Dictionary(grouping: photos.flatMap(\.faces).compactMap(\.person), by: \.uuid).values
+        .map { (person: $0[0], faces: $0.count) }
+        .sorted { $0.faces != $1.faces ? $0.faces > $1.faces : $0.person.uuid < $1.person.uuid }
+    let names = Dictionary(grouping: people, by: \.person.name).mapValues(\.count)
+    var numbered: [String: Int] = [:]
+    return people.map { person in
+        let name = person.person.name
+        guard names[name, default: 0] > 1 else { return (name, person.person.uuid, person.faces) }
+        numbered[name, default: 0] += 1
+        return ("\(name) #\(numbered[name, default: 0])", person.person.uuid, person.faces)
     }
 }
 
@@ -95,9 +112,9 @@ private func faceRecognizers(_ args: Arguments) throws -> [any FaceRecognizer] {
 
 /// One engine's embeddings and time over a library's faces.
 private struct EngineRun {
-    var named: [(person: String, embedding: [Float])] = []
+    var named: [(person: PhotosLibrary.Person, embedding: [Float])] = []
     var others: [[Float]] = []
-    /// Faces read, by person (nil: the others).
+    /// Faces read, by Photos' id for their person (nil: the others).
     var read: [String?: Int] = [:]
     var seconds = 0.0
     var faces = 0
@@ -105,9 +122,9 @@ private struct EngineRun {
     /// device).
     var first: Double?
 
-    mutating func add(_ embedding: [Float]?, person: String?) {
+    mutating func add(_ embedding: [Float]?, person: PhotosLibrary.Person?) {
         guard let embedding else { return }
-        read[person, default: 0] += 1
+        read[person?.uuid, default: 0] += 1
         if let person { named.append((person, embedding)) } else { others.append(embedding) }
     }
 
@@ -125,11 +142,11 @@ private struct EngineRun {
 /// lower similarities than SFace's and Vision's).
 private let faceThresholds = stride(from: 0.05, through: 0.951, by: 0.05).map { Float($0) }
 
-private func report(_ engine: any FaceRecognizer, _ run: EngineRun, people: [String: Int], others: Int) {
+private func report(_ engine: any FaceRecognizer, _ run: EngineRun, people: [(label: String, uuid: String, faces: Int)],
+                    others: Int) {
     print(engine.name)
-    print("  faces read: " + people.sorted { $0.value > $1.value }.map { name, faces in
-        "\(name) \(number(run.read[name] ?? 0)) of \(number(faces))"
-    }.joined(separator: " · ") + " · not named \(number(run.read[nil] ?? 0)) of \(number(others))")
+    print("  faces read: " + people.map { "\($0.label) \(number(run.read[$0.uuid] ?? 0)) of \(number($0.faces))" }
+        .joined(separator: " · ") + " · not named \(number(run.read[nil] ?? 0)) of \(number(others))")
     print(String(format: "  %.1f ms a face (the first picture's: %.0f ms a face)",
                  run.seconds * 1000 / Double(max(run.faces, 1)), (run.first ?? 0) * 1000))
     let measure = Faces.Measure(named: run.named, others: run.others, similarity: engine.similarity)
