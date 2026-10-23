@@ -57,10 +57,11 @@ import SwiftUI
 ///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot
 ///     -debugMap YES           with -debugWindow search: the map shows above the results
 ///     -debugArea "lat1,lon1,lat2,lon2"   with -debugWindow search: results kept to that box of the map
-///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup|sensitive|length:15..60|shape:16:9"   with
-///                             -debugWindow search: these filters on (a Photos library's people and albums, by name;
-///                             Photos' favorites; DigUp's own; the Sensitive filter; a Length, in seconds as `digup
-///                             search --length` takes it; a Shape, as `--shape`)
+///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup|sensitive|length:15..60|shape:16:9|matchBy:text"
+///                             with -debugWindow search: these filters on (a Photos library's people and albums, by
+///                             name; Photos' favorites; DigUp's own; the Sensitive filter; a Length, in seconds as
+///                             `digup search --length` takes it; a Shape, as `--shape`; Match by, as `--match-by`
+///                             takes it: matchBy:spoken,text)
 ///     -debugSaved "<name>"    with -debugWindow search: then open the saved search of that name, as the Saved menu
 ///                             would
 ///     -debugSavedMenu YES     with -debugWindow search: after the snapshot, log the Saved menu's items and draw them
@@ -406,6 +407,8 @@ enum DebugHooks {
                                 search.set(.length(length), on: true)
                             } else if kind == "shape", let shape = SearchFilter.Shape(String(name)) {
                                 search.set(.shape(shape), on: true)
+                            } else if kind == "matchBy", let matchBy = SearchFilter.MatchBy(String(name)) {
+                                search.set(.matchBy(matchBy), on: true)
                             } else {
                                 log("debug: no filter \"\(part)\"")
                             }
@@ -479,7 +482,10 @@ enum DebugHooks {
                 switch item {
                 case .toggle(let title, let token, let enabled):
                     (search.has(token) ? "✓ " : "") + title + (enabled ? "" : " (disabled)")
+                case .part(let title, let part, let enabled):
+                    (search.matchBy?.contains(part) == true ? "✓ " : "") + title + (enabled ? "" : " (disabled)")
                 case .submenu(let title, _, let items): "\(title) ▸ [\(described(items))]"
+                case .section(let title, _, let items): "— \(title): [\(described(items))]"
                 case .note(let text): "\(text) (disabled)"
                 case .divider: "—"
                 }
@@ -596,7 +602,7 @@ enum DebugHooks {
             return report("still \(number) of \(filmstrip.count)")
         }
         Task {
-            let moments = await app.engine.moments(of: row.id, matching: row.query)
+            let moments = await app.engine.moments(of: row.id, matching: row.query, matchBy: row.matchBy)
             guard moments.indices.contains(number - 1) else {
                 log("debug: \(row.name) has \(moments.count) moments, no moment \(number)")
                 return done()
@@ -964,13 +970,13 @@ private struct SavedMenuDrawing: View {
 }
 
 /// The Filters menu's items as a menu shows them, for `-debugFiltersMenu` (an open menu can't be drawn offscreen): a
-/// check by each filter that's on, a submenu's title with ▸ and its items under it, indented, what can't be chosen
-/// dimmed.
+/// check by each filter that's on, a submenu's title with ▸ and its items under it, indented, a section's heading over
+/// its items, what can't be chosen dimmed.
 private struct FiltersMenuDrawing: View {
     let items: [FilterMenuItem]
     let search: SearchModel
 
-    /// Each item with how deep in submenus it is, a submenu's items right after it.
+    /// Each item with how deep in submenus it is, a submenu's items right after it, a section's after its heading.
     private struct Line: Identifiable {
         let id: String
         let depth: Int
@@ -980,8 +986,11 @@ private struct FiltersMenuDrawing: View {
     private static func lines(_ items: [FilterMenuItem], depth: Int = 0, under parent: String = "") -> [Line] {
         items.flatMap { item -> [Line] in
             let line = Line(id: parent + "/" + item.id, depth: depth, item: item)
-            guard case .submenu(_, _, let inner) = item else { return [line] }
-            return [line] + lines(inner, depth: depth + 1, under: line.id)
+            switch item {
+            case .submenu(_, _, let inner): return [line] + lines(inner, depth: depth + 1, under: line.id)
+            case .section(_, _, let inner): return [line] + lines(inner, depth: depth, under: line.id)
+            default: return [line]
+            }
         }
     }
 
@@ -992,7 +1001,20 @@ private struct FiltersMenuDrawing: View {
                 switch line.item {
                 case .toggle(let title, let token, let enabled):
                     row(title, check: search.has(token), enabled: enabled).padding(.leading, indent)
+                case .part(let title, let part, let enabled):
+                    row(title, check: search.matchBy?.contains(part) == true, enabled: enabled)
+                        .padding(.leading, indent)
                 case .submenu(let title, _, _): row(title, submenu: true, enabled: true).padding(.leading, indent)
+                case .section(let title, _, _):
+                    // As a menu's section: a line above it, and its heading small and dimmed.
+                    VStack(alignment: .leading, spacing: 0) {
+                        Divider().padding(.vertical, 5).padding(.leading, 10 + indent).padding(.trailing, 10)
+                        Text(title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 10 + indent)
+                            .frame(height: 20)
+                    }
                 case .note(let text): row(text, enabled: false).padding(.leading, indent)
                 case .divider: Divider().padding(.vertical, 5).padding(.leading, 10 + indent).padding(.trailing, 10)
                 }

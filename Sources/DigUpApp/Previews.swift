@@ -13,9 +13,9 @@ final class Previews {
     /// The text of a document's passage, a stretch of code or a stretch of what's said (`Engine.text(ofSegment:code:)`),
     /// set when the app starts.
     var passage: (Int64, Bool) async -> String? = { _, _ in nil }
-    /// Every moment of a recording that matches a query, by path and query (`Engine.moments(of:matching:)`), set when
-    /// the app starts. Not cached: the preview asks once a result.
-    var moments: (String, String) async -> [Moment] = { _, _ in [] }
+    /// Every moment of a recording that matches a query, by path, query and the parts the search kept to
+    /// (`Engine.moments(of:matching:matchBy:)`), set when the app starts. Not cached: the preview asks once a result.
+    var moments: (String, String, SearchFilter.MatchBy?) async -> [Moment] = { _, _, _ in [] }
 
     init() {
         cache.totalCostLimit = 48 << 20
@@ -253,7 +253,7 @@ struct PreviewPane: View {
     private func find() async {
         guard wantsMoments else { return }
         let key = foundKey
-        let moments = row.momentCount > 0 ? await Previews.shared.moments(row.id, row.query) : []
+        let moments = row.momentCount > 0 ? await Previews.shared.moments(row.id, row.query, row.matchBy) : []
         let filmstrip = showsMoments && row.photos?.reading == .stills
             ? PhotosLibrary.filmstrip(startingAt: row.url.path) : []
         guard !Task.isCancelled else { return }

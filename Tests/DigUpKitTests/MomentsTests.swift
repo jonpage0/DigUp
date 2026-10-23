@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import DigUpKit
 
-/// Every matching moment of a recording (`Searcher.moments(of:text:queryVector:zGate:)`): its frames, windows of sound
-/// and stretches of speech that stand out for a query, and its stretches of speech that hold the query's words,
+/// Every matching moment of a recording (`Searcher.moments(of:text:queryVector:filter:zGate:)`): its frames, windows of
+/// sound and stretches of speech that stand out for a query, and its stretches of speech that hold the query's words,
 /// neighbours merged.
 @Suite final class MomentsTests {
     let folder: URL = {
