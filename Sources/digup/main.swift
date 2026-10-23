@@ -13,8 +13,8 @@ let usage = """
 
       digup estimate <folder>... [--json]     what would be indexed, and how long the first pass takes
       digup index <folder>... [--limit N]     sync the index with these folders, embed what's new, rate the pictures
-                                              read before pictures were rated, then the rest of long PDFs and
-                                              documents
+                                              read before pictures were rated, read the faces of pictures read
+                                              before faces were, then the rest of long PDFs and documents
       digup search [<words>...] [--kind K,K] [--with NAME]... [--album TITLE]... [--favorites] [--origin O]...
                    [--camera NAME]... [--shot-on NAME]... [--within LAT,LON,LAT,LON] [--sensitive] [--length S..S]
                    [--shape SHAPE] [-n 10] [--json]
@@ -43,14 +43,21 @@ let usage = """
       digup mcp [--defaults-suite NAME]       DigUp for AI apps: an MCP server on stdin and stdout (see MCPServer),
                                               answering only as far as Settings → AI apps allows (in the app's
                                               settings, or the suite a dev run of the app was started with)
+      digup faces-eval --library <path> [--catalog <Photos.sqlite>] [--engine vision|sface] [--model <path>]...
+                                              how well face recognizers know the people named in a Photos
+                                              library, from the faces Photos found (macOS; see FacesEval):
+                                              --catalog reads a copy of its catalog, --model is a Core ML
+                                              engine's model (repeatable: one engine each; default: SFace, by
+                                              scripts/face-model.py)
 
     Options:
       --index DIR          index folder (default: DigUp's Application Support folder; see `digup status`)
       --code               estimate, index or show the code index of these folders (code.sqlite in the index
                            folder): source files, their repos' docs and notebooks, minus what git ignores
       --kind K,K           screenshot, image, pdf, doc, audio, video
-      --with NAME          only pictures Photos says NAME is in (repeatable: all of them; a name several
-                           people share in Photos means any of them)
+      --with NAME          only pictures Photos says NAME is in, and pictures outside Photos with a face that
+                           matches theirs (repeatable: all of them; a name several people share in Photos means any
+                           of them)
       --album TITLE        only pictures in this Photos album (repeatable: any of them)
       --favorites          only Photos' favorites
       --origin O           only Photos' pictures and videos that came into the library this way: camera,
@@ -104,17 +111,20 @@ struct Arguments {
     static let valued: Set<String> = ["--index", "--limit", "--kind", "-n", "--zgate", "--word-weight", "--new-limit",
                                       "--linger", "--shot-tokens", "--code-stretch", "--encoder-idle", "--to",
                                       "--memory-limit", "--time-limit", "--tries", "--when-quiet", "--within",
-                                      "--defaults-suite", "--length", "--shape"]
+                                      "--defaults-suite", "--length", "--shape", "--library", "--catalog", "--engine"]
     static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude", "--with",
                                         "--album", "--origin", "--camera", "--shot-on"]
 
-    init(_ raw: ArraySlice<String>) throws {
+    /// `valued` and `repeated` name the options that take a value in every command; `alsoRepeated`, more in this one
+    /// (`--model` is faces-eval's models, and a switch of `digup speed`).
+    init(_ raw: ArraySlice<String>, alsoRepeated: Set<String>) throws {
         var index = raw.startIndex
         while index < raw.endIndex {
             let argument = raw[index]
-            if Self.valued.contains(argument) || Self.repeated.contains(argument) {
+            let repeated = Self.repeated.contains(argument) || alsoRepeated.contains(argument)
+            if repeated || Self.valued.contains(argument) {
                 guard index + 1 < raw.endIndex else { throw CLIError("\(argument) needs a value") }
-                if Self.repeated.contains(argument) {
+                if repeated {
                     lists[argument, default: []].append(raw[index + 1])
                 } else {
                     values[argument] = raw[index + 1]
@@ -335,6 +345,18 @@ func embedderSource() -> String? {
     ProcessInfo.processInfo.environment["DIGUP_WORKER_DIR"] == nil ? LlamaEmbedder.modelInfo.vectorSource : nil
 }
 
+/// DigUp's models folder, as the app gives it to its helpers: $DIGUP_MODELS, else Application Support's.
+func modelsFolder() -> URL {
+    ProcessInfo.processInfo.environment["DIGUP_MODELS"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+        ?? ModelFiles.installed
+}
+
+/// What reads the faces in pictures for the main index (`Faces.reader`): none where there's no recognizer, and then no
+/// faces are read.
+func faceReader() -> (any FaceReader)? {
+    Faces.reader(models: modelsFolder())
+}
+
 func estimate(_ args: Arguments) throws {
     guard !args.positional.isEmpty else { throw CLIError("which folders? e.g. digup estimate ~/Documents") }
     let options = args.options
@@ -436,7 +458,7 @@ func index(_ args: Arguments) throws {
     let store = try args.store()
     if args.flags.contains("--reindex") { try store.resetAll() }
     let indexer = try Indexer(store: store, options: args.options, rater: args.code ? nil : sensitiveRater(),
-                              makeEmbedder: {
+                              faces: args.code ? nil : faceReader(), makeEmbedder: {
         try makeEmbedder(textOnly: false, log: store.directory.appendingPathComponent("worker.log"))
     })
     indexer.embedderSource = embedderSource()
@@ -468,7 +490,8 @@ func index(_ args: Arguments) throws {
     } else {
         print("done in \(duration(Date().timeIntervalSince(started))): " + statesLine(states))
     }
-    // Pictures read before they were rated, once (not after a --limit run: files are still pending).
+    // Pictures read before they were rated, then the faces of pictures read before faces were, once each (not after a
+    // --limit run: files are still pending).
     if limit == nil {
         started = Date()
         let rated = try indexer.ratePictures(onStep: { step in
@@ -477,6 +500,14 @@ func index(_ args: Arguments) throws {
                   + String(format: "%5.2fs  ", step.seconds) + name + "  (\(step.rated) rated)")
         })
         if rated > 0 { print("rated \(rated) pictures read before in \(duration(Date().timeIntervalSince(started)))") }
+        started = Date()
+        let read = try indexer.readFaces(onStep: { step in
+            let name = (step.path as NSString).lastPathComponent
+            print("[faces \(lpad("\(step.done)", 5))/\(step.total)] \(pad(step.kind.rawValue, 10)) "
+                  + String(format: "%5.2fs  ", step.seconds) + name
+                  + "  (" + (step.faces.map { "\($0) \($0 == 1 ? "face" : "faces")" } ?? "away: later") + ")")
+        })
+        if read > 0 { print("faces of \(read) pictures read before in \(duration(Date().timeIntervalSince(started)))") }
     }
     // The rest of long files, as the app does once nothing is pending (not after a --limit run: things still are).
     guard limit == nil, try store.unfinishedCount().files > 0 else { return }
@@ -612,6 +643,10 @@ func search(_ args: Arguments) throws {
                 + (photos.reading.flatMap { $0.isStandIn ? " · in iCloud, read from Photos' \($0.rawValue)" : nil } ?? "")
         } ?? tilde((hit.path as NSString).deletingLastPathComponent)))
         if let taken = locations[hit.path] { print("      " + whereTaken(taken)) }
+        for face in hit.faces {
+            print("      \(face.name), by their face (" + String(format: "%.2f", face.similarity)
+                  + (face.confirmed ? ", you said so" : "") + ")")
+        }
         if let excerpt = hit.excerpt, !excerpt.isEmpty { print("      “\(excerpt.prefix(160))”") }
     }
     print(String(format: "(%d vectors · query encoder %.2f s incl. start-up · search %.0f ms)", searcher.vectorCount,
@@ -637,6 +672,12 @@ func status(_ args: Arguments) throws {
     if counts.unfinished > 0 {
         print("long files still being read: \(number(counts.unfinished)) (\(number(counts.left)) pages and chunks left)")
     }
+    let faces = try store.faceCounts()
+    if let recognizer = faces.recognizer {
+        print("faces: \(number(faces.named)) named in Photos; \(number(faces.outside)) found in "
+              + "\(number(faces.outsidePictures)) pictures outside Photos, \(number(faces.matchedPictures)) of them "
+              + "showing someone named there, \(number(faces.confirmed)) you said who they are (\(recognizer))")
+    }
     if let fingerprint = try store.meta("fingerprint") { print("built with: \(fingerprint)") }
     print("this digup: llama.cpp \(LlamaEmbedder.buildTag), vectors \(LlamaEmbedder.vectorVersion)")
     if !args.code {
@@ -656,8 +697,10 @@ func indexService(_ args: Arguments) throws -> Int32 {
     }
     func part(_ file: String, options: IndexOptions, roots: [URL]) throws -> IndexService.Part {
         let store = try IndexStore(directory: args.indexFolder, file: file)
-        // The main index's pictures are rated as they're read, and the ones read before once (`ratePictures`).
+        // The main index's pictures are rated as they're read, and the ones read before once (`ratePictures`); it
+        // reads faces in pictures too, where there's a recognizer. Code has neither.
         let indexer = try Indexer(store: store, options: options, rater: options.code ? nil : sensitiveRater(),
+                                  faces: options.code ? nil : faceReader(),
                                   makeEmbedder: { try model.embedder() })
         indexer.costsFolder = args.indexFolder   // what indexing costs here, for later estimates
         // A new app version may bring a new model: the index starts over by itself (keyword search on names goes on).
@@ -940,7 +983,7 @@ do {
         print(usage)
         exit(0)
     }
-    let args = try Arguments(raw.dropFirst())
+    let args = try Arguments(raw.dropFirst(), alsoRepeated: command == "faces-eval" ? ["--model"] : [])
     if ["index-service", "worker", "search-service", "download-model"].contains(command)
         || command == "estimate" && args.flags.contains("--json") {
         ParentWatch.start()   // an app's helper goes when the app does
@@ -977,6 +1020,7 @@ do {
     case "search-service": exit(try searchService(args))
     case "download-model": exit(try downloadModel(args))
     case "mcp": exit(mcpServer(args))
+    case "faces-eval": try facesEval(args)
     default:
         print(usage)
         exit(2)

@@ -132,7 +132,8 @@ import WinSDK
     @Test func theForksTablesAreAddedOnceAndTheSchemaStaysUpstreams() throws {
         let fork: Set = ["locations", "photos_people", "photos_person_files", "photos_person_files_file",
                          "photos_albums", "photos_album_files", "photos_album_files_file", "photos_assets",
-                         "sensitive_scores", "media_dimensions"]
+                         "sensitive_scores", "media_dimensions", "faces", "faces_segment", "faces_person",
+                         "face_matches"]
         func check(_ store: IndexStore) throws {
             var names = Set<String>(), version: Int64 = 0
             try store.db.query("SELECT name FROM sqlite_master") { names.insert($0.text(0) ?? "") }
@@ -147,7 +148,7 @@ import WinSDK
         try upstream.db.execute("""
             DROP TABLE locations; DROP TABLE photos_person_files; DROP TABLE photos_people;
             DROP TABLE photos_album_files; DROP TABLE photos_albums; DROP TABLE photos_assets;
-            DROP TABLE sensitive_scores; DROP TABLE media_dimensions;
+            DROP TABLE sensitive_scores; DROP TABLE media_dimensions; DROP TABLE face_matches; DROP TABLE faces;
             DELETE FROM meta WHERE key = 'fork_photos_facts';
             """)
         let reopened = try IndexStore(directory: folder)
@@ -158,6 +159,38 @@ import WinSDK
         let again = try IndexStore(directory: folder)
         try check(again)
         #expect(try again.locations(of: ["/a/x.jpg"]).count == 1)
+    }
+
+    /// An index the fork stepped to 3 (sensitive_scores: the installed app's) or to 4 (media_dimensions) gets the faces
+    /// tables at step 5, keeping what it had; and what the faces step makes is what an index made now has.
+    @Test func indexesAtForkSteps3And4GetTheFacesTables() throws {
+        func schema(_ store: IndexStore, of tables: [String]) throws -> [String] {
+            var sql: [String] = []
+            let names = tables.map { "'\($0)'" }.joined(separator: ",")
+            try store.db.query("SELECT sql FROM sqlite_master WHERE name IN (\(names)) ORDER BY name") {
+                sql.append($0.text(0) ?? "")
+            }
+            return sql
+        }
+        let faces = ["faces", "faces_segment", "faces_person", "face_matches"]
+        let made = try schema(try IndexStore(directory: folder.appendingPathComponent("now")), of: faces)
+        #expect(made.count == 4 && made.contains { $0.contains("confirmed INTEGER NOT NULL DEFAULT 0") })
+        for step in [3, 4] {
+            let index = folder.appendingPathComponent("step\(step)")
+            let first = try IndexStore(directory: index)
+            let id = try first.insert(file("/a/x\(step).jpg", inode: UInt64(step)))
+            try first.setLocation(try #require(Location(latitude: 25.79, longitude: -80.13, source: .exif)), of: id)
+            try first.db.execute("""
+                DROP TABLE face_matches; DROP TABLE faces;\(step == 3 ? " DROP TABLE media_dimensions;" : "")
+                UPDATE meta SET value = '\(step)' WHERE key = 'fork_photos_facts';
+                """)
+            #expect(try schema(first, of: faces).isEmpty)
+            let stepped = try IndexStore(directory: index)
+            #expect(try stepped.meta("fork_photos_facts") == "5" && IndexStore.forkFactsVersion == 5)
+            #expect(try schema(stepped, of: faces) == made)
+            #expect(try schema(stepped, of: ["media_dimensions", "sensitive_scores"]).count == 2)
+            #expect(try stepped.locations(of: ["/a/x\(step).jpg"]).count == 1)
+        }
     }
 
     #if canImport(ImageIO)

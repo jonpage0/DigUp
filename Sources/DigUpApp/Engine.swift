@@ -640,6 +640,10 @@ nonisolated final class Engine: @unchecked Sendable {
             }
             let states = (event["states"] as? [String: Int] ?? [:]).sorted { $0.key < $1.key }
                 .map { "\($0.value) \($0.key)" }.joined(separator: " · ")
+            if event["faces"] as? Bool == true {
+                log("index: the faces of \(int("pictures")) pictures read before, in \(int("ms")) ms")
+                return
+            }
             let what = event["rest"] as? Bool == true ? "the rest of long files"
                 : event["new"] as? Bool == true ? "new files" : "backfill"
             log("index: \(what): \(states) in \(int("ms")) ms")
@@ -904,6 +908,46 @@ nonisolated final class Engine: @unchecked Sendable {
                 continuation.resume(returning: PhotosChoices(people: (try? searchStore?.photosPeople()) ?? [],
                                                              albums: (try? searchStore?.photosAlbums()) ?? [],
                                                              cameras: (try? searchStore?.photosCameras()) ?? []))
+            }
+        }
+    }
+
+    /// What the index knows of faces (Settings → Photos): the recognizer, and the pictures outside Photos with someone.
+    func faceCounts() async -> IndexStore.FaceCounts? {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: (try? searchStore?.faceCounts()) ?? nil)
+            }
+        }
+    }
+
+    /// The faces found in the picture at `path`, outside Photos, and who each is taken for (the search window's preview,
+    /// where you can say who they are).
+    func pictureFaces(of path: String) async -> [IndexStore.PictureFace] {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: (try? searchStore?.pictureFaces(ofPath: path)) ?? [])
+            }
+        }
+    }
+
+    /// `face_matches` made again with the corrections just saved (`FaceCorrections`), here rather than in the helper,
+    /// so the next search has them at once (it's quick: one multiplication of the faces' prints). Should the helper hold
+    /// the index too long for it, the helper makes them at the end of its next sync instead: the corrections file's
+    /// change is part of what it checks (`IndexStore.rebuildFaceMatchesIfChanged`).
+    func rebuildFaceMatches() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            searchQueue.async { [self] in
+                defer { continuation.resume() }
+                guard let searchStore else { return }
+                let started = Date()
+                do {
+                    let matched = try searchStore.rebuildFaceMatches()
+                    log("faces: matches made again with the corrections, \(matched) faces in \(ms(since: started))")
+                } catch {
+                    log("faces: matches not made again (the helper will): \(error)")
+                }
+                returnFreedMemory()
             }
         }
     }

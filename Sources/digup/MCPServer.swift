@@ -467,6 +467,10 @@ final class MCPServer {
                 guard !ids.isEmpty else { throw InputError("No one called “\(name)” in Photos' People.") }
                 return ids
             }
+            // Pictures outside Photos are kept by a face matched only with the named faces, and the corrections, of
+            // files the AI app may see: a face in an item kept from it never decides whether a picture it sees is
+            // someone's.
+            filter.faceMatches = try store.faceMatches(referencesKeptBy: allowed)
         }
         if let albums {
             let known = try store.photosAlbums(keptBy: allowed)
@@ -563,7 +567,7 @@ final class MCPServer {
             "why": MatchDescription.reason(hit.segment, kind: hit.kind, loc: hit.loc, locEnd: hit.locEnd,
                                            meaning: (hit.z ?? 0) >= 2, words: hit.keywordRank != nil,
                                            listed: hit.score == 0 && hit.z == nil && hit.keywordRank == nil,
-                                           reading: hit.photos?.reading),
+                                           reading: hit.photos?.reading, faces: hit.faces.map(\.name)),
             "modified": Date(timeIntervalSince1970: hit.modified).formatted(.iso8601),
         ]
         if let matched = whereMatched(hit) { fields["where"] = matched }

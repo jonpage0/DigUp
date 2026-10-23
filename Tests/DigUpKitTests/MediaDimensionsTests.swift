@@ -61,13 +61,16 @@ import Testing
         let first = try IndexStore(directory: index)
         let id = try first.insert(Candidate(path: "/files/a.jpg", kind: .image, size: 1, mtime: 1, inode: 1, device: 1))
         try first.setLocation(try #require(Location(latitude: 25.79, longitude: -80.13, source: .exif)), of: id)
-        try first.db.execute("DROP TABLE media_dimensions; UPDATE meta SET value = '3' WHERE key = 'fork_photos_facts';")
+        try first.db.execute("""
+            DROP TABLE media_dimensions; DROP TABLE face_matches; DROP TABLE faces;
+            UPDATE meta SET value = '3' WHERE key = 'fork_photos_facts';
+            """)
         let store = try IndexStore(directory: index)
         var columns: [String] = [], version: Int64 = 0
         try store.db.query("SELECT name FROM pragma_table_info('media_dimensions')") { columns.append($0.text(0) ?? "") }
         try store.db.query("PRAGMA user_version") { version = $0.int(0) }
         #expect(columns == ["file", "width", "height", "duration", "source"])
-        #expect(try store.meta("fork_photos_facts") == "4" && version == 5)
+        #expect(try store.meta("fork_photos_facts") == "\(IndexStore.forkFactsVersion)" && version == 5)
         #expect(try store.locations(of: ["/files/a.jpg"]).count == 1)
     }
 

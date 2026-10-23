@@ -228,6 +228,23 @@ joins), and you can take one off or add one that only took older pictures. Each 
 search field (its × takes it off, as ⌫ does in an empty field), and typing a person's or an album's name offers it as
 a filter (Tab takes it). With nothing typed, the window lists everything the filters keep, newest first.
 
+People also finds the people you've named in Photos in your other pictures (Downloads, the Desktop, anywhere DigUp
+searches), by their faces. DigUp keeps the faces Photos named, read from Photos' own boxes, and finds the faces in each
+picture outside Photos as it reads it; one close enough to someone's keeps the picture for them, and its result says
+"Tati, by their face", with the face outlined in the preview. It's a guess (on a real library about 97 in 100 were right
+at the level DigUp uses), and in Photos only Photos' names count. The faces are read with Vision's faceprints, which
+Apple doesn't publish (DigUp looks the request up by name first, so a macOS without it gets no faces, not a crash), or,
+where they're missing, with the SFace model (OpenCV Zoo, Apache-2.0) once `scripts/face-model.py convert sface` has put
+it in the models folder; with neither, no faces are read. A macOS update reads them all again, on this Mac. Settings →
+Photos says whether faces are on, and how many pictures outside Photos show someone you've named.
+
+When DigUp guesses wrong, tell it: in the search window's preview, Not Tati takes a picture off her list, and clicking a
+face (each one found is outlined) offers This is… with everyone named in Photos. Saying who a face is keeps it as them
+however unlike it looks, and teaches DigUp, which then finds them by that face in other pictures too; saying who it
+isn't sends it to whoever's next nearest, or no one. Only faces outside Photos: in Photos, name faces in Photos. What
+you say is kept in `face-corrections.json` beside the index (a picture by a bookmark that follows it when it moves, a
+face by where it is in the picture, a person by Photos' ids for them), so rebuilding the index keeps it.
+
 Anything DigUp finds, in Photos or not, can be marked ♥ in DigUp itself (under the preview, or ⌘D), without touching
 Photos' own favorites; the Favorites chip beside the kinds keeps those. They're kept in `favorites.json` beside the
 index, so rebuilding or deleting the index keeps them; a Photos picture stays marked through downloads and edits, and
@@ -371,7 +388,8 @@ applies to the very next one:
   allow what's hidden in Photos too, an AI app sees only the pictures the library's last listing says aren't hidden:
   one it can't vouch for (indexed before hidden items were left out and not taken out yet, or listed before DigUp
   noted which are hidden) stays out until the library is listed again. People and albums are looked up only among
-  what the app may see.
+  what the app may see, and a picture outside Photos is someone's to it only by the faces it may see (named in Photos,
+  or by you).
 - code search, and pictures themselves (`get_picture`), are each off until you turn them on.
 - pictures rated sensitive (at Blur sensitive pictures' position, Revealing while it's off) stay out until you allow
   them, and so does every picture or video not rated yet, read or not; `status` says how many wait to be rated.

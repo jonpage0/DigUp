@@ -162,6 +162,8 @@ struct PreviewPane: View {
     var exploresMoments = false
     /// A moment or still was picked under the picture (the window's Quick Look follows).
     var picked: () -> Void = {}
+    /// What you can say of the faces in a picture outside Photos (the window's preview; none in the panel's).
+    var telling: FaceTelling?
     @State private var found: Found?
 
     /// What was found for one result (`key`): its moments for the query, and a video in iCloud's stills in order.
@@ -176,7 +178,7 @@ struct PreviewPane: View {
         VStack(alignment: .leading, spacing: 0) {
             // With the strip under it, the picture sits at the bottom of its box, on the strip.
             PreviewPicture(row: shown, size: imageSize, open: open, stretches: barStretches,
-                           alignment: showsMoments ? .bottom : .center)
+                           alignment: showsMoments ? .bottom : .center, telling: telling)
                 .frame(maxWidth: .infinity)
             if showsMoments {
                 MomentsSection(row: row, shown: shown, moments: current?.moments ?? [],
@@ -207,6 +209,10 @@ struct PreviewPane: View {
             .padding(.top, 12)
             WhyItMatched(row: shown)
                 .padding(.top, 12)
+            if let telling, row.segment != .frame, !row.faces.isEmpty {
+                NotThem(row: row, telling: telling)
+                    .padding(.top, 8)
+            }
             Spacer(minLength: 0)
         }
         .task(id: foundKey) { await find() }
@@ -346,8 +352,13 @@ struct PreviewPicture: View {
     let stretches: [ClosedRange<Double>]
     /// Where the picture sits in its box when it's smaller.
     var alignment: Alignment = .center
+    /// What you can say of its faces, when it's a picture outside Photos (the window's preview): they're all outlined,
+    /// and each can be clicked.
+    var telling: FaceTelling?
     @State private var image: NSImage?
     @State private var loaded = false
+    /// The faces found in it, for `telling`.
+    @State private var faces: [IndexStore.PictureFace] = []
     @Environment(\.displayScale) private var scale
 
     var body: some View {
@@ -375,6 +386,17 @@ struct PreviewPicture: View {
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
                     .overlay(alignment: .bottomLeading) { marks }
+                    // The faces found in it, to say who they are; else the ones the People filter took it for. Not
+                    // on a GIF's later frame: they're on its first.
+                    .overlay {
+                        if row.segment != .frame {
+                            if let telling, !faces.isEmpty {
+                                TellableFaces(faces: faces, row: row, telling: telling)
+                            } else if !row.faces.isEmpty {
+                                FaceOutlines(faces: row.faces)
+                            }
+                        }
+                    }
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2, perform: open)
                     .overlay { if row.moment != nil { PlayButton(row: row) } }
@@ -418,6 +440,11 @@ struct PreviewPicture: View {
                 loaded = true
             }
         }
+        .task(id: "\(row.id)|\(telling?.said ?? -1)") {
+            faces = []
+            guard let telling, row.photos == nil, row.kind == .image || row.kind == .screenshot else { return }
+            faces = await telling.faces(row)
+        }
     }
 
     /// The page or moment that matched, on the picture; for a video, where in it.
@@ -437,6 +464,170 @@ struct PreviewPicture: View {
                 }
             }
         }
+    }
+}
+
+/// The faces the People filter took a picture outside Photos for (`ResultRow.faces`), outlined where they are, each with
+/// the person's name.
+struct FaceOutlines: View {
+    let faces: [FaceMatch]
+
+    var body: some View {
+        GeometryReader { geometry in
+            ForEach(Array(faces.enumerated()), id: \.offset) { _, face in
+                FaceOutline(name: face.name, box: face.box, in: geometry.size)
+                    .offset(x: face.box.x * geometry.size.width, y: face.box.y * geometry.size.height)
+                    .accessibilityLabel("\(face.name), by their face")
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// One face's outline on a picture: solid, with the name of who it's taken for under it, or dashed for no one.
+private struct FaceOutline: View {
+    let name: String?
+    let box: Faces.Box
+    let size: CGSize
+
+    init(name: String?, box: Faces.Box, in size: CGSize) {
+        (self.name, self.box, self.size) = (name, box, size)
+    }
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .strokeBorder(Color.white.opacity(name == nil ? 0.75 : 1),
+                          style: StrokeStyle(lineWidth: name == nil ? 1.5 : 2, dash: name == nil ? [4, 3] : []))
+            .shadow(color: .black.opacity(0.6), radius: 2)
+            .frame(width: box.width * size.width, height: box.height * size.height)
+            .contentShape(Rectangle())
+            .overlay(alignment: .bottomLeading) {
+                if let name {
+                    Text(name)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(.black.opacity(0.55)))
+                        .offset(y: 18)
+                }
+            }
+    }
+}
+
+/// What the search window's preview lets you say of the faces in a picture outside Photos (`FaceCorrections`): who
+/// one is, among the people named in Photos, or that it isn't who DigUp took it for. The panel's preview has none.
+struct FaceTelling {
+    /// The people named in Photos, by name (`PhotosChoices.people`).
+    let people: [PhotosChoices.Person]
+    /// Changes each time something is said, so the picture's faces are read again.
+    let said: Int
+    let faces: @MainActor (ResultRow) async -> [IndexStore.PictureFace]
+    let say: @MainActor (FaceCorrections.Says, PhotosChoices.Person, Faces.Box, ResultRow) -> Void
+
+    /// Everyone of the name of the person a face was taken for.
+    func person(of match: FaceMatch) -> PhotosChoices.Person? {
+        people.first { $0.photos[match.person] != nil }
+    }
+}
+
+/// Every face found in a picture outside Photos, outlined where it is, with the name of who it's taken for under it.
+/// Clicking one asks who it is ("This is…", among the people named in Photos), or offers "Not Tati" for one taken for
+/// Tati.
+struct TellableFaces: View {
+    let faces: [IndexStore.PictureFace]
+    let row: ResultRow
+    let telling: FaceTelling
+    @State private var asking: Int?
+
+    var body: some View {
+        GeometryReader { geometry in
+            ForEach(Array(faces.enumerated()), id: \.offset) { index, face in
+                Button {
+                    asking = index
+                } label: {
+                    FaceOutline(name: face.match?.name, box: face.box, in: geometry.size)
+                }
+                .buttonStyle(.plain)
+                .help(face.match.map { "DigUp took this face for \($0.name): click to say it isn't them, or who it is" }
+                      ?? "Click to say who this is: DigUp then finds them by this face too")
+                .accessibilityLabel(face.match.map { "\($0.name), by their face" } ?? "A face")
+                .popover(isPresented: Binding(get: { asking == index }, set: { if !$0 { asking = nil } }),
+                         arrowEdge: .trailing) {
+                    WhoIsThis(face: face, telling: telling) { says, person in
+                        asking = nil
+                        telling.say(says, person, face.box, row)
+                    }
+                }
+                .offset(x: face.box.x * geometry.size.width, y: face.box.y * geometry.size.height)
+            }
+        }
+    }
+}
+
+/// A face clicked: "Not Tati" when it was taken for Tati, and "This is…" with the people named in Photos (typing
+/// narrows them, as the filter suggestions do).
+private struct WhoIsThis: View {
+    let face: IndexStore.PictureFace
+    let telling: FaceTelling
+    let say: (FaceCorrections.Says, PhotosChoices.Person) -> Void
+    @State private var typed = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let match = face.match, let person = telling.person(of: match) {
+                Button("Not \(match.name)") { say(.isNot, person) }
+                Divider()
+            }
+            Text("This is…")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            TextField("Name", text: $typed)
+                .textFieldStyle(.roundedBorder)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(shown) { person in
+                        Button {
+                            say(.is, person)
+                        } label: {
+                            Text(person.name)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 3)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(maxHeight: 220)
+        }
+        .padding(12)
+        .frame(width: 220)
+    }
+
+    private var shown: [PhotosChoices.Person] {
+        typed.isEmpty ? telling.people : telling.people.filter { PhotosChoices.wordStarts($0.name, with: typed) }
+    }
+}
+
+/// "Not Tati", for each person a picture outside Photos was kept for by a face (`ResultRow.faces`): it isn't them, so
+/// it's no longer kept for them (`FaceTelling`).
+private struct NotThem: View {
+    let row: ResultRow
+    let telling: FaceTelling
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(row.faces.enumerated()), id: \.offset) { _, face in
+                if let person = telling.person(of: face) {
+                    Button("Not \(face.name)") { telling.say(.isNot, person, face.box, row) }
+                        .help("This face isn't \(face.name)'s: DigUp stops taking it for them")
+                }
+            }
+        }
+        .controlSize(.small)
     }
 }
 
@@ -497,7 +688,8 @@ struct WhyItMatched: View {
             Label {
                 Text(row.reason)
             } icon: {
-                Image(systemName: row.matchedMeaning ? "sparkle.magnifyingglass" : "textformat")
+                Image(systemName: row.matchedMeaning ? "sparkle.magnifyingglass"
+                      : row.faces.isEmpty ? "textformat" : "person.crop.rectangle")
                     .foregroundStyle(row.matchedMeaning ? AnyShapeStyle(Brand.gradient) : AnyShapeStyle(.secondary))
             }
             .font(.system(size: 12, weight: .medium))

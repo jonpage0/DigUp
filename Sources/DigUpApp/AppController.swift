@@ -19,6 +19,8 @@ final class AppController {
     let favorites: Favorites
     /// The searches saved in the search window's Saved menu, beside the index folder (`SavedSearches`).
     let savedSearches: SavedSearches
+    /// What you told DigUp about faces outside Photos, beside the index folder (`FaceCorrectionsFile`).
+    let faceCorrections: FaceCorrectionsFile
     private let power: PowerPolicy
     private let schedule: IndexSchedule
     private(set) var panel: SearchPanelController!
@@ -60,6 +62,7 @@ final class AppController {
         updates = Updates(model: model)
         favorites = Favorites(beside: settings.indexDirectory)
         savedSearches = SavedSearches(beside: settings.indexDirectory)
+        faceCorrections = FaceCorrectionsFile(beside: settings.indexDirectory)
     }
 
     /// `showWindow`: opened by hand (not at login), so the search window comes up once the app is set up.

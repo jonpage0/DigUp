@@ -19,7 +19,8 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
 
     init(app: AppController) {
         self.app = app
-        search = SearchModel(engine: app.engine, favorites: app.favorites, model: app.model)
+        search = SearchModel(engine: app.engine, favorites: app.favorites, faceCorrections: app.faceCorrections,
+                             model: app.model)
         savedSheet = SavedSearchSheet(app: app)
         super.init()
         search.selected = { [weak self] in self?.selectionChanged() }
@@ -292,6 +293,10 @@ final class SearchModel {
     @ObservationIgnored private let engine: Engine
     /// What's marked ♥ in DigUp: the heart in the preview, and the Favorites filter.
     @ObservationIgnored let favorites: Favorites
+    /// What you told DigUp about faces outside Photos: "This is…" and "Not …" in the preview.
+    @ObservationIgnored let faceCorrections: FaceCorrectionsFile
+    /// Bumped each time something is said of a face, so the preview reads its picture's faces again.
+    private(set) var facesSaid = 0
     /// The settings (My devices).
     @ObservationIgnored private let model: AppModel
     @ObservationIgnored private var generation = 0
@@ -302,9 +307,10 @@ final class SearchModel {
     /// A result was clicked, or another moment of it picked under the preview (Quick Look, when it's open, follows).
     @ObservationIgnored var selected: () -> Void = {}
 
-    init(engine: Engine, favorites: Favorites, model: AppModel) {
+    init(engine: Engine, favorites: Favorites, faceCorrections: FaceCorrectionsFile, model: AppModel) {
         self.engine = engine
         self.favorites = favorites
+        self.faceCorrections = faceCorrections
         self.model = model
     }
 
@@ -351,6 +357,28 @@ final class SearchModel {
     /// A result was marked ♥ in DigUp or unmarked: with the Favorites filter on, the results follow.
     func favoriteToggled() {
         if has(.digupFavorites) { run() }
+    }
+
+    /// What the preview lets you say of the faces in a picture outside Photos (`FaceTelling`); nothing while the
+    /// corrections file can't be read.
+    var faceTelling: FaceTelling? {
+        guard !faceCorrections.unreadable else { return nil }
+        return FaceTelling(people: choices.people, said: facesSaid,
+                           faces: { [engine] row in await engine.pictureFaces(of: row.url.path) },
+                           say: { [weak self] says, person, face, row in self?.say(says, person, face: face, in: row) })
+    }
+
+    /// You said who a face in `row`'s picture is, or isn't (everyone of the name): kept beside the index, the matches
+    /// made again with it, and the results and the preview follow.
+    func say(_ says: FaceCorrections.Says, _ person: PhotosChoices.Person, face: Faces.Box, in row: ResultRow) {
+        let saved = faceCorrections.say(says, face: face, in: row, person: .init(
+            name: person.name, photos: PhotosChoices.ordered(person.photos)))
+        guard saved else { return }
+        Task {
+            await engine.rebuildFaceMatches()
+            facesSaid += 1
+            run()
+        }
     }
 
     /// The filters in the search field, in order: the tokens, then the map's area.
@@ -692,7 +720,7 @@ struct SearchWindowView: View {
                         VStack(alignment: .leading, spacing: 14) {
                             PreviewPane(row: row, imageSize: CGSize(width: 292, height: 230),
                                         open: { search.open(row) }, exploresMoments: true,
-                                        picked: { search.selected() })
+                                        picked: { search.selected() }, telling: search.faceTelling)
                             PreviewActions(row: PreviewPlayback.shared.placed(row), open: { search.open(row) },
                                            reveal: { Opener.reveal(row.url) }, favorites: search.favorites,
                                            toggledFavorite: { search.favoriteToggled() })

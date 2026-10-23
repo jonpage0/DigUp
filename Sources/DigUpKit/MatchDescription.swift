@@ -21,11 +21,30 @@ public enum MatchDescription {
         }
     }
 
-    /// Why it's here, in a few words: "Matches the picture", "Matches the frame at 0:06", "Has your words in Photos".
-    /// `meaning`: its meaning stood out for the query; `words`: keyword search found the query's words in it;
-    /// `listed`: a filter keeps it and no words were given.
+    /// Why it's here, in a few words: "Matches the picture", "Matches the frame at 0:06", "Has your words in Photos",
+    /// "Tatiana Rotari, by their face". `meaning`: its meaning stood out for the query; `words`: keyword search found
+    /// the query's words in it; `listed`: a filter keeps it and no words were given; `faces`: the people the People
+    /// filter took faces in it for (a picture outside Photos, `SearchHit.faces`), by their names in Photos.
     public static func reason(_ segment: SegmentKind, kind: FileKind, loc: Double?, locEnd: Double?, meaning: Bool,
-                              words: Bool, listed: Bool, reading: PhotosLibrary.Reading?) -> String {
+                              words: Bool, listed: Bool, reading: PhotosLibrary.Reading?,
+                              faces: [String] = []) -> String {
+        let matched = whatMatched(segment, kind: kind, loc: loc, locEnd: locEnd, meaning: meaning, words: words,
+                                  listed: listed, reading: reading)
+        guard !faces.isEmpty else { return matched }
+        var names: [String] = []
+        for name in faces where !names.contains(name) { names.append(name) }
+        let byFace = "\(spoken(names)), by \(faces.count == 1 ? "their face" : "their faces")"
+        return meaning || words ? matched + " · " + byFace : byFace
+    }
+
+    /// Names as said: "Tati", "Tati and Chris", "Tati, Chris and Sam".
+    static func spoken(_ names: [String]) -> String {
+        names.count < 2 ? names.joined() : names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+    }
+
+    /// What of it matched the query, or else why it's here.
+    private static func whatMatched(_ segment: SegmentKind, kind: FileKind, loc: Double?, locEnd: Double?,
+                                    meaning: Bool, words: Bool, listed: Bool, reading: PhotosLibrary.Reading?) -> String {
         guard meaning else {
             // Photos' words: a person's name, a place, a keyword or an album.
             if words, segment == .photosInfo { return "Has your words in Photos" }
