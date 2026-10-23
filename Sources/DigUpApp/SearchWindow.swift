@@ -267,7 +267,8 @@ final class SearchModel {
         didSet { if area != oldValue { run() } }
     }
     /// The filters on besides the kind and the map's area, in the order they were put on: Photos' people (each one in
-    /// the picture), albums (in any of them), favorites and From, DigUp's favorites, Sensitive, Length and Shape.
+    /// the picture), albums (in any of them), favorites and From, DigUp's favorites, Sensitive, Length, Shape and Match
+    /// by.
     var tokens: [FilterToken] = [] {
         didSet { if tokens != oldValue { run() } }
     }
@@ -342,6 +343,7 @@ final class SearchModel {
             case .sensitive: filter.sensitive = model.settings.blurSensitive.filterPosition
             case .length(let length): filter.length = length
             case .shape(let shape): filter.shape = shape
+            case .matchBy(let matchBy): filter.matchBy = matchBy
             }
         }
         return filter
@@ -426,6 +428,25 @@ final class SearchModel {
 
     func toggle(_ token: FilterToken) { set(token, on: !has(token)) }
 
+    /// The parts of a file Match by keeps to (its token's: `SearchFilter.matchBy`); nil, every part.
+    var matchBy: SearchFilter.MatchBy? {
+        tokens.lazy.compactMap { token -> SearchFilter.MatchBy? in
+            if case .matchBy(let matchBy) = token { matchBy } else { nil }
+        }.first
+    }
+
+    /// A part checked or unchecked in the Filters menu's Match by section: the token, where it is among the others,
+    /// says the parts checked now; with none, it goes (every part counts).
+    func setMatch(by part: SearchFilter.Part, on: Bool) {
+        let parts = (matchBy?.parts ?? []).filter { $0 != part } + (on ? [part] : [])
+        let token = SearchFilter.MatchBy(parts).map(FilterToken.matchBy)
+        if let index = tokens.firstIndex(where: { $0.choice == .matchBy }) {
+            if let token { tokens[index] = token } else { tokens.remove(at: index) }
+        } else if let token {
+            tokens.append(token)
+        }
+    }
+
     /// ⌫ in an empty field: the last filter goes.
     func removeLastToken() {
         if let last = shownTokens.last { set(last, on: false) }
@@ -476,6 +497,7 @@ final class SearchModel {
         case .sensitive: .sensitive
         case .length(let length): .length(length)
         case .shape(let shape): .shape(shape)
+        case .matchBy(let matchBy): .matchBy(matchBy)
         }
     }
 
@@ -522,6 +544,7 @@ final class SearchModel {
             case .sensitive: tokens.append(.sensitive)
             case .length(let length): tokens.append(.length(length))
             case .shape(let shape): tokens.append(.shape(shape))
+            case .matchBy(let matchBy): tokens.append(.matchBy(matchBy))
             }
         }
         runsHeld = true
@@ -622,7 +645,7 @@ final class SearchModel {
             var counts: [ResultGroupKind: Int] = [:]
             for hit in all.prefix(Searcher.strongCount(all)) { counts[ResultGroupKind(hit.kind), default: 0] += 1 }
             self.counts = counts
-            results = ResultSet(shown, query: text)
+            results = ResultSet(shown, query: text, matchBy: searchFilter.matchBy)
             locations = located
             showWeaker = false
             if !rows.contains(where: { $0.id == selection }) { selection = rows.first?.id }

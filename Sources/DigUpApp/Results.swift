@@ -27,6 +27,12 @@ struct ResultRow: Identifiable, Equatable {
     /// page or in a passage.
     let query: String
     let terms: [String]
+    /// The parts of a file the search kept to (`SearchFilter.matchBy`), which the preview's moments are of too; nil,
+    /// every part.
+    let matchBy: SearchFilter.MatchBy?
+    /// The search a result is of, as what's found or picked for it is kept under: another query, or another Match by
+    /// (whose moments of the same file can start at the same second), is another search.
+    var searched: String { "\(query)|\(matchBy?.text ?? "")" }
     /// A picture or video of a Photos library: it opens in Photos (`Opener.showInPhotos`).
     private(set) var photos: PhotosHit?
     /// A video or audio file: how many moments of it match (`SearchHit.momentCount`).
@@ -39,7 +45,7 @@ struct ResultRow: Identifiable, Equatable {
     /// A picture outside Photos the People filter keeps: the faces in it taken for its people (`SearchHit.faces`).
     let faces: [FaceMatch]
 
-    init(_ hit: SearchHit, query: String = "", terms: [String] = []) {
+    init(_ hit: SearchHit, query: String = "", terms: [String] = [], matchBy: SearchFilter.MatchBy? = nil) {
         id = hit.path
         url = URL(fileURLWithPath: hit.path)
         photos = hit.photos
@@ -77,11 +83,12 @@ struct ResultRow: Identifiable, Equatable {
         faces = hit.faces
         self.query = query
         self.terms = terms
+        self.matchBy = matchBy
     }
 
-    /// This result at another of its moments (`Searcher.moments(of:text:queryVector:zGate:)`), picked under the preview:
-    /// where it plays from, and where Quick Look and Open go. A still's file is found in `filmstrip`, the video's stills
-    /// in order.
+    /// This result at another of its moments (`Searcher.moments(of:text:queryVector:filter:zGate:)`), picked under the
+    /// preview: where it plays from, and where Quick Look and Open go. A still's file is found in `filmstrip`, the
+    /// video's stills in order.
     func at(_ moment: Moment, filmstrip: [String]) -> ResultRow {
         var placed = self
         placed.segment = moment.kind.segment
@@ -267,12 +274,12 @@ struct ResultSet: Equatable {
 
     init() {}
 
-    init(_ hits: [SearchHit], query: String = "", rowsPerGroup: Int = .max) {
+    init(_ hits: [SearchHit], query: String = "", matchBy: SearchFilter.MatchBy? = nil, rowsPerGroup: Int = .max) {
         let strong = Searcher.strongCount(hits)
         let terms = Searcher.terms(query)
         var order: [ResultGroupKind] = []
         var byGroup: [ResultGroupKind: [ResultRow]] = [:]
-        ranked = hits.prefix(strong).map { ResultRow($0, query: query, terms: terms) }
+        ranked = hits.prefix(strong).map { ResultRow($0, query: query, terms: terms, matchBy: matchBy) }
         for row in ranked {
             let group = ResultGroupKind(row.kind)
             if byGroup[group] == nil { order.append(group) }
@@ -281,7 +288,7 @@ struct ResultSet: Equatable {
         groups = order.map {
             ResultGroup(kind: $0, rows: Array(byGroup[$0]!.prefix(rowsPerGroup)), total: byGroup[$0]!.count)
         }
-        weaker = hits.dropFirst(strong).map { ResultRow($0, query: query, terms: terms) }
+        weaker = hits.dropFirst(strong).map { ResultRow($0, query: query, terms: terms, matchBy: matchBy) }
     }
 
     var strongRows: [ResultRow] { groups.flatMap(\.rows) }

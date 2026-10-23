@@ -117,16 +117,23 @@ and From (see [Apple Photos](#apple-photos)), Sensitive (see [Sensitive pictures
 - Shape, for pictures and videos as they're shown: Portrait, Landscape, Square (sides within 5 %), Wide (2:1 or wider:
   panoramas and cinema), or an exact ratio, 16:9, 9:16, 4:3, 3:4, 3:2 or 2:3, within 2 % (16:9 is landscape, 9:16
   portrait). A phone's photo or video turned by the camera counts as it's shown, not as it's stored
+- Match by, the parts of a file that may make it match, any of them: Visual (pictures, video frames, PDF pages read as
+  pictures), Audio (sound, a video's soundtrack), Spoken (what's said), Text (documents, PDF text, the words in a
+  picture, file and folder names) and Tags (what Photos says of an item: its labels, keywords, title, caption, people,
+  albums and places). Only those parts count, by what they mean or by their words, a word that must be there (`+beach`)
+  too, and why a result is there comes from one of them; each keeps the score it has without the choice. With no
+  words, it lists the files that have one of them: Spoken alone, the recordings with speech
 
-Each filter that's on is a token in the search field too (its × takes it off, as ⌫ does in an empty field). A Photos
-picture's size and a Photos video's length are Photos' own, so a video that's only in iCloud has its length too; any
-other file's are read from the file. `digup search --length 15..60 --shape 16:9` does the same in the CLI (seconds,
-either end left out: `..15`, `300..`).
+Each filter that's on is a token in the search field too (its × takes it off, as ⌫ does in an empty field); Match by
+is one token, "Match: Spoken + Text". A Photos picture's size and a Photos video's length are Photos' own, so a video
+that's only in iCloud has its length too; any other file's are read from the file. `digup search --length 15..60
+--shape 16:9 --match-by spoken,text` does the same in the CLI (seconds, either end left out: `..15`, `300..`).
 
 On a Mac, the search window's Saved menu (the bookmark beside the field) keeps the searches you come back to. Save This
 Search… (⌘S) keeps the words, the kind and the filters (people, albums, favorites, From, the map's area, Sensitive,
-Length, Shape) under a name, and choosing it searches again, so new files show up; Edit Saved Searches… renames,
-reorders and deletes them. Typing the start of one's name in the panel offers it, and Tab opens it in the window.
+Length, Shape, Match by) under a name, and choosing it searches again, so new files show up; Edit Saved Searches…
+renames, reorders and deletes them. Typing the start of one's name in the panel offers it, and Tab opens it in the
+window.
 They're kept in `saved-searches.json` beside the index, so rebuilding the index keeps them, with Photos' people and
 albums by Photos' own ids: someone renamed in Photos is still found, and someone who's gone from Photos shows struck
 through, and the search keeps nothing for them rather than everyone.
@@ -371,9 +378,9 @@ opens the index read-only, first making SQLite's log and shared-memory files bes
 They get four tools, all read-only:
 
 - `search_files`: what the search window does, with its kinds and filters (people, albums, Photos favorites, DigUp's
-  favorites, From, an area on the map, a length, a shape) and its required words (`+beach`); with no words, a kind or
-  a filter lists what it keeps, newest first. Each result says where the file is, why it's there ("Matches the text on
-  page 3"), the words that matched, and when and where it was taken.
+  favorites, From, an area on the map, a length, a shape, the parts to match by) and its required words (`+beach`); with
+  no words, a kind or a filter lists what it keeps, newest first. Each result says where the file is, why it's there
+  ("Matches the text on page 3"), the words that matched, and when and where it was taken.
 - `read_text`: the words DigUp read from a file it returned (a document, a PDF's page, the text in a screenshot, what
   Photos knows about a picture, a stretch of code, what's said in a recording; with a `moment`, what's said within
   30 seconds of it), up to 20,000 characters.

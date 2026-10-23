@@ -23,9 +23,10 @@ public struct SearchHit: Sendable {
     public var focus: Double? = nil
     /// A picture or video of a Photos library: where it is in Photos, and what Photos calls it.
     public var photos: PhotosHit? = nil
-    /// A video or audio file: how many moments of it match the query (`Searcher.moments(of:text:queryVector:zGate:)`),
-    /// counted from the scores the search has anyway, and from its stretches of speech that hold the query's words. 0
-    /// when none does (it's here by its name, say).
+    /// A video or audio file: how many moments of it match the query
+    /// (`Searcher.moments(of:text:queryVector:filter:zGate:)`), counted from the scores the search has anyway, and from
+    /// its stretches of speech that hold the query's words, of the parts Match by keeps to. 0 when none does (it's here
+    /// by its name, say).
     public var momentCount = 0
     /// A picture or a video: what the sensitive-picture detector said of each of its pictures (`SensitivePictures`).
     /// Nil for any other file.
@@ -45,8 +46,8 @@ public struct FaceMatch: Sendable, Equatable {
     public let confirmed: Bool
 }
 
-/// A stretch of a recording that matches a query (`Searcher.moments(of:text:queryVector:zGate:)`): its segments that
-/// stand out on the query's scale or hold the query's words, neighbours of the same kind merged into one.
+/// A stretch of a recording that matches a query (`Searcher.moments(of:text:queryVector:filter:zGate:)`): its segments
+/// that stand out on the query's scale or hold the query's words, neighbours of the same kind merged into one.
 public struct Moment: Sendable, Equatable {
     public enum Kind: String, Sendable {
         /// A frame of the video, or one of Photos' stills of a video in iCloud.
@@ -111,8 +112,9 @@ public struct PhotosHit: Sendable, Equatable {
     public var still: String? = nil
 }
 
-/// What a search keeps besides its kinds: Photos' facts about a library's files, where files were taken, and how long
-/// and what shape they are. The parts combine with AND; an empty filter keeps every file.
+/// What a search keeps besides its kinds: Photos' facts about a library's files, where files were taken, how long
+/// and what shape they are, and which of their parts may match. The parts combine with AND; an empty filter keeps every
+/// file.
 public struct SearchFilter: Sendable, Equatable {
     /// People a file must show, every one of them (ids of `IndexStore.photosPeople`). An entry is one person, or the
     /// people who share a name, any of whom counts for it. An empty entry keeps nothing: a saved search's person who
@@ -157,6 +159,12 @@ public struct SearchFilter: Sendable, Equatable {
     public var length: Length?
     /// Only pictures and videos of this shape as they're shown (`media_dimensions.width`, `height`): the Shape filter.
     public var shape: Shape?
+    /// Only these parts of a file may make it match (the Match by filter, approved 2026-10-23): with words, only their
+    /// meaning and their words count, a required word's too (`RequiredWords`), and a hit's reason, excerpt and a
+    /// recording's moments come from one of them; without words, only the files that have one of them are kept. The
+    /// meaning scale is still made from every part the searcher may see (`Searcher.rowsSettingScale`): a choice changes
+    /// which parts count, not their scores. Nil: every part.
+    public var matchBy: MatchBy?
     /// The faces outside Photos matched to people, by face, to go by instead of the index's own (`face_matches`): what an
     /// AI app is told is matched only with the named faces it may see (`IndexStore.faceMatches(referencesKeptBy:)`,
     /// `digup mcp`). Nil goes by the index's.
@@ -284,18 +292,101 @@ public struct SearchFilter: Sendable, Equatable {
         }
     }
 
+    /// A part of a file Match by can choose (approved 2026-10-23), in the order a saved search writes them: each is
+    /// some of the kinds of segment the index keeps, as `init(_:)` says, the one place that says it.
+    public enum Part: String, CaseIterable, Sendable {
+        /// What's seen: a picture, a video's frames and Photos' stills of it, a PDF's pages read as pictures.
+        case visual
+        /// What's heard: a recording's sound, a video's soundtrack.
+        case audio
+        /// What's said in a recording or a video (`Speech`).
+        case spoken
+        /// What's written: a document's text, a PDF's, the words read in a picture, a file's and its folders' names,
+        /// code.
+        case text
+        /// What Photos says of one of its items: its labels, keywords, title, caption, people, albums and places.
+        case tags
+
+        /// The part a segment of this kind is.
+        public init(_ segment: SegmentKind) {
+            switch segment {
+            case .image, .frame, .pageImage: self = .visual
+            case .audio: self = .audio
+            case .speech: self = .spoken
+            case .chunk, .page, .ocr, .name, .lines, .cells: self = .text
+            case .photosInfo: self = .tags
+            }
+        }
+
+        /// The kinds of segment it is.
+        public var segments: [SegmentKind] { SegmentKind.allCases.filter { Self($0) == self } }
+
+        /// As the Filters menu and a Match by token name it.
+        public var title: String {
+            switch self {
+            case .visual: "Visual"
+            case .audio: "Audio"
+            case .spoken: "Spoken"
+            case .text: "Text"
+            case .tags: "Tags"
+            }
+        }
+    }
+
+    /// The parts Match by keeps to (approved 2026-10-23): one or more, each once, in `Part`'s order. A saved search
+    /// keeps it as `{"matchBy": ["spoken", "text"]}` (its `Codable`); `digup search --match-by spoken,text` (`init(_:)`)
+    /// and `digup mcp`'s `match_by: ["spoken", "text"]` (`init(choosing:)`) take it.
+    public struct MatchBy: Sendable, Hashable {
+        /// In `Part.allCases`' order, each once, at least one.
+        public let parts: [Part]
+
+        /// Nil with no part.
+        public init?(_ parts: some Sequence<Part>) {
+            let chosen = Set(parts)
+            guard !chosen.isEmpty else { return nil }
+            self.parts = Part.allCases.filter(chosen.contains)
+        }
+
+        /// The parts by their names, in any order: nil with none, a name twice, or a name that isn't a part's.
+        public init?(choosing names: [String]) {
+            let parts = names.compactMap(Part.init(rawValue:))
+            guard parts.count == names.count, Set(parts).count == parts.count else { return nil }
+            self.init(parts)
+        }
+
+        /// As `digup search --match-by` and the app's debug flags write it: the names, a comma between them
+        /// ("spoken,text"), in any order.
+        public init?(_ text: String) {
+            self.init(choosing: text.split(separator: ",", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) })
+        }
+
+        public var text: String { parts.map(\.rawValue).joined(separator: ",") }
+
+        /// As the token in the search field says it: "Match: Spoken + Text".
+        public var title: String { "Match: " + parts.map(\.title).joined(separator: " + ") }
+
+        public func contains(_ part: Part) -> Bool { parts.contains(part) }
+
+        /// Its parts' kinds of segment, as an SQL list: "('speech','chunk',…)".
+        var segmentList: String {
+            "(" + parts.flatMap(\.segments).map { "'\($0.rawValue)'" }.joined(separator: ",") + ")"
+        }
+    }
+
     public init(people: [Set<Int64>] = [], albums: Set<Int64>? = nil, favorites: Bool = false,
                 origins: Set<String> = [], cameras: Set<String> = [], shotOn: Set<String>? = nil,
-                paths: Set<String>? = nil, area: Area? = nil, length: Length? = nil, shape: Shape? = nil) {
+                paths: Set<String>? = nil, area: Area? = nil, length: Length? = nil, shape: Shape? = nil,
+                matchBy: MatchBy? = nil) {
         (self.people, self.albums, self.favorites, self.area) = (people, albums, favorites, area)
         (self.origins, self.cameras, self.shotOn, self.paths) = (origins, cameras, shotOn, paths)
-        (self.length, self.shape) = (length, shape)
+        (self.length, self.shape, self.matchBy) = (length, shape, matchBy)
     }
 
     public var isEmpty: Bool {
         people.isEmpty && albums == nil && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
             && paths == nil && area == nil && photosOnly == nil && sensitive == nil && leavingOutSensitive == nil
-            && length == nil && shape == nil
+            && length == nil && shape == nil && matchBy == nil
     }
 
     /// What of it leaves files out of an AI app's sight (`photosOnly`, `leavingOutSensitive`); empty for DigUp's own
@@ -367,6 +458,10 @@ public struct SearchFilter: Sendable, Equatable {
         }
         if let shape {
             parts.append("SELECT file FROM media_dimensions WHERE \(shape.condition)")   // a recording's has no size
+        }
+        if let matchBy {
+            // Without words, the files that have a chosen part; with them, no other file can match (`Searcher.search`).
+            parts.append("SELECT file FROM segments WHERE kind IN \(matchBy.segmentList)")
         }
         if let photosOnly {
             // As `PhotosLibrary.library(containing:)`; the paths kept go as one value (a library has thousands).
@@ -475,6 +570,26 @@ extension SearchFilter.Shape: Codable {
     }
 }
 
+/// Match by as a saved search keeps it (`saved-searches.json`'s `{"matchBy": […]}`, approved 2026-10-23): the parts'
+/// names, written in `Part`'s order. Read strictly, as the app reads the file, but in any order: an empty list, a name
+/// twice, a name that isn't a part's, or anything but a list of names isn't this shape.
+extension SearchFilter.MatchBy: Codable {
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let names = try container.decode([String].self)
+        guard let matchBy = Self(choosing: names) else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription:
+                "Match by is one or more of \(SearchFilter.Part.allCases.map(\.rawValue)), each once")
+        }
+        self = matchBy
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(parts.map(\.rawValue))
+    }
+}
+
 /// Hybrid search: meaning (EmbeddingGemma's vectors) + words (FTS5).
 ///
 /// Meaning is the model's cosine similarity, put on one scale per query (`meaning`): every vector is scored anyway, so
@@ -488,6 +603,9 @@ public final class Searcher {
     private var rowModality: [Modality] = []
     /// False for the vectors the later pass adds (`Indexer.finishLongFiles`): scored, but they don't set the scale.
     private var rowSetsScale: [Bool] = []
+    /// The part of a file each vector is of, for Match by (`SearchFilter.matchBy`); nil for a kind of segment this
+    /// DigUp doesn't know.
+    private var rowPart: [SearchFilter.Part?] = []
     private var fileKind: [Int64: FileKind] = [:]
     public private(set) var vectorSource: String?
     /// False after `releaseVectors()` (or `loadVectors: false`): keyword search still works, and the next search with
@@ -534,6 +652,7 @@ public final class Searcher {
                 ? kind != SegmentKind.chunk.rawValue && Int(row.int(7)) > steps.bigPDFPages && place > steps.pdfStep
                 : kind == SegmentKind.chunk.rawValue && place > steps.docStep
             rowSetsScale.append(!later)
+            rowPart.append(kind.flatMap(SegmentKind.init(rawValue:)).map(SearchFilter.Part.init))
         }
         self.matrix = matrix
         vectorsLoaded = true
@@ -546,6 +665,7 @@ public final class Searcher {
         rowSegment = []
         rowModality = []
         rowSetsScale = []
+        rowPart = []
         vectorsLoaded = false
     }
 
@@ -572,6 +692,10 @@ public final class Searcher {
     /// caller embeds it for `queryVector`), over the files that have every required term, narrowed the way a filter
     /// narrows, before the keyword matches are cut to the best. `requiredVectors`: each term embedded alone, by the
     /// term as `RequiredWords.terms` has it; a term without one is found by its words only. Code's `+` is literal.
+    ///
+    /// Match by (`SearchFilter.matchBy`): only the chosen parts' vectors and words count, for the query and for its
+    /// required words, a word's prefix matching included (`wordPatterns`), so each hit points at a chosen part, which
+    /// its reason, excerpt and moments come from. Every part still sets the scale (`rowsSettingScale`).
     public func search(_ query: String, queryVector: [Float]?, requiredVectors: [String: [Float]] = [:],
                        kinds: Set<FileKind>? = nil, filter: SearchFilter = SearchFilter(), limit: Int = 20,
                        zGate: Double = 2.0, wordWeight: Double? = nil, prefixLast: Bool = false) throws -> [SearchHit] {
@@ -590,25 +714,26 @@ public final class Searcher {
             return files
         }
         // Only the rows the caller may see set the meaning scale (`rowsSettingScale`), the query's and each required
-        // word's.
+        // word's, whatever parts Match by keeps to: it decides which rows count (`matching`), not their scores.
         let setsScale = try rowsSettingScale(seeing: filter.exclusions)
+        let matching = rowsMatching(filter.matchBy)
         let having = required.terms.isEmpty ? nil
             : try filesHaving(required.terms, typing: prefixLast ? required.typing : nil, vectors: requiredVectors,
-                              zGate: zGate, setsScale: setsScale, narrowing: narrowing, kept: kept,
-                              exclusions: filter.exclusions.query)
+                              zGate: zGate, setsScale: setsScale, matching: matching, matchBy: filter.matchBy,
+                              narrowing: narrowing, kept: kept, exclusions: filter.exclusions.query)
         let allowed = { (file: Int64) -> Bool in
             (kinds == nil || fileKind[file].map { kinds!.contains($0) } ?? false) && (kept?.contains(file) ?? true)
                 && (having?.contains(file) ?? true)
         }
         // Meaning: score every vector on this query's scale (`meaning`), set by the vectors the caller may see
-        // (`rowsSettingScale`), keep each file's best segment, and a recording's segments that stand out (its moments,
-        // counted for the hits it makes).
+        // (`rowsSettingScale`), keep each file's best segment of the parts that count (`matching`), and a recording's
+        // segments that stand out (its moments, counted for the hits it makes).
         var best: [Int64: (z: Double, cosine: Double, row: Int)] = [:]
         var standouts: [Int64: [(segment: Int64, z: Double)]] = [:]
         if let query = queryVector, query.count == Vectors.dimension, !rowFile.isEmpty {
             let scores = score(query)
             let meaning = Self.meaning(scores, rowModality, setsScale: setsScale)
-            for row in 0..<scores.count where allowed(rowFile[row]) {
+            for row in 0..<scores.count where allowed(rowFile[row]) && matching?[row] != false {
                 let (file, z) = (rowFile[row], meaning[row])
                 if z > (best[file]?.z ?? -.infinity) { best[file] = (z, Double(scores[row]), row) }
                 if z >= zGate, let kind = fileKind[file], Self.recordings.contains(kind) {
@@ -618,23 +743,27 @@ public final class Searcher {
         }
 
         // Words: FTS5 with Porter stemming over file names, folder names, OCR, page and document text, and what's said
-        // in recordings. A name from code ("quantize_row_q8_0_ref") is matched as one phrase, as it's written.
+        // in recordings, of the parts that count. A name from code ("quantize_row_q8_0_ref") is matched as one phrase,
+        // as it's written.
         let terms = Self.terms(text)
         let identifier = isCode ? CodeLookup.identifier(text) : nil
         var words: [(file: Int64, segment: Int64, snippet: String?)] = []
         var coverage: [Int64: Double] = [:]   // share of the query's words found anywhere in the file
-        // Only the files an AI app may see count for a word's prefix matching (`SearchFilter.exclusions`).
+        // Only the files an AI app may see count for a word's prefix matching (`SearchFilter.exclusions`), and only the
+        // parts Match by keeps to.
         let patterns = try identifier.map { [CodeLookup.phrase($0)] }
-            ?? wordPatterns(terms, prefixLast: prefixLast, within: filter.exclusions.query)
+            ?? wordPatterns(terms, prefixLast: prefixLast, within: filter.exclusions.query, matching: filter.matchBy)
         // An AI app's search: which files match, how far, and where, from the files it sees alone (`wordsInSight`).
         let inSight = filter.exclusions.query != nil
         if !patterns.isEmpty, inSight {
-            (words, coverage) = try wordsInSight(patterns, within: narrowing, allowed: allowed)
+            (words, coverage) = try wordsInSight(patterns, within: narrowing, matching: filter.matchBy,
+                                                 allowed: allowed)
         } else if !patterns.isEmpty {
             var seen = Set<Int64>()
-            // The filter and the required words narrow the matches before they're cut to the best 1,000: else a file
-            // they keep could be outranked by that many matches they don't, and never be seen.
-            var onlyKept = narrowing.map { " AND s.file IN (\($0.sql))" } ?? ""
+            // The filter, the parts Match by keeps to and the required words narrow the matches before they're cut to
+            // the best 1,000: else a file they keep could be outranked by that many matches they don't, and never be
+            // seen.
+            var onlyKept = Self.inParts(filter.matchBy) + (narrowing.map { " AND s.file IN (\($0.sql))" } ?? "")
             var values: [SQLValue] = [.text(patterns.joined(separator: " OR "))] + (narrowing?.values ?? [])
             if let having {
                 onlyKept += " AND s.file IN (SELECT value FROM json_each(?))"
@@ -656,7 +785,7 @@ public final class Searcher {
                 for pattern in patterns {
                     try store.db.query("""
                         SELECT DISTINCT s.file FROM fts JOIN segments s ON s.id = fts.rowid
-                        WHERE fts MATCH ? AND s.file IN (\(files))
+                        WHERE fts MATCH ? AND s.file IN (\(files))\(Self.inParts(filter.matchBy))
                         """, [.text(pattern)]) { coverage[$0.int(0), default: 0] += 1 / Double(patterns.count) }
                 }
             }
@@ -727,8 +856,10 @@ public final class Searcher {
                 if matchedKind != SegmentKind.name.rawValue { snippet = excerpt(text, limit: 400) }
             }
             // A recording's moments: what stands out in it, and what's said in it with the query's words, looked for in
-            // it whether or not it's among keyword search's first files (`words`), as its preview looks (`moments`).
-            let said = Self.recordings.contains(row.kind) ? try saidWords(inFile: file, patterns) : [:]
+            // it whether or not it's among keyword search's first files (`words`), as its preview looks (`moments`),
+            // of the parts that count.
+            let said = Self.recordings.contains(row.kind)
+                ? try saidWords(inFile: file, patterns, matching: filter.matchBy) : [:]
             hits.append(SearchHit(path: row.path, kind: row.kind, score: score, z: semantic?.z,
                                   cosine: semantic?.cosine, keywordRank: keyword?.0, segment: segment,
                                   segmentID: segmentID, loc: loc, locEnd: locEnd, excerpt: snippet ?? storedExcerpt,
@@ -749,21 +880,25 @@ public final class Searcher {
     /// last word), every file that does (`segmentsHolding`), or when its best segment for the term embedded alone
     /// (`vectors`, by term) stands out as a meaning match does (`meaning`, at least `zGate`, on the scale `setsScale`
     /// says, `rowsSettingScale`). Only the files `exclusions` keeps count for a term's prefix matching, as for the
-    /// query's words: a file an AI app may not see bears on nothing.
+    /// query's words: a file an AI app may not see bears on nothing. Only the parts Match by keeps to (`matchBy`, their
+    /// vectors `matching`) can have a term, by their words or by what they mean.
     private func filesHaving(_ terms: [String], typing: String?, vectors: [String: [Float]], zGate: Double,
-                             setsScale: [Bool], narrowing: (sql: String, values: [SQLValue])?, kept: Set<Int64>?,
+                             setsScale: [Bool], matching: [Bool]?, matchBy: SearchFilter.MatchBy?,
+                             narrowing: (sql: String, values: [SQLValue])?, kept: Set<Int64>?,
                              exclusions: (sql: String, values: [SQLValue])?) throws -> Set<Int64> {
         var having: Set<Int64>?
         for term in terms {
             var files = Set<Int64>()
             let words = RequiredWords.words(of: term)
             if !words.isEmpty {
-                let pattern = try wordPatterns([words], prefixLast: term == typing, within: exclusions)[0]
-                files.formUnion(try segmentsHolding([pattern], within: narrowing)[0].map(\.file))
+                let pattern = try wordPatterns([words], prefixLast: term == typing, within: exclusions,
+                                               matching: matchBy)[0]
+                files.formUnion(try segmentsHolding([pattern], within: narrowing, matching: matchBy)[0].map(\.file))
             }
             if let vector = vectors[term], vector.count == Vectors.dimension, !rowFile.isEmpty {
                 let meaning = Self.meaning(score(vector), rowModality, setsScale: setsScale)
-                for row in meaning.indices where meaning[row] >= zGate && kept?.contains(rowFile[row]) != false {
+                for row in meaning.indices where meaning[row] >= zGate && kept?.contains(rowFile[row]) != false
+                    && matching?[row] != false {
                     files.insert(rowFile[row])
                 }
             }
@@ -898,8 +1033,10 @@ public final class Searcher {
     /// as `search` puts it (`meaning`, at least `zGate`), and its stretches of speech that hold at least half of the
     /// query's words, as a file qualifies by them (`saidWords`). Each is scored as `search` scores a file, and
     /// neighbours of the same kind are merged (`merged`). A search's hits count theirs the same way (`momentCount`).
-    /// None for a file that isn't a video or audio; without a vector, only what's said can match.
-    public func moments(of path: String, text: String, queryVector: [Float]?, zGate: Double = 2.0) throws -> [Moment] {
+    /// Only the parts `filter`'s Match by keeps to make moments (`SearchFilter.matchBy`), as they made the hit. None
+    /// for a file that isn't a video or audio; without a vector, only what's said can match.
+    public func moments(of path: String, text: String, queryVector: [Float]?, filter: SearchFilter = SearchFilter(),
+                        zGate: Double = 2.0) throws -> [Moment] {
         var file: (id: Int64, kind: FileKind?)?
         try store.db.query("SELECT id, kind FROM files WHERE path = ?", [.text(path)]) {
             file = ($0.int(0), FileKind(rawValue: $0.text(1) ?? ""))
@@ -911,19 +1048,24 @@ public final class Searcher {
             // The app's preview: nothing is left out of its sight.
             let setsScale = try rowsSettingScale(seeing: SearchFilter())
             let meaning = Self.meaning(score(query), rowModality, setsScale: setsScale)
-            standouts = rowFile.indices.filter { rowFile[$0] == file.id && meaning[$0] >= zGate }
+            let matching = rowsMatching(filter.matchBy)
+            standouts = rowFile.indices
+                .filter { rowFile[$0] == file.id && meaning[$0] >= zGate && matching?[$0] != false }
                 .map { (segment: rowSegment[$0], z: meaning[$0]) }
         }
         let terms = Self.terms(text)
         // The app's preview: nothing is left out of its sight.
-        let said = try saidWords(inFile: file.id, wordPatterns(terms, prefixLast: false, within: nil))
+        let said = try saidWords(inFile: file.id, wordPatterns(terms, prefixLast: false, within: nil,
+                                                               matching: filter.matchBy), matching: filter.matchBy)
         return try moments(ofFile: file.id, standouts, said: said,
                            weights: Self.weights(lookup: Self.isLookup(terms), wordWeight: Self.wordWeight))
     }
 
     /// A recording's stretches of speech that hold at least half of the query's words (`patterns`), as a file
-    /// qualifies by them (`search`), with the share of them each holds.
-    private func saidWords(inFile file: Int64, _ patterns: [String]) throws -> [Int64: Double] {
+    /// qualifies by them (`search`), with the share of them each holds. None when Match by keeps to other parts.
+    private func saidWords(inFile file: Int64, _ patterns: [String], matching matchBy: SearchFilter.MatchBy?) throws
+        -> [Int64: Double] {
+        guard matchBy?.contains(SearchFilter.Part(.speech)) ?? true else { return [:] }
         var shares: [Int64: Double] = [:]
         for pattern in patterns {
             try store.db.query("""
@@ -1132,6 +1274,18 @@ public final class Searcher {
         return rowSetsScale.indices.map { rowSetsScale[$0] && files.contains(rowFile[$0]) }
     }
 
+    /// The vectors Match by lets count (`SearchFilter.matchBy`): those of the parts it keeps to; nil, every one. Which
+    /// count doesn't change the scale (`rowsSettingScale`): only which segments may match on it.
+    private func rowsMatching(_ matchBy: SearchFilter.MatchBy?) -> [Bool]? {
+        matchBy.map { chosen in rowPart.map { $0.map(chosen.contains) ?? false } }
+    }
+
+    /// A condition on a segment `s` (" AND s.kind IN …") that keeps it to the parts Match by keeps to; "" for every
+    /// part.
+    private static func inParts(_ matchBy: SearchFilter.MatchBy?) -> String {
+        matchBy.map { " AND s.kind IN \($0.segmentList)" } ?? ""
+    }
+
     /// The average score of each modality for this query. Small groups (< 20 vectors) take the average of all.
     static func modalityMeans(_ scores: [Float], _ modality: [Modality], setsScale: [Bool]? = nil) -> [Modality: Double] {
         var sum: [Modality: Double] = [:], count: [Modality: Int] = [:]
@@ -1197,42 +1351,46 @@ public final class Searcher {
     /// Otherwise a file the panel showed while you typed dropped out once you stopped. A word that is in the index as
     /// typed stays whole, so "cat" doesn't bring in "category"; so does a word of two letters, the start of too many
     /// words to stand for one. Only the files `within` keeps count (an AI app's, `SearchFilter.exclusions`; nil, every
-    /// file): one left out having the word must not make it stay whole, nor show that it's there.
-    private func wordPatterns(_ terms: [String], prefixLast: Bool,
-                              within kept: (sql: String, values: [SQLValue])?) throws -> [String] {
+    /// file): one left out having the word must not make it stay whole, nor show that it's there. Nor does a part Match
+    /// by leaves out (`matching`): a word in a part that can't match is as good as in no file.
+    private func wordPatterns(_ terms: [String], prefixLast: Bool, within kept: (sql: String, values: [SQLValue])?,
+                              matching matchBy: SearchFilter.MatchBy?) throws -> [String] {
         var patterns = Self.patterns(terms, prefixLast: prefixLast)
         for index in terms.indices where terms[index].count >= 3 && !patterns[index].hasSuffix("*") {
-            if try !isIndexed(patterns[index], within: kept) { patterns[index] += "*" }
+            if try !isIndexed(patterns[index], within: kept, matching: matchBy) { patterns[index] += "*" }
         }
         return patterns
     }
 
-    /// Whether keyword search finds `pattern` in any file, or in any of the files `within` keeps.
-    private func isIndexed(_ pattern: String, within kept: (sql: String, values: [SQLValue])?) throws -> Bool {
+    /// Whether keyword search finds `pattern` in any file, or in any of the files `within` keeps, in the parts Match by
+    /// keeps to (`matching`; nil, every part).
+    private func isIndexed(_ pattern: String, within kept: (sql: String, values: [SQLValue])?,
+                           matching matchBy: SearchFilter.MatchBy?) throws -> Bool {
         var found = false
-        guard let kept else {
+        guard kept != nil || matchBy != nil else {
             try store.db.query("SELECT 1 FROM fts WHERE fts MATCH ? LIMIT 1", [.text(pattern)]) { _ in found = true }
             return found
         }
         try store.db.query("""
-            SELECT 1 FROM fts JOIN segments s ON s.id = fts.rowid WHERE fts MATCH ? AND s.file IN (\(kept.sql)) LIMIT 1
-            """, [.text(pattern)] + kept.values) { _ in found = true }
+            SELECT 1 FROM fts JOIN segments s ON s.id = fts.rowid
+            WHERE fts MATCH ?\(kept.map { " AND s.file IN (\($0.sql))" } ?? "")\(Self.inParts(matchBy)) LIMIT 1
+            """, [.text(pattern)] + (kept?.values ?? [])) { _ in found = true }
         return found
     }
 
     /// Keyword matches for a caller who doesn't see every file (an AI app's, `SearchFilter.exclusions`), none of them
     /// decided by a file it may not see (MCP-PLAN.md): keyword search's own ranking (bm25) weighs a word by how many of
     /// all the index's segments have it, so it isn't used, and no match is left out by a cap. Every segment of the
-    /// files `narrowing` keeps (and `allowed`) that holds one of `patterns` counts (`segmentsHolding`): each file at
-    /// its segment that holds the most of them (of those that hold as many, the first), in order of how much of the
-    /// query the file holds (`coverage`, as `search` has it), then of how much that segment does, then of id. Their
-    /// words are quoted later, for the files shown (`snippet`).
+    /// files `narrowing` keeps (and `allowed`), of the parts Match by keeps to (`matching`), that holds one of
+    /// `patterns` counts (`segmentsHolding`): each file at its segment that holds the most of them (of those that hold
+    /// as many, the first), in order of how much of the query the file holds (`coverage`, as `search` has it), then of
+    /// how much that segment does, then of id. Their words are quoted later, for the files shown (`snippet`).
     private func wordsInSight(_ patterns: [String], within narrowing: (sql: String, values: [SQLValue])?,
-                              allowed: (Int64) -> Bool)
+                              matching matchBy: SearchFilter.MatchBy?, allowed: (Int64) -> Bool)
         throws -> (words: [(file: Int64, segment: Int64, snippet: String?)], coverage: [Int64: Double]) {
         var coverage: [Int64: Double] = [:]
         var held: [Int64: (file: Int64, patterns: Int)] = [:]   // by segment
-        for found in try segmentsHolding(patterns, within: narrowing) {
+        for found in try segmentsHolding(patterns, within: narrowing, matching: matchBy) {
             for file in Set(found.map(\.file)) where allowed(file) {
                 coverage[file, default: 0] += 1 / Double(patterns.count)
             }
@@ -1253,15 +1411,16 @@ public final class Searcher {
         return (ordered.map { (file: $0.key, segment: $0.value.segment, snippet: nil) }, coverage)
     }
 
-    /// The segments of the files `kept` keeps (nil: every file) that hold each of `patterns`: every one of them, in no
-    /// order of keyword search's, so that nothing outside `kept` bears on which they are (`wordsInSight`).
-    private func segmentsHolding(_ patterns: [String], within kept: (sql: String, values: [SQLValue])?) throws
-        -> [[(file: Int64, segment: Int64)]] {
+    /// The segments of the files `kept` keeps (nil: every file), of the parts Match by keeps to (`matching`; nil, every
+    /// part), that hold each of `patterns`: every one of them, in no order of keyword search's, so that nothing outside
+    /// `kept` bears on which they are (`wordsInSight`).
+    private func segmentsHolding(_ patterns: [String], within kept: (sql: String, values: [SQLValue])?,
+                                 matching matchBy: SearchFilter.MatchBy?) throws -> [[(file: Int64, segment: Int64)]] {
         try patterns.map { pattern in
             var found: [(file: Int64, segment: Int64)] = []
             try store.db.query("""
                 SELECT s.file, s.id FROM fts JOIN segments s ON s.id = fts.rowid
-                WHERE fts MATCH ?\(kept.map { " AND s.file IN (\($0.sql))" } ?? "")
+                WHERE fts MATCH ?\(kept.map { " AND s.file IN (\($0.sql))" } ?? "")\(Self.inParts(matchBy))
                 """, [.text(pattern)] + (kept?.values ?? [])) { found.append(($0.int(0), $0.int(1))) }
             return found
         }
