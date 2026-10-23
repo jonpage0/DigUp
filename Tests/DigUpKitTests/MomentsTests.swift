@@ -29,11 +29,18 @@ import Testing
     }
 
     /// An index of the recording at `path` with these segments, each `cosine` like the query, and these stretches of
-    /// speech, unlike it, among 40 pictures unlike it, as most of an index is unlike any one query.
+    /// speech, unlike it, among 40 pictures unlike it, as most of an index is unlike any one query, and `notes` short
+    /// notes full of the query's words, which keyword search puts before anything else.
     func index(_ path: String, _ kind: FileKind,
                _ segments: [(kind: SegmentKind, loc: Double?, end: Double?, cosine: Double)],
-               said: [(loc: Double, end: Double, text: String)] = []) throws -> Searcher {
+               said: [(loc: Double, end: Double, text: String)] = [], notes: Int = 0) throws -> Searcher {
         let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        for number in 0..<notes {
+            let note = try store.insert(Candidate(path: "/notes/\(number).txt", kind: .doc, size: 1, mtime: 1,
+                                                  inode: UInt64(1000 + number), device: 1))
+            try store.addSegment(file: note, kind: .chunk, modality: .text, loc: 1,
+                                 text: "zebra crossing river zebra crossing river")
+        }
         for number in 0..<40 {
             let picture = try store.insert(Candidate(path: "/pictures/\(number).jpg", kind: .image, size: 1, mtime: 1,
                                                      inode: UInt64(number + 1), device: 1))
@@ -113,5 +120,16 @@ import Testing
         #expect(said.first?.words == "Look, a zebra is crossing the river!")
         let hit = try #require(try searcher.search(Self.words, queryVector: Self.query).first)
         #expect(hit.path == "/videos/river.mov" && hit.momentCount == 2)
+    }
+
+    /// A recording found by what it shows counts what's said in it with the query's words, as its preview lists them,
+    /// however many files keyword search found the words in before it.
+    @Test func aRecordingFoundByMeaningCountsWhatsSaidWithTheQuerysWords() throws {
+        let searcher = try index("/videos/clip.mov", .video, [(.frame, 0.5, 3.5, 0), (.frame, 3.5, 6, 1)],
+                                 said: [(1.2, 4.8, "Look, a zebra is crossing the river!")], notes: 100)
+        let hit = try #require(try searcher.search(Self.words, queryVector: Self.query, limit: 200)
+            .first { $0.path == "/videos/clip.mov" })
+        #expect(try searcher.moments(of: "/videos/clip.mov", text: Self.words, queryVector: Self.query).count == 2)
+        #expect(hit.momentCount == 2)
     }
 }

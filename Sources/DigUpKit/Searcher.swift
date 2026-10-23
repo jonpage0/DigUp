@@ -432,9 +432,9 @@ public final class Searcher {
                 }
                 if matchedKind != SegmentKind.name.rawValue { snippet = excerpt(text, limit: 400) }
             }
-            // A recording's moments: what stands out in it, and what's said in it with the query's words.
-            let said = coverage[file] != nil && Self.recordings.contains(row.kind)
-                ? try saidWords(inFile: file, patterns) : [:]
+            // A recording's moments: what stands out in it, and what's said in it with the query's words, looked for in
+            // it whether or not it's among keyword search's first files (`words`), as its preview looks (`moments`).
+            let said = Self.recordings.contains(row.kind) ? try saidWords(inFile: file, patterns) : [:]
             hits.append(SearchHit(path: row.path, kind: row.kind, score: score, z: semantic?.z,
                                   cosine: semantic?.cosine, keywordRank: keyword?.0, segment: segment,
                                   segmentID: segmentID, loc: loc, locEnd: locEnd, excerpt: snippet ?? storedExcerpt,
