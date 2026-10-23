@@ -2,7 +2,8 @@ import DigUpKit
 import SwiftUI
 
 /// The people, albums and devices the indexed Photos libraries name, as the search window offers them to filter by.
-struct PhotosChoices: Sendable, Equatable {
+/// Plain data, made on the engine's search queue (`Engine.photosChoices`), so none of it is the main actor's.
+nonisolated struct PhotosChoices: Sendable, Equatable {
     var people: [Person] = []
     var albums: [Album] = []
     /// The devices that took the libraries' pictures (`IndexStore.photosCameras`), most files first.
@@ -28,7 +29,7 @@ struct PhotosChoices: Sendable, Equatable {
 
     /// One name: Photos can keep two people of one name (two libraries, or a name given twice), and a picture of
     /// either counts (`SearchFilter.people`).
-    struct Person: Sendable, Equatable, Identifiable {
+    nonisolated struct Person: Sendable, Equatable, Identifiable {
         let name: String
         /// Each of them: their row in the index, and who they are in Photos (what a saved search keeps).
         let photos: [Int64: PhotosID]
@@ -41,7 +42,7 @@ struct PhotosChoices: Sendable, Equatable {
     }
 
     /// One album title in one folder: two libraries can each have it, and a file in either counts.
-    struct Album: Sendable, Equatable, Identifiable {
+    nonisolated struct Album: Sendable, Equatable, Identifiable {
         let title: String
         /// The folders it's in, outermost first.
         let folders: [String]
@@ -162,8 +163,8 @@ struct PhotosChoices: Sendable, Equatable {
 }
 
 /// A filter the window's search keeps to: a token in the search field (× or ⌫ in an empty field takes it off), and
-/// checked in its menu beside the kinds.
-enum FilterToken: Equatable, Identifiable {
+/// checked in its menu beside the kinds. Plain data, as `PhotosChoices` makes it.
+nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
     /// In the picture (every person chosen must be): the ids of everyone with that name, and who they are in Photos
     /// (what a saved search keeps). No ids: a saved search's person who isn't in the indexed libraries now, which
     /// keeps nothing (`isMissing`).
@@ -259,7 +260,7 @@ enum FilterToken: Equatable, Identifiable {
 
 /// A filter the words being typed could be (`PhotosChoices.suggestions`): taking it takes those words out of the
 /// query.
-struct FilterSuggestion: Equatable, Identifiable {
+nonisolated struct FilterSuggestion: Equatable, Identifiable, Sendable {
     let token: FilterToken
     /// The end of the query it's for.
     let replacing: String
