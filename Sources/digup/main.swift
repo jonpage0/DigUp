@@ -71,6 +71,9 @@ let usage = """
     installed (`uv tool install osxphotos`; $DIGUP_OSXPHOTOS names it, "" turns it off): see PhotosLibrary.swift.
     Each library's listing is kept in the index folder (photos/).
 
+    What's said in recordings on this Mac is read by parakeet-mlx when it and ffmpeg are installed (`uv tool install
+    parakeet-mlx`; $DIGUP_PARAKEET names it, "" turns it off): see Speech.swift.
+
     The model: EmbeddingGemma 2 on llama.cpp, from $DIGUP_MODELS (only there, when set), else
     ~/Library/Application Support/DigUp/Models or the Hugging Face cache. DIGUP_WORKER_DIR=worker uses the
     mlx-vlm reference worker instead (evals).
@@ -135,8 +138,12 @@ struct Arguments {
         options.includeHiddenPhotos = flags.contains("--include-hidden-photos")
         options.excludedFolders = (lists["--exclude"] ?? []).map { Self.folderURL($0).path }
         options.excludedExtensions = IndexOptions.extensions((lists["--exclude-ext"] ?? []).joined(separator: ","))
-        // Photos libraries through osxphotos, if it's here (never for the code index: `Crawler`).
-        if !code { options.photos = PhotosLibrary.osxphotosReader(keepingListingsIn: indexFolder) }
+        // Photos libraries through osxphotos, and what's said in recordings through parakeet-mlx, if they're here (never
+        // for the code index: `Crawler`).
+        if !code {
+            options.photos = PhotosLibrary.osxphotosReader(keepingListingsIn: indexFolder)
+            options.speech = Speech.parakeetReader()
+        }
         if let tokens = values["--shot-tokens"].flatMap(Int.init) { options.screenshotBudget = tokens }
         if let characters = values["--code-stretch"].flatMap(Int.init) { options.codeStretch = characters }
         return options
@@ -266,6 +273,8 @@ func location(_ hit: SearchHit) -> String {
     case .page, .pageImage: hit.loc.map { "p. \(Int($0))" } ?? ""
     case .audio, .frame:
         hit.loc.map { "at \(MatchDescription.clock($0))" + (hit.segment == .audio ? " (sound)" : "") } ?? ""
+    case .speech:
+        hit.loc.map { "\(MatchDescription.clock($0))–\(MatchDescription.clock(hit.locEnd ?? $0)) (said)" } ?? ""
     case .chunk: hit.loc.map { "part \(Int($0))" } ?? ""
     case .lines: hit.loc.map { "lines \(Int($0))–\(Int(hit.locEnd ?? $0))" + (hit.focus.map { ", opens at \(Int($0))" } ?? "") } ?? ""
     case .cells: hit.loc.map { $0 == hit.locEnd ? "cell \(Int($0))" : "cells \(Int($0))–\(Int(hit.locEnd ?? $0))" } ?? ""
@@ -341,6 +350,7 @@ func estimate(_ args: Arguments) throws {
                   "calibrated": calibrated,
                   "pdf_pages": estimate.pdfPages, "pdf_pages_total": estimate.pdfPagesTotal,
                   "audio_seconds": estimate.audioSeconds, "video_seconds": estimate.videoSeconds,
+                  "speech_seconds": estimate.speechSeconds,
                   "long_files": estimate.longFiles, "later_seconds": estimate.laterSeconds,
                   "code_stretches": estimate.codeStretches, "bytes": estimate.bytes,
                   "subfolders": subfolders.prefix(500).map {
@@ -364,6 +374,9 @@ func estimate(_ args: Arguments) throws {
                                      + "(\(number(estimate.codeStretches)) stretches)")
             default: kinds.append("\(number(count)) \(kind.rawValue)\(count == 1 ? "" : "s")")
             }
+        }
+        if estimate.speechSeconds > 0 {
+            kinds.append("what's said in \(duration(estimate.speechSeconds)) of recordings")
         }
         print("\(tilde(folder.path))    first index ≈ \(duration(estimate.seconds))"
               + (args.code ? ", index ≈ \(ByteCountFormatter.string(fromByteCount: Int64(estimate.bytes), countStyle: .file))" : ""))
@@ -396,7 +409,8 @@ func index(_ args: Arguments) throws {
     })
     indexer.embedderSource = embedderSource()
     indexer.costsFolder = store.directory
-    try store.readAgainOnce()   // what older indexes couldn't read: scanned pages' words, SVGs, GIFs' later frames
+    // What older indexes couldn't read: scanned pages' words, SVGs, GIFs' later frames, what's said in recordings.
+    try store.readAgainOnce(readsSpeech: indexer.readsSpeech)
     try store.locateOnce()      // where the pictures and videos it read before were taken
     try indexer.checkModel()
     let folders = try args.folders()

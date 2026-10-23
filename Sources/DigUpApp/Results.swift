@@ -70,12 +70,12 @@ struct ResultRow: Identifiable, Equatable {
         self.terms = terms
     }
 
-    /// This result at another of its moments (`Searcher.moments(of:queryVector:zGate:)`), picked under the preview:
+    /// This result at another of its moments (`Searcher.moments(of:text:queryVector:zGate:)`), picked under the preview:
     /// where it plays from, and where Quick Look and Open go. A still's file is found in `filmstrip`, the video's stills
     /// in order.
     func at(_ moment: Moment, filmstrip: [String]) -> ResultRow {
         var placed = self
-        placed.segment = moment.kind == .heard ? .audio : .frame
+        placed.segment = moment.kind.segment
         placed.segmentID = moment.segmentID
         (placed.loc, placed.locEnd) = (moment.start, moment.end)
         if let still = moment.still, filmstrip.indices.contains(still) { placed.photos?.still = filmstrip[still] }
@@ -105,6 +105,12 @@ struct ResultRow: Identifiable, Equatable {
         return words
     }
 
+    /// What the preview marks in a page, a passage or what's said: the words keyword search found, and the query's, of
+    /// two letters or more.
+    var markedWords: Set<String> {
+        Set((foundWords + terms).filter { $0.count >= 2 })
+    }
+
     /// The page or moment that matched, as a badge: "p. 3", "0:06", "♪ 0:25" (a video's sound), "L12–40" (code).
     var place: String? {
         guard let loc else { return nil }
@@ -113,6 +119,7 @@ struct ResultRow: Identifiable, Equatable {
         // A GIF's frames are a fraction of a second apart: the badge would say 0:00 for most of them.
         case .frame: return kind == .image ? nil : Self.clock(loc)
         case .audio: return kind == .video ? "♪ \(Self.clock(loc))" : Self.clock(loc)
+        case .speech: return Self.clock(loc)
         case .lines: return Int(loc) == Int(locEnd ?? loc) ? "L\(Int(loc))" : "L\(Int(loc))–\(Int(locEnd ?? loc))"
         case .cells: return span
         default: return nil

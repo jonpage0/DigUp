@@ -156,6 +156,7 @@ final class SettingsState {
         indexSize = app.engine.indexSize
         refreshAICalls()
         codeIndexSize = app.engine.codeIndexSize
+        await refreshSpeech()
         codeSummaries = await app.engine.rootSummaries(code: true)
         summaries = await app.engine.rootSummaries()
         // The Photos tab's counts follow indexing as the folders' do (its listings and access are looked at when it shows).
@@ -185,6 +186,27 @@ final class SettingsState {
 
     func refreshAICalls() {
         aiCalls = AICall.last(Self.aiCallsShown, in: model.settings.indexDirectory)
+    }
+
+    // MARK: Speech
+
+    /// parakeet-mlx and the ffmpeg it needs, as last looked for (`Speech`): with both, what's said in recordings on this
+    /// Mac is read.
+    private(set) var parakeet = Speech.parakeet
+    private(set) var ffmpeg = Speech.ffmpeg
+    /// The recordings on this Mac read before what's said in them was (`IndexStore.recordingsWithoutSpeech`), how long
+    /// they play, and how long reading them again takes here, their frames and sound with their speech (`MeasuredCosts`).
+    private(set) var unheard: (files: Int, seconds: Double, reading: Double) = (0, 0, 0)
+
+    func refreshSpeech() async {
+        parakeet = Speech.parakeet
+        ffmpeg = Speech.ffmpeg
+        let recordings = await app.engine.recordingsWithoutSpeech()
+        let costs = MeasuredCosts.load(from: model.settings.indexDirectory).costs
+        unheard = (recordings.count, recordings.reduce(0) { $0 + $1.seconds }, recordings.reduce(0) { total, recording in
+            total + recording.seconds * ((recording.kind == .audio ? costs.audioSecond : costs.videoSecond)
+                                         + costs.speechSecond)
+        })
     }
 
     // MARK: Photos
@@ -751,6 +773,22 @@ private struct StorageSettings: View {
                     }
                 }
             }
+            Section {
+                SpeechStatus(state: state)
+            } header: {
+                Text("Speech")
+            } footer: {
+                Text("What's said in recordings on this Mac is found by its words and by what it means, and shows under "
+                     + "its moment. parakeet-mlx runs NVIDIA's Parakeet TDT 0.6B v3 (25 European languages) on this "
+                     + "Mac, and downloads it the first time (\(roughBytes(Double(Speech.modelBytes)))). Recordings "
+                     + "indexed before it was found get one more pass, by themselves; a video that's only in iCloud is "
+                     + "read once it's downloaded.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Section("Index") {
                 LabeledContent("Size on disk", value: bytes(state.indexSize))
                 if state.model.hasCode {
@@ -763,19 +801,61 @@ private struct StorageSettings: View {
             Section("Privacy") {
                 Text("DigUp reads the folders you choose and keeps what it learns in its index, on this Mac. "
                      + "It goes online only to download its model, once, and to check for updates (General), "
-                     + "which sends nothing about your files.")
+                     + "which sends nothing about your files. parakeet-mlx, once you install it, downloads its speech "
+                     + "model once too.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section {
                 Text("DigUp \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · "
-                     + "EmbeddingGemma 2 by Google (Apache 2.0), run by llama.cpp (MIT).")
+                     + "EmbeddingGemma 2 by Google (Apache 2.0), run by llama.cpp (MIT). Speech: Parakeet TDT 0.6B v3 "
+                     + "by NVIDIA (CC BY 4.0), run by parakeet-mlx (Apache 2.0).")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .scrollDisabled(true)
+    }
+}
+
+/// Storage → Speech: parakeet-mlx, which reads what's said in recordings on this Mac (`Speech`), found or how to install
+/// it, and how long the first pass over the recordings indexed before takes.
+private struct SpeechStatus: View {
+    let state: SettingsState
+
+    var body: some View {
+        if let path = state.parakeet, state.ffmpeg != nil {
+            LabeledContent("parakeet-mlx") {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Text(tildePath(path)).lineLimit(1).truncationMode(.middle)
+                }
+            }
+            let unheard = state.unheard
+            if unheard.files > 0 {
+                LabeledContent("First pass") {
+                    Text("\(unheard.files == 1 ? "1 recording" : "\(unheard.files.formatted()) recordings") indexed "
+                         + "before, \(roughDuration(unheard.seconds)) of sound · \(approximately(unheard.reading))")
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text(state.parakeet == nil ? "parakeet-mlx isn't installed" : "ffmpeg isn't installed")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                Text("DigUp reads what's said in recordings through parakeet-mlx, a free tool you install once, in "
+                     + "Terminal, with ffmpeg, which it needs. Until then recordings are found by what's seen and heard "
+                     + "in them.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                InstallCommand(command: state.parakeet == nil ? Speech.installCommand : Speech.ffmpegInstallCommand,
+                               about: InstallCommand.parakeet, checkAgain: { Task { await state.refreshSpeech() } })
+            }
+        }
     }
 }
 
@@ -817,7 +897,8 @@ private struct PhotosSettings: View {
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        InstallOSXPhotos(checkAgain: { Task { await state.refreshPhotos() } })
+                        InstallCommand(command: PhotosLibrary.installCommand, about: InstallCommand.osxphotos,
+                                       checkAgain: { Task { await state.refreshPhotos() } })
                     }
                 }
             } header: {

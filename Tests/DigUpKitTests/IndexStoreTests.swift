@@ -70,9 +70,9 @@ import WinSDK
         try store.finish(svg, state: "skipped", detail: "small image 0×0")
         let icon = try store.insert(file("/a/icon.png", inode: 2))
         try store.finish(icon, state: "skipped", detail: "small image 160×160")   // small, and rightly skipped
-        #expect(try store.readAgainOnce() == 1)
+        #expect(try store.readAgainOnce(readsSpeech: false) == 1)
         #expect(try store.pending(limit: nil).map(\.path) == ["/a/chart.svg"])
-        #expect(try store.readAgainOnce() == 0)
+        #expect(try store.readAgainOnce(readsSpeech: false) == 0)
     }
 
     @Test func gifsReadBeforeTheirFramesWereAreReadOnceMore() throws {
@@ -87,7 +87,7 @@ import WinSDK
         try store.finish(framed, state: "done")
         try store.finish(try store.insert(file("/a/icon.gif", inode: 3)), state: "skipped", detail: "small image 64×64")
         try store.finish(try store.insert(file("/a/photo.png", inode: 4)), state: "done")
-        #expect(try store.readAgainOnce() == 1)
+        #expect(try store.readAgainOnce(readsSpeech: false) == 1)
         #expect(try store.pending(limit: nil).map(\.path) == ["/a/dance.GIF"])
         var images = 0
         try store.db.query("SELECT COUNT(*) FROM segments WHERE file = ? AND kind = 'image'", [.int(dance)]) {
@@ -95,9 +95,39 @@ import WinSDK
         }
         #expect(images == 0)   // what was read of it goes until it's read again
         try store.finish(dance, state: "done")
-        #expect(try store.readAgainOnce() == 0)
+        #expect(try store.readAgainOnce(readsSpeech: false) == 0)
     }
     #endif
+
+    @Test func recordingsReadBeforeWhatsSaidInThemWasAreReadOnceMore() throws {
+        // Read by a DigUp without parakeet-mlx: an audio file and a video, read again once it's here, once. Not one read
+        // with it (nothing said in it, or why it couldn't be read), a Photos video in iCloud (read from Photos' stills:
+        // its sound isn't here), or a picture.
+        let store = try IndexStore(directory: folder)
+        func recording(_ path: String, _ kind: FileKind, inode: UInt64, info: [String: String]) throws -> Int64 {
+            let id = try store.insert(Candidate(path: path, kind: kind, size: 10, mtime: 1, inode: inode, device: 1))
+            try store.finish(id, state: "done", info: info)
+            return id
+        }
+        let talk = try recording("/a/talk.m4a", .audio, inode: 1, info: ["duration": "61.0"])
+        let clip = try recording("/a/clip.mov", .video, inode: 2, info: ["duration": "12.5", "frames": "4"])
+        _ = try recording("/a/song.m4a", .audio, inode: 3, info: ["duration": "200.0", IndexStore.speechInfo: "0"])
+        _ = try recording("/a/hum.m4a", .audio, inode: 4,
+                          info: ["duration": "9.0", IndexStore.speechProblemInfo: "parakeet-mlx took too long"])
+        let inCloud = try recording("/a/L.photoslibrary/resources/derivatives/cvt/F/FC37DBA6-CF22-4E3E-AB70-755587454608"
+                                    + "_cvt_t0000.jpeg", .video, inode: 5, info: ["frames": "6"])
+        try store.db.run("INSERT INTO photos_assets(file, favorite, reading, origin) VALUES(?, 0, 'stills', 'camera')",
+                         [.int(inCloud)])
+        try store.finish(try store.insert(file("/a/photo.png", inode: 6)), state: "done")
+        #expect(Dictionary(uniqueKeysWithValues: try store.recordingsWithoutSpeech().map { ($0.id, $0.seconds) })
+                == [talk: 61, clip: 12.5])
+        #expect(try store.readAgainOnce(readsSpeech: false) == 0)   // no parakeet-mlx yet: nothing, and no mark
+        #expect(try store.meta(IndexStore.speechReadKey) == nil)
+        #expect(try store.readAgainOnce(readsSpeech: true) == 2)
+        #expect(Set(try store.pending(limit: nil).map(\.id)) == [talk, clip])
+        try store.finish(talk, state: "done")   // read again, as if parakeet-mlx had gone meanwhile
+        #expect(try store.readAgainOnce(readsSpeech: true) == 0)
+    }
 
     @Test func theForksTablesAreAddedOnceAndTheSchemaStaysUpstreams() throws {
         let fork: Set = ["locations", "photos_people", "photos_person_files", "photos_person_files_file",

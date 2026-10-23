@@ -65,6 +65,9 @@ final class MCPServer {
 
     /// `read_text`'s words at most, in characters.
     static let readLimit = 20_000
+    /// `read_text`'s `moment`: what's said this long before and after it, in seconds (a stretch of speech is at most
+    /// about 30 s, `Speech`).
+    static let speechAround = 30.0
     /// The latest `moment` asked for, in seconds: far past any recording's end, and a time a clock can still say.
     static let latestMoment = Double(Int32.max)
     /// `search_files`' results: by default, and at most.
@@ -559,7 +562,7 @@ final class MCPServer {
         guard let loc = hit.loc else { return nil }
         switch hit.segment {
         case .page, .pageImage: return "page \(Int(loc))"
-        case .frame where hit.kind != .image, .audio:
+        case .frame where hit.kind != .image, .audio, .speech:
             let end = hit.locEnd.flatMap { $0 > loc ? "–" + MatchDescription.clock($0) : nil } ?? ""
             return MatchDescription.clock(loc) + end
         case .lines, .cells: return MatchDescription.span(hit.segment, loc: loc, locEnd: hit.locEnd)
@@ -585,14 +588,26 @@ final class MCPServer {
         var found = try store.words(of: path, keptBy: allowed)
         if found == nil, access.code { found = try codeIndex()?.store.words(of: path, keptBy: SearchFilter()) }
         guard let words = found else { return try unseen(path, access: access) }
-        if moment != nil {
-            return .error("DigUp keeps no words of a recording yet, only what's seen and heard in it: "
-                          + "leave out moment.")
+        let parts: [IndexStore.Words]
+        if let moment {
+            let said = words.filter { $0.segment == .speech }
+            guard !said.isEmpty else {
+                return .error("DigUp has no words said in that file (it reads what's said in recordings on this Mac): "
+                              + "leave out moment.")
+            }
+            parts = said.filter {
+                ($0.locEnd ?? $0.loc ?? 0) >= moment - Self.speechAround && ($0.loc ?? 0) <= moment + Self.speechAround
+            }
+            if parts.isEmpty {
+                return .error("DigUp has no words said within \(Int(Self.speechAround)) s of "
+                              + "\(MatchDescription.clock(moment)) in that file.")
+            }
+        } else if let page {
+            parts = words.filter { ($0.segment == .page || $0.segment == .pageImage) && $0.loc.map(Int.init) == page }
+            if parts.isEmpty { return .error("DigUp has no words of page \(page) of that file.") }
+        } else {
+            parts = words
         }
-        let parts = page.map { page in
-            words.filter { ($0.segment == .page || $0.segment == .pageImage) && $0.loc.map(Int.init) == page }
-        } ?? words
-        if let page, parts.isEmpty { return .error("DigUp has no words of page \(page) of that file.") }
         var left = Self.readLimit, truncated = false
         var read: [[String: Any]] = []
         for part in parts where left > 0 {
@@ -622,7 +637,8 @@ final class MCPServer {
         return (path, page, moment)
     }
 
-    /// Where a part of a file's words is: its page, passage or lines; what Photos knows of it; the text in a picture.
+    /// Where a part of a file's words is: its page, passage or lines; what Photos knows of it; the text in a picture;
+    /// when it's said in a recording.
     static func whereRead(_ words: IndexStore.Words) -> String? {
         switch words.segment {
         case .page, .pageImage: words.loc.map { "page \(Int($0))" }
@@ -630,6 +646,7 @@ final class MCPServer {
         case .lines, .cells: MatchDescription.span(words.segment, loc: words.loc, locEnd: words.locEnd)
         case .ocr: "the text in the picture"
         case .photosInfo: "what Photos knows about it"
+        case .speech: words.loc.map { MatchDescription.clock($0) + "–" + MatchDescription.clock(words.locEnd ?? $0) }
         default: nil
         }
     }
@@ -803,7 +820,8 @@ final class MCPServer {
         ["path": ["type": "string", "description": "A path search_files returned."],
          "page": ["type": "integer", "minimum": 1, "description": "A PDF's page, from 1."],
          "moment": ["type": "number", "minimum": 0, "maximum": latestMoment,
-                    "description": "Seconds into a recording."]]
+                    "description": "Seconds into a recording: what's said around then (read_text), or the frame there "
+                        + "(get_picture)."]]
     }
 
     /// The four tools (MCP-PLAN.md, "Tools").
@@ -842,7 +860,8 @@ final class MCPServer {
                  properties: searchProperties),
             tool("read_text", title: "Read a file's words",
                  description: "The words DigUp read from one file search_files returned: a document's text, a PDF's "
-                    + "page, the text in a screenshot, what Photos knows about a picture, a stretch of code. Up to "
+                    + "page, the text in a screenshot, what Photos knows about a picture, a stretch of code, what's "
+                    + "said in a recording (with moment: what's said within \(Int(speechAround)) s of it). Up to "
                     + "\(readLimit) characters.",
                  properties: pathAndPlaceProperties, required: ["path"]),
             tool("get_picture", title: "Look at a file",

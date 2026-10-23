@@ -29,6 +29,7 @@ public enum MatchDescription {
         guard meaning else {
             // Photos' words: a person's name, a place, a keyword or an album.
             if words, segment == .photosInfo { return "Has your words in Photos" }
+            if words, segment == .speech, let loc { return "Says your words at \(clock(loc))" }
             if words { return "Has your words" }
             return listed ? "Fits your filters" : "Matches its name"
         }
@@ -49,6 +50,7 @@ public enum MatchDescription {
         case .name: return "Matches its name"
         case .photosInfo: return "Matches what Photos knows about it"
         case .lines, .cells: return "Matches \(span(segment, loc: loc, locEnd: locEnd) ?? "the code")"
+        case .speech: return "Matches what's said at \(place)"
         }
     }
 }

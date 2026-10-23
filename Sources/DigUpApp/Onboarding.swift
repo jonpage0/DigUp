@@ -508,7 +508,8 @@ private struct PhotosChoice: View {
                     Text("To search your photos too, install osxphotos once, in Terminal; DigUp reads the library "
                          + "through it.")
                         .fixedSize(horizontal: false, vertical: true)
-                    InstallOSXPhotos(checkAgain: { state.checkForOSXPhotos() })
+                    InstallCommand(command: PhotosLibrary.installCommand, about: InstallCommand.osxphotos,
+                                   checkAgain: { state.checkForOSXPhotos() })
                 } else {
                     Text("Found by what's in each picture, and by what Photos knows: the people you've named, places, "
                          + "keywords, albums. Results open in Photos.")
@@ -543,14 +544,20 @@ private struct PhotosChoice: View {
     }
 }
 
-/// The command that installs osxphotos, to copy, and a button to look for it again once it's in.
-struct InstallOSXPhotos: View {
+/// The command that installs a tool DigUp runs (osxphotos, parakeet-mlx), to copy, a button to look for it again once
+/// it's in, and a link to the tool.
+struct InstallCommand: View {
+    let command: String
+    let about: (title: String, url: URL)
     let checkAgain: () -> Void
     @State private var copied = false
 
+    static let osxphotos = (title: "About osxphotos", url: URL(string: "https://github.com/RhetTbull/osxphotos")!)
+    static let parakeet = (title: "About parakeet-mlx", url: URL(string: "https://github.com/senstella/parakeet-mlx")!)
+
     var body: some View {
         HStack(spacing: 8) {
-            Text(PhotosLibrary.installCommand)
+            Text(command)
                 .font(.system(size: 11, design: .monospaced))
                 .textSelection(.enabled)
                 .padding(.horizontal, 6)
@@ -558,13 +565,13 @@ struct InstallOSXPhotos: View {
                 .background(RoundedRectangle(cornerRadius: 4).fill(Color.primary.opacity(0.07)))
             Button(copied ? "Copied" : "Copy") {
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(PhotosLibrary.installCommand, forType: .string)
+                NSPasteboard.general.setString(command, forType: .string)
                 copied = true
             }
             .controlSize(.small)
             Button("Check Again", action: checkAgain)
                 .controlSize(.small)
-            Link("About osxphotos", destination: URL(string: "https://github.com/RhetTbull/osxphotos")!)
+            Link(about.title, destination: about.url)
                 .font(.system(size: 11))
                 .foregroundStyle(.tint)
         }

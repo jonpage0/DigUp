@@ -385,18 +385,18 @@ public final class IndexStore {
     }
 
     /// One part of a file's words as indexing read them: a page, a passage, the text in a picture, what Photos knows
-    /// about it, a stretch of code.
+    /// about it, a stretch of code, a stretch of what's said in a recording.
     public struct Words: Sendable, Equatable {
         public let segment: SegmentKind
-        /// The page, the passage's number, or a stretch of code's first line (or cell); nil for a picture's text and
-        /// Photos' words.
+        /// The page, the passage's number, a stretch of code's first line (or cell), or the second a stretch of what's
+        /// said starts; nil for a picture's text and Photos' words.
         public let loc: Double?
         public let locEnd: Double?
         public let text: String
     }
 
     /// The segments that hold a file's words, as an SQL list.
-    private static let wordSegments = [SegmentKind.page, .pageImage, .chunk, .ocr, .photosInfo, .lines, .cells]
+    private static let wordSegments = [SegmentKind.page, .pageImage, .chunk, .ocr, .photosInfo, .lines, .cells, .speech]
         .map { "'\($0.rawValue)'" }.joined(separator: ",")
 
     /// The words read from the file at `path`, in order, when the filter keeps it (`digup mcp`'s `read_text`); nil for
@@ -573,11 +573,13 @@ public final class IndexStore {
     /// Files read once more because DigUp reads them better now, each kind once per index (the schema stays as it was,
     /// so an older DigUp still opens the index): PDFs with pages read as pictures, whose words come from OCR now
     /// (`meta` "scans_ocr"), pictures that couldn't be read at all, like SVGs, which AppKit draws now
-    /// ("pictures_drawn"), and GIFs read before an animated one's later frames were read too (`animationFrames`), each
+    /// ("pictures_drawn"), GIFs read before an animated one's later frames were read too (`animationFrames`), each
     /// read again unless it has frames already ("gifs_framed"; a GIF that isn't animated is read again once as well, as
-    /// telling them apart would mean reading every one). Only where this machine does each. Returns how many files.
+    /// telling them apart would mean reading every one), and, once `readsSpeech` (parakeet-mlx is here), the recordings
+    /// read before what's said in them was (`recordingsWithoutSpeech`, `speechReadKey`). Only where this machine does
+    /// each. Returns how many files.
     @discardableResult
-    public func readAgainOnce() throws -> Int {
+    public func readAgainOnce(readsSpeech: Bool) throws -> Int {
         var files = Set<Int64>(), flags: [String] = []
         if OCR.isAvailable, try meta("scans_ocr") == nil {
             try db.query("SELECT DISTINCT file FROM segments WHERE kind = 'page_image'") { files.insert($0.int(0)) }
@@ -595,12 +597,51 @@ public final class IndexStore {
                 """) { files.insert($0.int(0)) }
             flags.append("gifs_framed")
         }
+        if readsSpeech, try meta(Self.speechReadKey) == nil {
+            files.formUnion(try recordingsWithoutSpeech().map(\.id))
+            flags.append(Self.speechReadKey)
+        }
         guard !flags.isEmpty else { return 0 }
         try db.transaction {
             for file in files { try requeue(file) }
             for flag in flags { try setMeta(flag, "1") }
         }
         return files.count
+    }
+
+    /// `meta` "fork_speech_read": the recordings read before what's said in them was have been queued to be read again,
+    /// once (`readAgainOnce`). The fork's, as its tables are (`forkFactsKey`).
+    static let speechReadKey = "fork_speech_read"
+
+    /// A recording's info (`Indexer`): how many stretches of speech were read in it ("0": nothing is said), or why what's
+    /// said in it couldn't be read. A recording read with no reader of speech has neither.
+    static let speechInfo = "speech"
+    static let speechProblemInfo = "speech_problem"
+
+    /// A recording on this Mac read before what's said in it was (`Speech`), and how long it is.
+    public struct UnheardRecording: Sendable {
+        public let id: Int64
+        public let kind: FileKind
+        public let seconds: Double
+    }
+
+    /// The recordings on this Mac read without their speech: audio and video files read while there was no reader of
+    /// speech (their info has neither `speechInfo` nor `speechProblemInfo`). Not a video in iCloud, read from Photos'
+    /// stills or its poster: its sound isn't here.
+    public func recordingsWithoutSpeech() throws -> [UnheardRecording] {
+        let standIns = PhotosLibrary.Reading.allCases.filter(\.isStandIn).map { "'\($0.rawValue)'" }.joined(separator: ",")
+        var recordings: [UnheardRecording] = []
+        try db.query("""
+            SELECT id, kind, CAST(json_extract(info, '$.duration') AS REAL) FROM files
+            WHERE kind IN (\(Self.sqlList([.audio, .video]))) AND state = 'done'
+            AND json_extract(info, '$.\(Self.speechInfo)') IS NULL
+            AND json_extract(info, '$.\(Self.speechProblemInfo)') IS NULL
+            AND id NOT IN (SELECT file FROM photos_assets WHERE reading IN (\(standIns)))
+            """) { row in
+            guard let kind = FileKind(rawValue: row.text(1) ?? "") else { return }
+            recordings.append(UnheardRecording(id: row.int(0), kind: kind, seconds: row.isNull(2) ? 0 : row.double(2)))
+        }
+        return recordings
     }
 
     /// `meta` "locations_read": "1" once every picture and video read before DigUp kept locations has had its look

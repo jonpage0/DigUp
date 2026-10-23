@@ -285,24 +285,9 @@ public enum PhotosLibrary {
 
     // MARK: osxphotos
 
-    /// The osxphotos program: $DIGUP_OSXPHOTOS (empty: none), else where `uv tool install`, pipx, `pip install --user`,
-    /// Homebrew or MacPorts put it, else on PATH. The app's helpers run with launchd's PATH, which has none of those.
-    /// Nil where it isn't installed, and off the Mac. Looked for each time (a few file checks): installed while the app
-    /// runs, it's found without a relaunch.
-    public static var osxphotos: String? {
-        #if os(macOS)
-        let environment = ProcessInfo.processInfo.environment
-        let fm = FileManager.default
-        if let chosen = environment["DIGUP_OSXPHOTOS"] {
-            return !chosen.isEmpty && fm.isExecutableFile(atPath: chosen) ? chosen : nil
-        }
-        let folders = [fm.homeDirectoryForCurrentUser.path + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin",
-                       "/opt/local/bin"] + (environment["PATH"] ?? "").split(separator: ":").map(String.init)
-        return folders.map { $0 + "/osxphotos" }.first { fm.isExecutableFile(atPath: $0) }
-        #else
-        return nil
-        #endif
-    }
+    /// The osxphotos program, where `InstalledPrograms` finds it: $DIGUP_OSXPHOTOS names one (empty: none). Nil where it
+    /// isn't installed, and off the Mac.
+    public static var osxphotos: String? { InstalledPrograms.path(of: "osxphotos", chosenBy: "DIGUP_OSXPHOTOS") }
 
     /// The command that installs osxphotos, as the app shows it.
     public static let installCommand = "uv tool install osxphotos"

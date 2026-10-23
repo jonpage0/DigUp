@@ -32,6 +32,9 @@ public enum SegmentKind: String, Sendable {
     /// only: its text is Photos' words, its excerpt the title a result shows, its loc the date it was taken (seconds
     /// since 1970). The crawl writes it and keeps it current, as it does the name row; reading the file doesn't touch it.
     case photosInfo = "photos_info"
+    /// A stretch of what's said in a recording (`Speech`): loc to loc_end are its first word's start and its last word's
+    /// end, in seconds; its words are its text and its excerpt, and it has a text vector as a document's passage does.
+    case speech
 }
 
 /// What produced a segment's vector. Scores are normalized per modality because text vectors score higher than
@@ -121,6 +124,9 @@ public struct IndexOptions: Sendable {
     public var photos: PhotosLibrary.Reader?
     /// Also what's hidden in Photos (its Hidden album), which a library's listing otherwise leaves out.
     public var includeHiddenPhotos = false
+    /// How what's said in recordings is read (`Speech`): nil, and recordings are read by what's seen and heard alone.
+    /// Never for the code index.
+    public var speech: Speech.Reader?
 
     public init() {}
 

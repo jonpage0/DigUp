@@ -269,9 +269,9 @@ import Testing
 
         // An index made before scans had words reads them once more, and only once.
         try store.setMeta("scans_ocr", nil)
-        #expect(try store.readAgainOnce() == 1)
+        #expect(try store.readAgainOnce(readsSpeech: false) == 1)
         #expect(try store.pendingCount() == 1)
-        #expect(try store.readAgainOnce() == 0)
+        #expect(try store.readAgainOnce(readsSpeech: false) == 0)
     }
     #endif
 

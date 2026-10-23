@@ -85,6 +85,9 @@ public final class Indexer {
 
     public var workerIsRunning: Bool { worker != nil }
 
+    /// It reads what's said in recordings (`IndexOptions.speech`).
+    public var readsSpeech: Bool { options.speech != nil }
+
     // MARK: Sync
 
     /// Crawls `roots` and reconciles the index: new files are queued, changed ones re-queued, moved ones re-pathed
@@ -343,8 +346,13 @@ public final class Indexer {
             // what a chunk of prose costs (the estimate can't tell them apart from a file's size).
             let worded = chunks.filter(SearchText.hasWords).count
             if worded > 0 { measured.add("docChunk", units: Double(worded), seconds: seconds) }
-        case .audio(_, let duration): measured.add("audioSecond", units: duration, seconds: seconds)
-        case .video(_, _, let duration, _): measured.add("videoSecond", units: duration, seconds: seconds)
+        // What's said is tallied apart (`Costs.speechSecond`): the job waited while it was read.
+        case .audio(_, let duration, let speech):
+            measured.add("audioSecond", units: duration, seconds: seconds - (speech?.seconds ?? 0))
+            if let heard = speech?.seconds { measured.add("speechSecond", units: duration, seconds: heard) }
+        case .video(_, _, let duration, _, let speech):
+            measured.add("videoSecond", units: duration, seconds: seconds - (speech?.seconds ?? 0))
+            if let heard = speech?.seconds { measured.add("speechSecond", units: duration, seconds: heard) }
         case .code(let file): measured.add("codeStretch", units: Double(file.pieces.count), seconds: seconds)
         // A video in iCloud's stills are pictures, not seconds of video, which is what the estimate counts of one.
         case .nothing, .stills: break
@@ -433,13 +441,29 @@ public final class Indexer {
         case pdf(pages: [PDFExtractor.Page], read: Range<Int>, total: Int, title: String?)
         /// `chunks`: the ones in `read` (from 0) of the document's `total` (counted up to `IndexOptions.maxChunks` + 1).
         case doc(chunks: [String], read: Range<Int>, total: Int, characters: Int)
-        case audio(pieces: [MediaPiece], duration: Double)
+        /// `speech`: what's said in it, when that's read (`IndexOptions.speech`).
+        case audio(pieces: [MediaPiece], duration: Double, speech: SpeechRead?)
         /// `location`: where it was taken, from its own metadata (none read for a Photos library's video).
-        case video(frames: [MediaPiece], sound: [MediaPiece], duration: Double, location: Location?)
+        case video(frames: [MediaPiece], sound: [MediaPiece], duration: Double, location: Location?, speech: SpeechRead?)
         /// A library's video in iCloud: Photos' stills of it, or its poster (`PhotosLibrary.Reading.isStandIn`), as
         /// pictures for the model.
         case stills([String])
         case code(CodeExtractor.File)
+    }
+
+    /// What a recording was heard to say (`Speech`) and how long reading it took, or why it couldn't be read.
+    enum SpeechRead: Sendable {
+        case said([Speech.Stretch], seconds: Double)
+        case failed(String)
+
+        var stretches: [Speech.Stretch] {
+            if case .said(let stretches, _) = self { stretches } else { [] }
+        }
+
+        /// How long parakeet-mlx took (`MeasuredCosts`); nil when it failed.
+        var seconds: Double? {
+            if case .said(_, let seconds) = self { seconds } else { nil }
+        }
     }
 
     struct ReadyImage: Sendable {
@@ -557,7 +581,9 @@ public final class Indexer {
                 let (pieces, duration) = try runBlocking {
                     try await AudioExtractor.windows(of: url, window: window, hop: hop, to: folder)
                 }
-                prepared.payload = .audio(pieces: pieces, duration: duration)
+                prepared.payload = .audio(pieces: pieces, duration: duration,
+                                          speech: speech(of: url, duration: duration, heard: !pieces.isEmpty,
+                                                         options: options, in: folder))
             case .video where job.reading?.isStandIn == true:
                 // A library's video in iCloud: the stills of Photos' filmstrip of it, or its poster, each read whatever
                 // its size (it's all this Mac has of the video).
@@ -579,7 +605,9 @@ public final class Indexer {
                 // A library's video has Photos' location (the sync's), the one the user sees and can correct.
                 let location = PhotosLibrary.library(containing: url.path) == nil
                     ? VideoExtractor.location(of: url) : nil
-                prepared.payload = .video(frames: frames, sound: sound, duration: duration, location: location)
+                prepared.payload = .video(frames: frames, sound: sound, duration: duration, location: location,
+                                          speech: speech(of: url, duration: duration, heard: !sound.isEmpty,
+                                                         options: options, in: folder))
             case .code:
                 prepared.payload = .code(try CodeExtractor.read(url, options: options))
             }
@@ -599,6 +627,25 @@ public final class Indexer {
             prepared.payload = .nothing
         }
         return prepared
+    }
+
+    /// What's said in a recording on this Mac (`Speech`), when `options.speech` reads it; nil when nothing does. Nothing
+    /// is said in one without sound worth a window (`AudioExtractor.windows`: all of it under about −50 dBFS), so that's
+    /// not read. parakeet-mlx is a program of its own with a time limit of its own (`Speech.parakeetReader`): the
+    /// watchdog, which can only end this process, doesn't time it.
+    private static func speech(of url: URL, duration: Double, heard: Bool, options: IndexOptions, in folder: URL)
+        -> SpeechRead? {
+        guard let reader = options.speech else { return nil }
+        guard heard else { return .said([], seconds: 0) }
+        let started = Date()
+        readingLock.withLock { reading = nil }
+        defer { startReading(url.path) }
+        do {
+            return .said(Speech.stretches(of: try reader.read(url, folder, duration)),
+                         seconds: Date().timeIntervalSince(started))
+        } catch {
+            return .failed("\(error)")
+        }
     }
 
     // MARK: Commit (the indexing thread: the model and the database)
@@ -625,10 +672,11 @@ public final class Indexer {
             case .doc(let chunks, let read, let total, let characters):
                 results[0] = try doc(batch[0], chunks: chunks, read: read, total: total, characters: characters,
                                      later: later)
-            case .audio(let pieces, let duration):
-                results[0] = try audio(batch[0], pieces: pieces, duration: duration)
-            case .video(let frames, let sound, let duration, let location):
-                results[0] = try video(batch[0], frames: frames, sound: sound, duration: duration, location: location)
+            case .audio(let pieces, let duration, let speech):
+                results[0] = try audio(batch[0], pieces: pieces, duration: duration, speech: speech)
+            case .video(let frames, let sound, let duration, let location, let speech):
+                results[0] = try video(batch[0], frames: frames, sound: sound, duration: duration, location: location,
+                                       speech: speech)
             case .stills(let stills):
                 results[0] = try self.stills(batch[0], stills)
             case .code(let code):
@@ -827,24 +875,28 @@ public final class Indexer {
                 + (worded.count < code.pieces.count ? ", \(code.pieces.count - worded.count) for keywords only" : ""))
     }
 
-    private func audio(_ file: FileRecord, pieces: [MediaPiece], duration: Double) throws -> (String, String?) {
+    private func audio(_ file: FileRecord, pieces: [MediaPiece], duration: Double, speech: SpeechRead?) throws
+        -> (String, String?) {
         guard !pieces.isEmpty else {
             try store.finish(file.id, state: "skipped", detail: "silent or shorter than 2 s")
             return ("skipped", "silent or too short")
         }
         let vectors = try fullWorker().embedAudio(pieces.map(\.path))
+        let said = try speechVectors(file, speech)
         try store.db.transaction {
             for (piece, embedding) in zip(pieces, vectors) {
                 try store.addSegment(file: file.id, kind: .audio, modality: .audio, loc: piece.start, locEnd: piece.end,
                                      vector: embedding.vector)
             }
-            try store.finish(file.id, state: "done", info: ["duration": String(format: "%.1f", duration)])
+            var info = ["duration": String(format: "%.1f", duration)]
+            try addSpeech(said, read: speech, of: file, info: &info)
+            try store.finish(file.id, state: "done", info: info)
         }
-        return ("done", "\(pieces.count) windows, \(Int(duration)) s")
+        return ("done", "\(pieces.count) windows, \(Int(duration)) s" + Self.note(speech))
     }
 
     private func video(_ file: FileRecord, frames: [MediaPiece], sound: [MediaPiece], duration: Double,
-                       location: Location?) throws -> (String, String?) {
+                       location: Location?, speech: SpeechRead?) throws -> (String, String?) {
         guard !frames.isEmpty || !sound.isEmpty else {
             try store.finish(file.id, state: "skipped", detail: "no frames or sound")
             return ("skipped", "no frames or sound")
@@ -852,6 +904,7 @@ public final class Indexer {
         let worker = try fullWorker()
         let frameVectors = try worker.embedImages(frames.map(\.path), budget: options.frameBudget)
         let soundVectors = try worker.embedAudio(sound.map(\.path))
+        let said = try speechVectors(file, speech)
         try store.db.transaction {
             for (frame, embedding) in zip(frames, frameVectors) {
                 try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
@@ -861,11 +914,54 @@ public final class Indexer {
                 try store.addSegment(file: file.id, kind: .audio, modality: .audio, loc: piece.start,
                                      locEnd: piece.end, vector: embedding.vector)
             }
-            try store.finish(file.id, state: "done", info: ["duration": String(format: "%.1f", duration),
-                                                            "frames": "\(frames.count)", "sound_windows": "\(sound.count)"])
+            var info = ["duration": String(format: "%.1f", duration), "frames": "\(frames.count)",
+                        "sound_windows": "\(sound.count)"]
+            try addSpeech(said, read: speech, of: file, info: &info)
+            try store.finish(file.id, state: "done", info: info)
             if let location { try store.setLocation(location, of: file.id) }
         }
-        return ("done", "\(frames.count) frames, \(sound.count) sound windows, \(Int(duration)) s")
+        return ("done", "\(frames.count) frames, \(sound.count) sound windows, \(Int(duration)) s" + Self.note(speech))
+    }
+
+    /// A recording's stretches of speech, each with a text vector made as a document's passage's is (`doc`), titled
+    /// with the file's name (none for a Photos library's file, which is named for its asset's uuid). Speech that's mostly
+    /// digits gets keyword search only.
+    private func speechVectors(_ file: FileRecord, _ speech: SpeechRead?) throws -> [(Speech.Stretch, [Float]?)] {
+        let stretches = speech?.stretches ?? []
+        let worded = stretches.indices.filter { SearchText.hasWords(stretches[$0].text) }
+        guard !worded.isEmpty else { return stretches.map { ($0, nil) } }
+        let name = IndexStore.nameText(file.path)
+        let title = name.isEmpty ? nil : (name as NSString).deletingPathExtension
+        let vectors = try fullWorker().embedTexts(worded.map { Prompts.document(title: title, text: stretches[$0].text) })
+        let vector = Dictionary(uniqueKeysWithValues: zip(worded, vectors))
+        return stretches.indices.map { (stretches[$0], vector[$0]) }
+    }
+
+    /// Writes a recording's stretches of speech (`speechVectors`) as `speech` segments, their words for keyword search
+    /// and to show, and puts in its info how many there are, or why they couldn't be read. A recording read without a
+    /// reader has neither, which is how the read-again pass finds it (`IndexStore.recordingsWithoutSpeech`).
+    private func addSpeech(_ said: [(Speech.Stretch, [Float]?)], read speech: SpeechRead?, of file: FileRecord,
+                           info: inout [String: String]) throws {
+        for (stretch, vector) in said {
+            try store.addSegment(file: file.id, kind: .speech, modality: .text, loc: stretch.start, locEnd: stretch.end,
+                                 excerpt: excerpt(stretch.text), text: stretch.text, vector: vector)
+        }
+        switch speech {
+        case .said(let stretches, _): info[IndexStore.speechInfo] = "\(stretches.count)"
+        case .failed(let why): info[IndexStore.speechProblemInfo] = why
+        case nil: break
+        }
+    }
+
+    /// What a recording's event says of its speech: ", 4 stretches of speech", ", nothing said", or why it wasn't read.
+    private static func note(_ speech: SpeechRead?) -> String {
+        switch speech {
+        case .said(let stretches, _):
+            stretches.isEmpty ? ", nothing said"
+                : ", \(stretches.count) \(stretches.count == 1 ? "stretch" : "stretches") of speech"
+        case .failed(let why): ", speech not read: \(why)"
+        case nil: ""
+        }
     }
 
     /// A library's video in iCloud, from what Photos keeps of it (`PhotosLibrary.Reading.isStandIn`): each still a frame

@@ -12,9 +12,10 @@ Search the files on your computer by what's in them, with Google DeepMind's
 <sub>Free and open source. Everything runs on your computer.</sub></p>
 
 > **This fork** of [ARahim3/DigUp](https://github.com/ARahim3/DigUp) adds Apple Photos libraries, read through
-> [osxphotos](https://github.com/RhetTbull/osxphotos): see [Apple Photos](#apple-photos). The downloads above are
-> upstream's and don't have it. To build this fork, clone `https://github.com/jonpage0/DigUp` (branch `apple-photos`)
-> and follow "Build from source" below.
+> [osxphotos](https://github.com/RhetTbull/osxphotos) (see [Apple Photos](#apple-photos)), and what's said in
+> recordings, read through [parakeet-mlx](https://github.com/senstella/parakeet-mlx) (see [What's said](#whats-said)).
+> The downloads above are upstream's and have neither. To build this fork, clone `https://github.com/jonpage0/DigUp`
+> (branch `apple-photos`) and follow "Build from source" below.
 
 <p align="center"><img src="docs/demo.gif" width="800" alt="DigUp's search panel on a Mac, on Windows and on Linux: a zebra in a video, a podcast minute, a clause in a lease, a dog on the beach in English, Bengali and Arabic, and code that opens in Zed."></p>
 
@@ -31,6 +32,8 @@ words, and it finds the match, whatever kind of file it is.
 
 - "zebra in a video" opens the clip at the moment the zebra shows up
 - "where they talk about sleep" jumps to that minute of a podcast
+- "where she says the flight is cancelled" finds that stretch of a recording, by the words said or by what they mean
+  (on a Mac with parakeet-mlx: see [What's said](#whats-said))
 - "the clause about pets in the lease" shows the PDF page
 - "a dog on the beach" finds the photo, and "payment declined error" the screenshot
 - a search in English can find a note written in Bengali, Arabic or any of the model's 100+ languages, and the other
@@ -43,11 +46,12 @@ so a search gets both the meaning and the exact string. On a Mac that includes t
 ## Private
 
 Nothing you index leaves your computer. DigUp goes online only to download the model once and to check for updates
-once a day. The update check sends nothing about your files, and you can turn it off. No account, no telemetry. The
-search window's map is Apple Maps: while it's showing, Apple is sent the area in view to draw it, nothing about your
-files, and it never shows unless you open it. Download Original, on a Photos result, has Photos fetch that original
-from your iCloud, as Photos does when you open it. AI apps can search through DigUp only once you let them (see AI
-apps), and what they read goes to their AI provider.
+once a day; parakeet-mlx, if you install it, downloads its speech model once. The update check sends nothing about
+your files, and you can turn it off. No account, no telemetry. The search window's map is Apple Maps: while it's
+showing, Apple is sent the area in view to draw it, nothing about your files, and it never shows unless you open it.
+Download Original, on a Photos result, has Photos fetch that original from your iCloud, as Photos does when you open
+it. AI apps can search through DigUp only once you let them (see AI apps), and what they read goes to their AI
+provider.
 
 ## Install
 
@@ -131,11 +135,11 @@ Only the folders you choose:
 - documents: txt, md, rtf, docx, odt, html, and on a Mac doc, long ones the same way. Text that's mostly numbers,
   like a data export, is matched by its exact text only
 - audio of any length: the model listens to 30 seconds at a time, so DigUp takes overlapping 30-second windows and a
-  match points to its moment
+  match points to its moment; on a Mac with parakeet-mlx, what's said in it too (see [What's said](#whats-said))
 - video of any length: a frame every few seconds, one per shot, plus the soundtrack the same way as audio. A recording
   that matches in several places stays one result ("3 moments"); on a Mac the search window's preview marks every
-  moment on a strip under the player and lists them ("0:42–0:51 · seen", "2:10–2:40 · heard", best first), and a
-  click plays from there (Space then opens Quick Look at it)
+  moment on a strip under the player and lists them ("0:42–0:51 · seen", "2:10–2:40 · heard", "0:12–0:38 · said",
+  best first), and a click plays from there (Space then opens Quick Look at it)
 - on a Mac with osxphotos installed, a Photos library's pictures and videos, by what they show and by what Photos knows
   about them (see [Apple Photos](#apple-photos))
 
@@ -252,6 +256,32 @@ This fork's Mac app doesn't check for updates by itself: its feed is upstream's,
 the fork with upstream's release, which doesn't read Photos libraries. Check for Updates… in the menu still reads that
 feed, so leave it alone unless you mean to go back to upstream.
 
+## What's said
+
+On a Mac with [parakeet-mlx](https://github.com/senstella/parakeet-mlx) installed, DigUp reads what's said in the
+recordings in your folders, audio files and videos alike, and finds them by those words, typed exactly, and by what
+they mean:
+
+- "flight is cancelled" finds the announcement that says so, and so does "the plane trip was called off"
+- the search window's preview lists each stretch that matched as a moment of what's said ("0:12–0:38 · said"), beside
+  what's seen and heard, with its words under it and yours marked, and marks it on the strip; a result that matched
+  there shows those words under it, yours marked, as a PDF page marks them
+
+parakeet-mlx needs installing once, in Terminal, with the ffmpeg it uses: `uv tool install parakeet-mlx` and
+`brew install ffmpeg`. DigUp looks for it as it does for osxphotos, in `~/.local/bin`, Homebrew's and MacPorts' folders
+and on PATH; `DIGUP_PARAKEET` names another, and an empty one turns speech off. Without it nothing changes. Once it's
+found, recordings indexed before get one more pass, by themselves: Settings → Storage → Speech says it found it and how
+long that pass takes, and setup's estimate (`digup estimate`) counts the time reading what's said takes.
+
+- parakeet-mlx runs NVIDIA's Parakeet TDT 0.6B v3 on the Mac's GPU, in a process of its own: it knows 25 European
+  languages. The first time it reads anything, it downloads the model from Hugging Face (2.5 GB). On an M3 Max it read
+  86 seconds of speech in under 2 seconds and 10 minutes in 10, and took 4 to 6 GB of memory while it ran.
+- what's said is kept in stretches of up to about 30 seconds or 60 words, never across a silence of more than 2
+  seconds; each starts at its first word, and is found by its words and by a text vector, as a document's passage is.
+  Word by word timings aren't kept.
+- only what's on this Mac is read: a Photos video that's only in iCloud is read for what's said once it's downloaded
+  (Download Original), not from Photos' stills of it.
+
 ## AI apps
 
 AI apps on your Mac (Claude Code, Codex, Cursor, VS Code, Claude Desktop, or any app that starts a local MCP server)
@@ -268,7 +298,8 @@ They get four tools, all read-only:
   result says where the file is, why it's there ("Matches the text on page 3"), the words that matched, and when and
   where it was taken.
 - `read_text`: the words DigUp read from a file it returned (a document, a PDF's page, the text in a screenshot, what
-  Photos knows about a picture, a stretch of code), up to 20,000 characters.
+  Photos knows about a picture, a stretch of code, what's said in a recording; with a `moment`, what's said within
+  30 seconds of it), up to 20,000 characters.
 - `get_picture`: a picture of a result, at most 768 pixels on its long side, for apps that can look at one.
 - `status`: how many files are indexed, of which kinds, and whether some are still being read.
 
@@ -300,8 +331,8 @@ The helper speaks both current MCP revisions: 2026-07-28, and 2025-11-25 (with 2
 ```
 your folders ─► readers that turn files into pictures, text and sound
              ─► EmbeddingGemma 2 on llama.cpp, in a helper process that quits when it's done
-             ─► one SQLite file: a vector for every picture, page, passage, video frame and 30 s of sound,
-                plus a keyword index (code search keeps a second one, for code)
+             ─► one SQLite file: a vector for every picture, page, passage, video frame, 30 s of sound and stretch of
+                what's said, plus a keyword index (code search keeps a second one, for code)
 your words   ─► the same model's text part (~250 MB, only while you search) ─► nearest vectors + exact words
 ```
 
@@ -385,7 +416,12 @@ and [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT). The Mac app uses [
 files with [PDFium](https://pdfium.googlesource.com/pdfium/) (BSD), [FFmpeg](https://ffmpeg.org) (LGPL),
 [stb](https://github.com/nothings/stb) (public domain) and [miniz](https://github.com/richgel999/miniz) (MIT). Their
 license notices ship with the app. This fork reads Photos libraries through Rhet Turnbull's
-[osxphotos](https://github.com/RhetTbull/osxphotos) (MIT), which you install yourself.
+[osxphotos](https://github.com/RhetTbull/osxphotos) (MIT), and what's said in recordings through Senstella's
+[parakeet-mlx](https://github.com/senstella/parakeet-mlx) (Apache 2.0), which you install yourself. parakeet-mlx runs
+[Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) by NVIDIA, © NVIDIA Corporation, licensed
+under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and provided as is, without warranties, as converted for
+MLX by mlx-community ([mlx-community/parakeet-tdt-0.6b-v3](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v3)),
+which parakeet-mlx downloads from Hugging Face; DigUp doesn't ship it.
 
 DigUp isn't affiliated with Google, Apple or Microsoft. Gemma is a trademark of Google LLC; Mac and Spotlight are
 trademarks of Apple Inc.; Windows is a trademark of Microsoft Corporation.

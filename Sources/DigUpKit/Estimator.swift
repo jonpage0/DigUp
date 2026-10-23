@@ -13,6 +13,10 @@ public struct Costs: Sendable {
     public var videoSecond = 0.019       // a 70-token keyframe per shot (at most one per 3 s) + the soundtrack
     /// A stretch of code (2026-10-09: 258 Swift and Objective-C files, 1,245 stretches in 45 s with the model's start).
     public var codeStretch = 0.037
+    /// A second of a recording read for what's said in it (`Speech`), besides its frames and sound. Measured on an M3
+    /// Max, 2026-10-22, with parakeet-mlx 0.5.3: 0.0156 s a second and about half a second a file to start, 0.020 s a
+    /// second for a recording of two minutes; that Mac's speed check puts it at ×0.88 of the M4 Pro.
+    public var speechSecond = 0.022
     public init() {}
 }
 
@@ -31,6 +35,9 @@ public struct Estimate: Sendable {
     public var pdfPagesTotal = 0
     public var audioSeconds = 0.0
     public var videoSeconds = 0.0
+    /// Seconds of recordings on this Mac whose speech is read (`IndexOptions.speech`), in `audioSeconds` and
+    /// `videoSeconds` too.
+    public var speechSeconds = 0.0
     public var docChunks = 0          // chunks the first pass will read
     public var seconds = 0.0          // the first pass
     /// Long PDFs and documents, which get their first step in the first pass, and how long the rest of them takes
@@ -52,6 +59,7 @@ public struct Estimate: Sendable {
         sum.pdfPagesTotal += b.pdfPagesTotal
         sum.audioSeconds += b.audioSeconds
         sum.videoSeconds += b.videoSeconds
+        sum.speechSeconds += b.speechSeconds
         sum.docChunks += b.docChunks
         sum.seconds += b.seconds
         sum.longFiles += b.longFiles
@@ -95,14 +103,16 @@ public enum Estimator {
                     estimate.longFiles += 1
                     estimate.laterSeconds += Double(all - first) * costs.docChunk
                 }
-            case .audio:
+            case .audio, .video:
                 let seconds = duration(of: file.path)
-                estimate.audioSeconds += seconds
-                estimate.seconds += seconds * costs.audioSecond
-            case .video:
-                let seconds = duration(of: file.path)
-                estimate.videoSeconds += seconds
-                estimate.seconds += seconds * costs.videoSecond
+                if file.kind == .audio { estimate.audioSeconds += seconds } else { estimate.videoSeconds += seconds }
+                estimate.seconds += seconds * (file.kind == .audio ? costs.audioSecond : costs.videoSecond)
+                // What's said in it, when that's read. A Photos video in iCloud is read from its stills, which are
+                // pictures: no length, and nothing said.
+                if options.speech != nil {
+                    estimate.speechSeconds += seconds
+                    estimate.seconds += seconds * costs.speechSecond
+                }
             case .code:
                 // A notebook's file is mostly its outputs, which aren't read: a guess at its cells' share.
                 let characters = file.path.lowercased().hasSuffix(".ipynb") ? file.size / 8 : file.size

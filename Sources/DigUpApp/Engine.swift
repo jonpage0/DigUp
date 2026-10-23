@@ -909,8 +909,8 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
-    /// The text of the part of a file a hit points at (a document's passage, a page, a stretch of code), for the
-    /// preview.
+    /// The text of the part of a file a hit points at (a document's passage, a page, a stretch of code, what's said in a
+    /// stretch of a recording), for the preview.
     func text(ofSegment id: Int64, code: Bool = false) async -> String? {
         await withCheckedContinuation { continuation in
             searchQueue.async { [self] in
@@ -919,17 +919,27 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
-    /// Every moment of the recording at `path` that matches `text` (`Searcher.moments(of:queryVector:zGate:)`), best
-    /// first, for the preview. None when meaning search can't run: no query vector, or the index's vectors are another
-    /// model's (as `search` finds them).
+    /// Every moment of the recording at `path` that matches `text` (`Searcher.moments(of:text:queryVector:zGate:)`),
+    /// best first, for the preview. Without a query vector, or with one of another model than the index's (as `search`
+    /// finds them), only what's said in it can match, by its words.
     func moments(of path: String, matching text: String) async -> [Moment] {
-        guard let vector = await embedQuery(text) else { return [] }
+        let vector = await embedQuery(text)
         return await withCheckedContinuation { continuation in
             searchQueue.async { [self] in
-                guard let searcher, searcher.vectorSource == nil || searcher.vectorSource == vector.source else {
-                    return continuation.resume(returning: [])
+                guard let searcher else { return continuation.resume(returning: []) }
+                let values = vector.flatMap {
+                    searcher.vectorSource == nil || searcher.vectorSource == $0.source ? $0.values : nil
                 }
-                continuation.resume(returning: (try? searcher.moments(of: path, queryVector: vector.values)) ?? [])
+                continuation.resume(returning: (try? searcher.moments(of: path, text: text, queryVector: values)) ?? [])
+            }
+        }
+    }
+
+    /// The recordings on this Mac read before what's said in them was (Settings → Storage → Speech).
+    func recordingsWithoutSpeech() async -> [IndexStore.UnheardRecording] {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: (try? searchStore?.recordingsWithoutSpeech()) ?? [])
             }
         }
     }
