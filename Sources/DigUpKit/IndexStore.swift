@@ -641,7 +641,7 @@ public final class IndexStore {
     func speechRetry(now: Double) throws -> (files: [Int64], state: String?, changed: Bool) {
         var failed: [Int64] = []
         try db.query("""
-            SELECT id FROM files WHERE kind IN (\(Self.sqlList([.audio, .video]))) AND state = 'done'
+            SELECT id FROM files WHERE \(Self.recordingsRead)
             AND json_extract(info, '$.\(Self.readerProblemInfo)') IS NOT NULL
             """) { failed.append($0.int(0)) }
         let stored = try meta(Self.speechRetryKey)
@@ -662,15 +662,19 @@ public final class IndexStore {
         public let seconds: Double
     }
 
-    /// The recordings on this Mac read without their speech: audio and video files read while there was no reader of
-    /// speech (their info has none of `speechInfo`, `speechProblemInfo` and `readerProblemInfo`). Not a video in iCloud,
-    /// read from Photos' stills or its poster: its sound isn't here.
+    /// The recordings that have been read, as SQL: audio and video files indexed, or left out when nothing in them was
+    /// seen or heard (shorter than 2 s, or silent), which can still have something said in them.
+    static let recordingsRead = "kind IN (\(sqlList([FileKind.audio, .video]))) AND state IN ('done', 'skipped')"
+
+    /// The recordings on this Mac read without their speech: audio and video files read (or left out, `recordingsRead`)
+    /// while there was no reader of speech (their info has none of `speechInfo`, `speechProblemInfo` and
+    /// `readerProblemInfo`). Not a video in iCloud, read from Photos' stills or its poster: its sound isn't here.
     public func recordingsWithoutSpeech() throws -> [UnheardRecording] {
         let standIns = PhotosLibrary.Reading.allCases.filter(\.isStandIn).map { "'\($0.rawValue)'" }.joined(separator: ",")
         var recordings: [UnheardRecording] = []
         try db.query("""
             SELECT id, kind, CAST(json_extract(info, '$.duration') AS REAL) FROM files
-            WHERE kind IN (\(Self.sqlList([.audio, .video]))) AND state = 'done'
+            WHERE \(Self.recordingsRead)
             AND json_extract(info, '$.\(Self.speechInfo)') IS NULL
             AND json_extract(info, '$.\(Self.speechProblemInfo)') IS NULL
             AND json_extract(info, '$.\(Self.readerProblemInfo)') IS NULL

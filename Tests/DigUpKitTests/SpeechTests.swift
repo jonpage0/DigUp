@@ -100,6 +100,38 @@ import Testing
         #expect(try store.readAgainOnce(readsSpeech: true) == 0)
     }
 
+    /// A recording too short for a window of sound (under 2 s) is still read for what's said: one with speech is
+    /// indexed by it, one with none is left out as before, and one read before the reader was there is read again once.
+    @Test func aShortRecordingIsReadForWhatsSaid() throws {
+        let files = folder.appendingPathComponent("files")
+        try FileManager.default.createDirectory(at: files, withIntermediateDirectories: true)
+        let tone = (0..<19_200).map { Int16(9000 * sin(Double($0) * 2 * .pi * 440 / AudioExtractor.sampleRate)) }
+        for name in ["flight.wav", "hum.wav"] {   // 1.2 s each
+            try AudioExtractor.writeWAV(tone[...], to: files.appendingPathComponent(name))
+        }
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        _ = try Indexer(store: store, options: IndexOptions(), makeEmbedder: { FakeEmbedder() }).sync([files])
+        #expect(try Indexer(store: store, options: IndexOptions(), makeEmbedder: { FakeEmbedder() }).run()
+                == ["skipped": 2])
+        #expect(try store.readAgainOnce(readsSpeech: true) == 2)
+        var options = IndexOptions()
+        options.speech = Speech.Reader { recording, _, _ in
+            recording.lastPathComponent == "hum.wav" ? [] : [Speech.Sentence(tokens: [
+                Token(text: " Flight", start: 0.1, end: 0.5), Token(text: " cancelled", start: 0.5, end: 1),
+                Token(text: ".", start: 1, end: 1.1),
+            ])]
+        }
+        #expect(try Indexer(store: store, options: options, makeEmbedder: { FakeEmbedder() }).run()
+                == ["done": 1, "skipped": 1])
+        var said: [String] = []
+        try store.db.query("""
+            SELECT f.path, s.loc, s.loc_end FROM fts JOIN segments s ON s.id = fts.rowid JOIN files f ON f.id = s.file
+            WHERE fts MATCH '"cancelled"' AND s.kind = 'speech'
+            """) { said.append("\(($0.text(0)! as NSString).lastPathComponent) \($0.double(1))–\($0.double(2))") }
+        #expect(said == ["flight.wav 0.1–1.0"])
+        #expect(try store.recordingsWithoutSpeech().isEmpty)   // the one where nothing is said isn't read again
+    }
+
     /// A shell script at `name` in the test's folder, made executable: a stand-in for parakeet-mlx or ffmpeg.
     func program(_ name: String, _ script: String) throws -> String {
         let url = folder.appendingPathComponent(name)

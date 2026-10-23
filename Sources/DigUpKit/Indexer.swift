@@ -584,8 +584,9 @@ public final class Indexer {
                 let (pieces, duration) = try runBlocking {
                     try await AudioExtractor.windows(of: url, window: window, hop: hop, to: folder)
                 }
+                // No sound track: no time either (`AudioExtractor.windows`).
                 prepared.payload = .audio(pieces: pieces, duration: duration,
-                                          speech: speech(of: url, duration: duration, heard: !pieces.isEmpty,
+                                          speech: speech(of: url, duration: duration, hasSound: duration > 0,
                                                          options: options, in: folder))
             case .video where job.reading?.isStandIn == true:
                 // A library's video in iCloud: the stills of Photos' filmstrip of it, or its poster, each read whatever
@@ -609,7 +610,7 @@ public final class Indexer {
                 let location = PhotosLibrary.library(containing: url.path) == nil
                     ? VideoExtractor.location(of: url) : nil
                 prepared.payload = .video(frames: frames, sound: sound, duration: duration, location: location,
-                                          speech: speech(of: url, duration: duration, heard: !sound.isEmpty,
+                                          speech: speech(of: url, duration: duration, hasSound: hasAudio,
                                                          options: options, in: folder))
             case .code:
                 prepared.payload = .code(try CodeExtractor.read(url, options: options))
@@ -632,14 +633,15 @@ public final class Indexer {
         return prepared
     }
 
-    /// What's said in a recording on this Mac (`Speech`), when `options.speech` reads it; nil when nothing does. Nothing
-    /// is said in one without sound worth a window (`AudioExtractor.windows`: all of it under about −50 dBFS), so that's
-    /// not read. parakeet-mlx is a program of its own with a time limit of its own (`Speech.parakeetReader`): the
-    /// watchdog, which can only end this process, doesn't time it.
-    private static func speech(of url: URL, duration: Double, heard: Bool, options: IndexOptions, in folder: URL)
+    /// What's said in a recording on this Mac (`Speech`), when `options.speech` reads it; nil when nothing does. A
+    /// recording with a sound track is read however short or quiet it is (its windows of sound need 2 s, and leave out
+    /// what's under about −50 dBFS: "Flight cancelled." takes 1.2 s); nothing is said in one without. parakeet-mlx is a
+    /// program of its own with a time limit of its own (`Speech.parakeetReader`): the watchdog, which can only end this
+    /// process, doesn't time it.
+    private static func speech(of url: URL, duration: Double, hasSound: Bool, options: IndexOptions, in folder: URL)
         -> SpeechRead? {
         guard let reader = options.speech else { return nil }
-        guard heard else { return .said([], seconds: 0) }
+        guard hasSound else { return .said([], seconds: 0) }
         let started = Date()
         readingLock.withLock { reading = nil }
         defer { startReading(url.path) }
@@ -880,13 +882,15 @@ public final class Indexer {
                 + (worded.count < code.pieces.count ? ", \(code.pieces.count - worded.count) for keywords only" : ""))
     }
 
+    /// An audio file: its windows of sound, and what's said in it. One with no window of sound (shorter than 2 s, or
+    /// silent) is indexed by what's said in it, when something is.
     private func audio(_ file: FileRecord, pieces: [MediaPiece], duration: Double, speech: SpeechRead?) throws
         -> (String, String?) {
-        guard !pieces.isEmpty else {
-            try store.finish(file.id, state: "skipped", detail: "silent or shorter than 2 s")
-            return ("skipped", "silent or too short")
+        guard !pieces.isEmpty || !(speech?.stretches.isEmpty ?? true) else {
+            return try skipRecording(file, "silent or shorter than 2 s", note: "silent or too short", duration: duration,
+                                     speech: speech)
         }
-        let vectors = try fullWorker().embedAudio(pieces.map(\.path))
+        let vectors = pieces.isEmpty ? [] : try fullWorker().embedAudio(pieces.map(\.path))
         let said = try speechVectors(file, speech)
         try store.db.transaction {
             for (piece, embedding) in zip(pieces, vectors) {
@@ -900,11 +904,13 @@ public final class Indexer {
         return ("done", "\(pieces.count) windows, \(Int(duration)) s" + Self.note(speech))
     }
 
+    /// A video on this Mac: its frames, its windows of sound, and what's said in it. One with neither frames nor a window
+    /// of sound is indexed by what's said in it, when something is.
     private func video(_ file: FileRecord, frames: [MediaPiece], sound: [MediaPiece], duration: Double,
                        location: Location?, speech: SpeechRead?) throws -> (String, String?) {
-        guard !frames.isEmpty || !sound.isEmpty else {
-            try store.finish(file.id, state: "skipped", detail: "no frames or sound")
-            return ("skipped", "no frames or sound")
+        guard !frames.isEmpty || !sound.isEmpty || !(speech?.stretches.isEmpty ?? true) else {
+            return try skipRecording(file, "no frames or sound", note: "no frames or sound", duration: duration,
+                                     speech: speech)
         }
         let worker = try fullWorker()
         let frameVectors = try worker.embedImages(frames.map(\.path), budget: options.frameBudget)
@@ -943,15 +949,31 @@ public final class Indexer {
     }
 
     /// Writes a recording's stretches of speech (`speechVectors`) as `speech` segments, their words for keyword search
-    /// and to show, and puts in its info how many there are, or why they couldn't be read, the recording's failure apart
-    /// from the reader's. A recording read without a reader has none of them, which is how the read-again pass finds it
-    /// (`IndexStore.recordingsWithoutSpeech`), and one the reader failed on is read again later.
+    /// and to show, and puts in its info how its speech was read (`record`).
     private func addSpeech(_ said: [(Speech.Stretch, [Float]?)], read speech: SpeechRead?, of file: FileRecord,
                            info: inout [String: String]) throws {
         for (stretch, vector) in said {
             try store.addSegment(file: file.id, kind: .speech, modality: .text, loc: stretch.start, locEnd: stretch.end,
                                  excerpt: excerpt(stretch.text), text: stretch.text, vector: vector)
         }
+        Self.record(speech, in: &info)
+    }
+
+    /// A recording with nothing to index: nothing seen or heard in it, and nothing said. It's left out, with how its
+    /// speech was read in its info (`record`), as a recording that's read is.
+    private func skipRecording(_ file: FileRecord, _ detail: String, note: String, duration: Double,
+                               speech: SpeechRead?) throws -> (String, String?) {
+        var info = ["duration": String(format: "%.1f", duration)]
+        Self.record(speech, in: &info)
+        try store.finish(file.id, state: "skipped", detail: detail, info: info)
+        return ("skipped", note + Self.note(speech))
+    }
+
+    /// How a recording's speech was read, in its info: how many stretches there are, or why they couldn't be read, the
+    /// recording's failure apart from the reader's. A recording read without a reader has none of them, which is how the
+    /// read-again pass finds it (`IndexStore.recordingsWithoutSpeech`), and one the reader failed on is read again
+    /// later.
+    private static func record(_ speech: SpeechRead?, in info: inout [String: String]) {
         switch speech {
         case .said(let stretches, _): info[IndexStore.speechInfo] = "\(stretches.count)"
         case .unreadable(let why): info[IndexStore.speechProblemInfo] = why
