@@ -30,6 +30,9 @@ struct ResultRow: Identifiable, Equatable {
     /// The parts of a file the search kept to (`SearchFilter.matchBy`), which the preview's moments are of too; nil,
     /// every part.
     let matchBy: SearchFilter.MatchBy?
+    /// The search a result is of, as what's found or picked for it is kept under: another query, or another Match by
+    /// (whose moments of the same file can start at the same second), is another search.
+    var searched: String { "\(query)|\(matchBy?.text ?? "")" }
     /// A picture or video of a Photos library: it opens in Photos (`Opener.showInPhotos`).
     private(set) var photos: PhotosHit?
     /// A video or audio file: how many moments of it match (`SearchHit.momentCount`).

@@ -571,15 +571,15 @@ extension SearchFilter.Shape: Codable {
 }
 
 /// Match by as a saved search keeps it (`saved-searches.json`'s `{"matchBy": […]}`, approved 2026-10-23): the parts'
-/// names, in `Part`'s order. Read strictly, as the app reads the file: an empty list, a name twice, a name that isn't a
-/// part's, names in another order, or anything but a list of names isn't this shape.
+/// names, written in `Part`'s order. Read strictly, as the app reads the file, but in any order: an empty list, a name
+/// twice, a name that isn't a part's, or anything but a list of names isn't this shape.
 extension SearchFilter.MatchBy: Codable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
         let names = try container.decode([String].self)
-        guard let matchBy = Self(choosing: names), matchBy.parts.map(\.rawValue) == names else {
+        guard let matchBy = Self(choosing: names) else {
             throw DecodingError.dataCorruptedError(in: container, debugDescription:
-                "Match by is one or more of \(SearchFilter.Part.allCases.map(\.rawValue)), each once, in that order")
+                "Match by is one or more of \(SearchFilter.Part.allCases.map(\.rawValue)), each once")
         }
         self = matchBy
     }

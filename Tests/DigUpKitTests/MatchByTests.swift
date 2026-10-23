@@ -299,8 +299,8 @@ import Testing
         }
     }
 
-    /// As saved-searches.json keeps it (approved): the parts' names in the order above. One that isn't exactly that
-    /// (empty, a name twice, one that isn't a part's, out of order, not a list of names) isn't read.
+    /// As saved-searches.json keeps it (approved): the parts' names, written in the order above and read in any. One
+    /// that isn't that (empty, a name twice, one that isn't a part's, not a list of names) isn't read.
     @Test func aSavedSearchsMatchByComesBackAsItWasAndBadOnesAreRefused() throws {
         let encoder = JSONEncoder()
         func written(_ value: SearchFilter.MatchBy) throws -> String {
@@ -317,7 +317,11 @@ import Testing
                 .map { parts[$0] }))
             #expect(read(try written(chosen)) == chosen)
         }
-        for bad in ["[]", #"["spoken","spoken"]"#, #"["text","spoken"]"#, #"["Spoken"]"#, #"["speech"]"#,
+        // Written by hand in another order: read, and written again in the order above.
+        let reordered = try #require(read(#"["tags","text","visual"]"#))
+        #expect(reordered.parts == [.visual, .text, .tags])
+        #expect(try written(reordered) == #"["visual","text","tags"]"#)
+        for bad in ["[]", #"["spoken","spoken"]"#, #"["text","spoken","text"]"#, #"["Spoken"]"#, #"["speech"]"#,
                     #"["spoken",null]"#, #"[1]"#, #""spoken""#, "null", "true", #"{"matchBy":["spoken"]}"#,
                     #"["visual","audio","spoken","text","tags","tags"]"#] {
             #expect(read(bad) == nil, "\(bad)")

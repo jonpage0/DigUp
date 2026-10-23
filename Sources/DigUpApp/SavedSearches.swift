@@ -34,8 +34,8 @@ struct SavedSearch: Equatable, Identifiable {
         case length(SearchFilter.Length)
         /// The Shape filter: `{ "shape": "portrait" }`, or an exact ratio, `{ "shape": "16:9" }` (approved 2026-10-22).
         case shape(SearchFilter.Shape)
-        /// Match by: `{ "matchBy": ["spoken", "text"] }`, one or more parts, each once, in the kit's order (approved
-        /// 2026-10-23; the kit reads it strictly: `SearchFilter.MatchBy`'s `Codable`).
+        /// Match by: `{ "matchBy": ["spoken", "text"] }`, one or more parts, each once, written in the kit's order and
+        /// read in any (approved 2026-10-23; the kit reads it strictly: `SearchFilter.MatchBy`'s `Codable`).
         case matchBy(SearchFilter.MatchBy)
     }
 

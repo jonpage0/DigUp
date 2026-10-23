@@ -64,6 +64,10 @@ import SwiftUI
 ///                             takes it: matchBy:spoken,text)
 ///     -debugSaved "<name>"    with -debugWindow search: then open the saved search of that name, as the Saved menu
 ///                             would
+///     -debugSavedNext "<name>"   with -debugWindow search: after the snapshot (and -debugMoment's pick), open the
+///                             saved search of that name in the same window, log what the selected result shows, and
+///                             draw the window into <snapshot>-next.png: what was found or picked for a result under
+///                             one search (another query, or another Match by) mustn't show under the next
 ///     -debugSavedMenu YES     with -debugWindow search: after the snapshot, log the Saved menu's items and draw them
 ///                             into <snapshot>-savedmenu.png (an open menu can't be drawn offscreen, so this draws
 ///                             the items the menu is made from)
@@ -454,13 +458,15 @@ enum DebugHooks {
                             }
                             filtersMenuStep(app)
                             savedSearchSteps(app) {
-                                requireSteps(app) {
-                                    press(keys, app, describe: { windowState(app) }) {
-                                        if defaults.bool(forKey: "debugCloseWindow") {
-                                            close()
-                                            log("window: closed")
+                                savedNextStep(app) {
+                                    requireSteps(app) {
+                                        press(keys, app, describe: { windowState(app) }) {
+                                            if defaults.bool(forKey: "debugCloseWindow") {
+                                                close()
+                                                log("window: closed")
+                                            }
+                                            if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                                         }
-                                        if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                                     }
                                 }
                             }
@@ -536,6 +542,34 @@ enum DebugHooks {
                 log("debug: saved as \"\(name)\"; the menu has \(app.savedSearches.searches.map(\.name))")
             }
             done()
+        }
+    }
+
+    /// `-debugSavedNext NAME`: the saved search of that name opened in the window that's showing (its selection kept, as
+    /// a click in the Saved menu keeps it), and once it has searched and the preview has looked for the result's moments
+    /// again, what the selected result shows logged and the window drawn into <snapshot>-next.png.
+    private static func savedNextStep(_ app: AppController, then done: @escaping () -> Void) {
+        guard let name = UserDefaults.standard.string(forKey: "debugSavedNext") else { return done() }
+        guard let saved = app.savedSearches.searches.first(where: { $0.name == name }) else {
+            log("debug: no saved search \"\(name)\"")
+            return done()
+        }
+        let search = app.searchWindow.search
+        Task {
+            await search.open(saved)
+            waitUntil({ search.isSettled && search.hasResults }, deadline: Date().addingTimeInterval(30)) {
+                // The preview looks for the moments of the result it shows when it shows it.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    whenPicturesSettle {
+                        if let row = search.selectedRow {
+                            log("debug: opened \"\(name)\": \(row.name) shows "
+                                + "\"\(PreviewPlayback.shared.placed(row).reason)\"")
+                        }
+                        save("search", { try app.searchWindow.snapshot(to: $0) }, to: snapshotPath("next"))
+                        done()
+                    }
+                }
+            }
         }
     }
 
