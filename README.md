@@ -43,6 +43,14 @@ words, and it finds the match, whatever kind of file it is.
 Exact words count too. Invoice numbers, error codes and names are matched as written, in file names and document text,
 so a search gets both the meaning and the exact string. On a Mac that includes the text inside screenshots.
 
+A word that every result must have gets a + before it: "a dog running on +beach" keeps only results with "beach" in
+their words (a file's or folder's name, its text, the text in a picture, what Photos knows about it, what's said) or
+that show a beach by what they mean, still ranked by all the words; `+"red car"` does the same for a phrase. The `+`
+counts only at the start of a word and before a letter or a quote, so "c++" and "+1 555 0100" are searched as typed,
+and code search (`code:`) takes it as written. On a Mac the word shows as a "must have" token in the search field (its
+× or ⌫ in an empty field takes it off), a right-click on a word in the field offers Require, and a saved search keeps
+it in its words, as AI apps send it in theirs.
+
 ## Private
 
 Nothing you index leaves your computer. DigUp goes online only to download the model once and to check for updates
@@ -98,7 +106,8 @@ With the .deb, DigUp tells you when there's a new version and opens its release 
 | ⌘D | | Adds it to DigUp's own Favorites, or takes it off (the ♥ under the preview) |
 | ⌘S | | Saves the search window's search, with its filters, in its Saved menu |
 
-On a Mac, Settings → Shortcuts lists every key, in the panel and the window, and sets the one that opens the panel.
+On a Mac, Settings → Shortcuts lists every key, in the panel and the window, sets the one that opens the panel, and
+shows what the search field reads besides words (`+word`, `+"a phrase"`).
 
 On a Mac, the search window's Saved menu (the bookmark beside the field) keeps the searches you come back to. Save This
 Search… (⌘S) keeps the words, the kind and the filters (people, albums, favorites, From, the map's area, Sensitive)
@@ -327,9 +336,9 @@ DigUp, as you set it up there.
 They get four tools, all read-only:
 
 - `search_files`: what the search window does, with its kinds and filters (people, albums, Photos favorites, DigUp's
-  favorites, From, an area on the map); with no words, a kind or a filter lists what it keeps, newest first. Each
-  result says where the file is, why it's there ("Matches the text on page 3"), the words that matched, and when and
-  where it was taken.
+  favorites, From, an area on the map) and its required words (`+beach`); with no words, a kind or a filter lists what
+  it keeps, newest first. Each result says where the file is, why it's there ("Matches the text on page 3"), the words
+  that matched, and when and where it was taken.
 - `read_text`: the words DigUp read from a file it returned (a document, a PDF's page, the text in a screenshot, what
   Photos knows about a picture, a stretch of code, what's said in a recording; with a `moment`, what's said within
   30 seconds of it), up to 20,000 characters.

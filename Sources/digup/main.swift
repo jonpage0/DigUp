@@ -18,7 +18,8 @@ let usage = """
       digup search [<words>...] [--kind K,K] [--with NAME]... [--album TITLE]... [--favorites] [--origin O]...
                    [--camera NAME]... [--shot-on NAME]... [--within LAT,LON,LAT,LON] [--sensitive] [-n 10] [--json]
                                               "code: <words>" searches the code index; with filters and no
-                                              words, the newest files they keep
+                                              words, the newest files they keep; +word or +"a phrase" keeps
+                                              only results that have it (in their words, or by what it means)
       digup status                            what's in the index
       digup sensitive <picture>... [--json]   how revealing each picture is, read and rated as indexing does it
                                               (the sensitive-picture detector, made by scripts/sensitive-model.py),
@@ -557,10 +558,14 @@ func search(_ args: Arguments) throws {
     let filter = code == nil ? try args.filter(in: store) : SearchFilter()
     let searcher = try Searcher(store: store, loadVectors: !query.isEmpty)
     let started = Date()
-    let vector = query.isEmpty ? nil : try queryVectors([query], store: store, searcher: searcher,
-                                                        prompt: code == nil ? Prompts.query : Prompts.codeQuery)?.first
+    // Required words (`+beach`) are embedded alone too, and taken out of the query's text; code's `+` is literal.
+    let words = code == nil ? RequiredWords(query) : RequiredWords(literal: query)
+    let embedded = query.isEmpty ? nil : try queryVectors(words.embedded, store: store, searcher: searcher,
+                                                          prompt: code == nil ? Prompts.query : Prompts.codeQuery)
+    let vectors = words.vectors(embedded ?? [])
     let encoded = Date()
-    let hits = try searcher.search(query, queryVector: vector, kinds: try args.kinds(), filter: filter,
+    let hits = try searcher.search(query, queryVector: vectors.query, requiredVectors: vectors.required,
+                                   kinds: try args.kinds(), filter: filter,
                                    limit: args.values["-n"].flatMap(Int.init) ?? 10, zGate: args.zGate,
                                    wordWeight: args.wordWeight)
     let searched = Date()
@@ -828,19 +833,26 @@ func evaluate(_ args: Arguments) throws {
     if let testbed = ProcessInfo.processInfo.environment["DIGUP_TESTBED"], eval.base.hasPrefix("~/DigUpTestbed") {
         base = testbed + eval.base.dropFirst("~/DigUpTestbed".count)
     }
-    // "code: …" queries search the code index (with its prompt), the others the main one.
+    // "code: …" queries search the code index (with its prompt), the others the main one. Required words (`+beach`)
+    // are embedded alone too, as `digup search` does.
     let isCode = eval.queries.map { CodeQuery.text(of: $0.q) != nil }
     let texts = eval.queries.map { CodeQuery.text(of: $0.q) ?? $0.q }
+    let words = texts.indices.map { isCode[$0] ? RequiredWords(literal: texts[$0]) : RequiredWords(texts[$0]) }
     var searchers: [Bool: Searcher] = [:]
-    var vectors = [[Float]?](repeating: nil, count: texts.count)
+    var vectors = [(query: [Float]?, required: [String: [Float]])](repeating: (nil, [:]), count: texts.count)
     for code in Set(isCode) {
         let store = try IndexStore(directory: args.indexFolder, file: code ? IndexStore.codeFile : IndexStore.mainFile)
         let searcher = try Searcher(store: store)
         searchers[code] = searcher
         let indices = texts.indices.filter { isCode[$0] == code }
-        let embedded = try queryVectors(indices.map { texts[$0] }, store: store, searcher: searcher,
-                                        prompt: code ? Prompts.codeQuery : Prompts.query)
-        for (index, vector) in zip(indices, embedded ?? []) { vectors[index] = vector }
+        let embedded = try queryVectors(indices.flatMap { words[$0].embedded }, store: store, searcher: searcher,
+                                        prompt: code ? Prompts.codeQuery : Prompts.query) ?? []
+        var next = 0
+        for index in indices {
+            let count = words[index].embedded.count
+            vectors[index] = words[index].vectors(Array(embedded.dropFirst(next).prefix(count)))
+            next += count
+        }
     }
     let depth = args.values["-n"].flatMap(Int.init) ?? 10
 
@@ -848,7 +860,8 @@ func evaluate(_ args: Arguments) throws {
     var shown = 0, listed = 0, folded = 0   // the app's weaker-matches fold (Searcher.strongCount), over all queries
     for (index, query) in eval.queries.enumerated() {
         let kinds = query.kind.flatMap { FileKind(rawValue: $0) }.map { Set([$0]) }
-        let hits = try searchers[isCode[index]]!.search(texts[index], queryVector: vectors[index], kinds: kinds,
+        let hits = try searchers[isCode[index]]!.search(texts[index], queryVector: vectors[index].query,
+                                                       requiredVectors: vectors[index].required, kinds: kinds,
                                                        limit: depth, zGate: args.zGate, wordWeight: args.wordWeight)
         let strong = Searcher.strongCount(hits)
         shown += strong

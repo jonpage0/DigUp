@@ -9,7 +9,8 @@ import SwiftUI
 ///     -debugOffscreen YES     build and draw windows and the panel but never show them or activate the app, so
 ///                             snapshot runs don't take the keyboard from whoever is at the Mac (no key tests then)
 ///     -debugMenu YES          log the menu once the index is open, then run Pause and Resume and log it again
-///     -debugQuery "<text>"    open the panel and search for <text>, as if it had been typed ("": the empty panel)
+///     -debugQuery "<text>"    open the panel and search for <text>, as if it had been typed ("": the empty panel; a
+///                             `+word ` in it becomes a must-have token, as typed)
 ///     -debugSnapshot <png>    once the final results and their pictures are showing, draw the panel into <png>
 ///     -debugKeys "down,space,esc,cmd+c"   then press these keys (posted through the app's own event queue, so
 ///                             no Accessibility permission is needed) and log what each one did. ⌘C goes to a
@@ -64,6 +65,9 @@ import SwiftUI
 ///     -debugSavedMenu YES     with -debugWindow search: after the snapshot, log the Saved menu's items and draw them
 ///                             into <snapshot>-savedmenu.png (an open menu can't be drawn offscreen, so this draws
 ///                             the items the menu is made from)
+///     -debugRequire WORD      with -debugWindow search: after the snapshot, select WORD in the search field, ask the
+///                             field for its right-click menu (as a right-click on it would), log the menu's first
+///                             items, choose "Require “WORD”", and draw the window into <snapshot>-required.png
 ///     -debugSavedSheet save|edit   with -debugWindow search: then open Save This Search… (its name suggested) or
 ///                             Edit Saved Searches…, and draw it into <snapshot>-saved.png; -debugSaveAs NAME
 ///                             then presses Save with that name
@@ -262,7 +266,7 @@ enum DebugHooks {
             }
         }
         panel.show()
-        panel.query = text
+        panel.typed(text)
     }
 
     /// `-debugPlay`: plays `row` from its moment, muted, and logs where playback is 1.5 s later.
@@ -439,12 +443,14 @@ enum DebugHooks {
                                     + "skipping \(settings.codeExcluded.map { tildePath($0.path) })")
                             }
                             savedSearchSteps(app) {
-                                press(keys, app, describe: { windowState(app) }) {
-                                    if defaults.bool(forKey: "debugCloseWindow") {
-                                        close()
-                                        log("window: closed")
+                                requireSteps(app) {
+                                    press(keys, app, describe: { windowState(app) }) {
+                                        if defaults.bool(forKey: "debugCloseWindow") {
+                                            close()
+                                            log("window: closed")
+                                        }
+                                        if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                                     }
-                                    if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                                 }
                             }
                         }
@@ -489,6 +495,41 @@ enum DebugHooks {
                 log("debug: saved as \"\(name)\"; the menu has \(app.savedSearches.searches.map(\.name))")
             }
             done()
+        }
+    }
+
+    /// `-debugRequire WORD`: the search field's right-click menu on WORD, as AppKit builds it (the field editor asks the
+    /// field), its "Require “WORD”" chosen, and the window drawn into <snapshot>-required.png once it has searched.
+    private static func requireSteps(_ app: AppController, then done: @escaping () -> Void) {
+        guard let word = UserDefaults.standard.string(forKey: "debugRequire") else { return done() }
+        let search = app.searchWindow.search
+        guard let field = search.field, let window = field.window else { return done() }
+        window.makeFirstResponder(field)
+        let found = (field.stringValue as NSString).range(of: word, options: .caseInsensitive)
+        guard let editor = field.currentEditor() as? NSTextView, found.location != NSNotFound else {
+            log("debug: require: \"\(word)\" isn't in the field (\"\(field.stringValue)\")")
+            return done()
+        }
+        editor.selectedRange = found
+        let rect = window.convertFromScreen(editor.firstRect(forCharacterRange: found, actualRange: nil))
+        guard let click = NSEvent.mouseEvent(with: .rightMouseDown, location: NSPoint(x: rect.midX, y: rect.midY),
+                                             modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                                             clickCount: 1, pressure: 1),
+              let menu = editor.menu(for: click) else {
+            log("debug: require: no menu")
+            return done()
+        }
+        log("debug: require: the field's menu: " + menu.items.prefix(4).map { $0.isSeparatorItem ? "—" : $0.title }
+            .joined(separator: " | "))
+        guard let index = menu.items.firstIndex(where: { $0.title.hasPrefix("Require") }) else { return done() }
+        menu.performActionForItem(at: index)
+        waitUntil({ search.isSettled && search.hasResults }, deadline: Date().addingTimeInterval(30)) {
+            whenPicturesSettle {
+                log("debug: require: \(windowState(app))")
+                save("required", { try app.searchWindow.snapshot(to: $0) }, to: snapshotPath("required"))
+                done()
+            }
         }
     }
 
@@ -727,7 +768,7 @@ enum DebugHooks {
         return "cell \(index) of \(rows.count) (\(search.selectedRow?.name ?? "none")) · columns \(search.columns) · "
             + "filter \(search.filter?.title ?? "All") · query \"\(search.query)\" · "
             + "tokens \(search.shownTokens.map { $0.title + ($0.isMissing ? " (not in Photos now)" : "") }) · "
-            + "Quick Look \(previewing ? "open" : "closed")"
+            + "must have \(search.required) · Quick Look \(previewing ? "open" : "closed")"
     }
 
     /// Selects the field's text (⌘A) and types `queries[0]` a key at a time, waits for its final results, then the rest.

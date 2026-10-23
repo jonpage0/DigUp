@@ -338,14 +338,21 @@ public final class Searcher {
 
     /// `filter` narrows the files as `kinds` does. With no words (`text` blank) and a filter, the search lists what the
     /// filter keeps instead, newest first (`browse`).
-    public func search(_ text: String, queryVector: [Float]?, kinds: Set<FileKind>? = nil,
-                       filter: SearchFilter = SearchFilter(), limit: Int = 20, zGate: Double = 2.0,
-                       wordWeight: Double? = nil, prefixLast: Bool = false) throws -> [SearchHit] {
+    ///
+    /// Required words typed in it (`+beach`, `+"a phrase"`: `RequiredWords`) keep only the files that have each of them,
+    /// found as `filesHaving` finds them, before anything is ranked or cut to the best; the ranking is the query's, the
+    /// marks taken out (as the caller embeds it for `queryVector`). `requiredVectors`: each term embedded alone, by the
+    /// term as `RequiredWords.terms` has it; a term without one is found by its words only. Code's `+` is literal.
+    public func search(_ query: String, queryVector: [Float]?, requiredVectors: [String: [Float]] = [:],
+                       kinds: Set<FileKind>? = nil, filter: SearchFilter = SearchFilter(), limit: Int = 20,
+                       zGate: Double = 2.0, wordWeight: Double? = nil, prefixLast: Bool = false) throws -> [SearchHit] {
+        let required = isCode ? RequiredWords(literal: query) : RequiredWords(query)
+        let text = required.text
         if !filter.isEmpty, text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return try browse(filter, kinds: kinds, limit: limit)
         }
         let wordWeight = wordWeight ?? (isCode ? Self.codeWordWeight : Self.wordWeight)
-        if queryVector != nil, !vectorsLoaded { try reload() }
+        if queryVector != nil || !requiredVectors.isEmpty, !vectorsLoaded { try reload() }
         let fileKind = self.fileKind
         let narrowing = filter.query
         let kept = try narrowing.map { query -> Set<Int64> in
@@ -353,17 +360,24 @@ public final class Searcher {
             try store.db.query(query.sql, query.values) { files.insert($0.int(0)) }
             return files
         }
+        // Only the rows the caller may see set the meaning scale (`rowsSettingScale`), the query's and each required
+        // word's.
+        let setsScale = try rowsSettingScale(seeing: filter.exclusions)
+        let having = required.terms.isEmpty ? nil
+            : try filesHaving(required.terms, typing: prefixLast ? required.typing : nil, vectors: requiredVectors,
+                              zGate: zGate, setsScale: setsScale, narrowing: narrowing, kept: kept,
+                              exclusions: filter.exclusions.query)
         let allowed = { (file: Int64) -> Bool in
             (kinds == nil || fileKind[file].map { kinds!.contains($0) } ?? false) && (kept?.contains(file) ?? true)
+                && (having?.contains(file) ?? true)
         }
-
         // Meaning: score every vector on this query's scale (`meaning`), keep each file's best segment, and a
         // recording's segments that stand out (its moments, counted for the hits it makes).
         var best: [Int64: (z: Double, cosine: Double, row: Int)] = [:]
         var standouts: [Int64: [(segment: Int64, z: Double)]] = [:]
         if let query = queryVector, query.count == Vectors.dimension, !rowFile.isEmpty {
             let scores = score(query)
-            let meaning = Self.meaning(scores, rowModality, setsScale: rowSetsScale)
+            let meaning = Self.meaning(scores, rowModality, setsScale: setsScale)
             for row in 0..<scores.count where allowed(rowFile[row]) {
                 let (file, z) = (rowFile[row], meaning[row])
                 if z > (best[file]?.z ?? -.infinity) { best[file] = (z, Double(scores[row]), row) }
@@ -384,14 +398,19 @@ public final class Searcher {
             ?? wordPatterns(terms, prefixLast: prefixLast, within: filter.exclusions.query)
         if !patterns.isEmpty {
             var seen = Set<Int64>()
-            // The filter narrows the matches before they're cut to the best 1,000: else a file it keeps could be
-            // outranked by that many matches it doesn't, and never be seen.
-            let onlyKept = narrowing.map { " AND s.file IN (\($0.sql))" } ?? ""
+            // The filter and the required words narrow the matches before they're cut to the best 1,000: else a file
+            // they keep could be outranked by that many matches they don't, and never be seen.
+            var onlyKept = narrowing.map { " AND s.file IN (\($0.sql))" } ?? ""
+            var values: [SQLValue] = [.text(patterns.joined(separator: " OR "))] + (narrowing?.values ?? [])
+            if let having {
+                onlyKept += " AND s.file IN (SELECT value FROM json_each(?))"
+                values.append(.text("[" + having.map(String.init).joined(separator: ",") + "]"))
+            }
             try store.db.query("""
                 SELECT s.file, s.id, snippet(fts, 1, '«', '»', '…', 12), fts.original FROM fts
                 JOIN segments s ON s.id = fts.rowid
                 WHERE fts MATCH ?\(onlyKept) ORDER BY bm25(fts, 3.0, 1.0) LIMIT 1000
-                """, [.text(patterns.joined(separator: " OR "))] + (narrowing?.values ?? [])) { row in
+                """, values) { row in
                 let file = row.int(0)
                 guard words.count < 100, allowed(file), seen.insert(file).inserted else { return }
                 // Text that normalizing changed is quoted as it's written (with its hamza, harakat, joiners).
@@ -481,6 +500,50 @@ public final class Searcher {
                                   pictures: try pictures(file: file, kind: row.kind)))
         }
         return hits
+    }
+
+    /// The files that have every one of a query's required words or phrases (`RequiredWords`), of those the filter
+    /// keeps (`narrowing`, its files `kept`). A file has a term when its words have it, as keyword search finds a word
+    /// (its stem, and a word in no file as the start of longer ones, `wordPatterns`; a phrase as its words in a row;
+    /// `typing`, the term still being typed at the end of the query, as a start too, as `prefixLast` makes the query's
+    /// last word), or when its best segment for the term embedded alone (`vectors`, by term) stands out as a meaning
+    /// match does (`meaning`, at least `zGate`, on the scale `setsScale` says, `rowsSettingScale`). Only the files
+    /// `exclusions` keeps count for a term's prefix matching, as for the query's words: a file an AI app may not see
+    /// bears on nothing.
+    private func filesHaving(_ terms: [String], typing: String?, vectors: [String: [Float]], zGate: Double,
+                             setsScale: [Bool], narrowing: (sql: String, values: [SQLValue])?, kept: Set<Int64>?,
+                             exclusions: (sql: String, values: [SQLValue])?) throws -> Set<Int64> {
+        var having: Set<Int64>?
+        for term in terms {
+            var files = Set<Int64>()
+            let words = RequiredWords.words(of: term)
+            if !words.isEmpty {
+                let pattern = try wordPatterns([words], prefixLast: term == typing, within: exclusions)[0]
+                try store.db.query("""
+                    SELECT DISTINCT s.file FROM fts JOIN segments s ON s.id = fts.rowid WHERE fts MATCH ?\
+                    \(narrowing.map { " AND s.file IN (\($0.sql))" } ?? "")
+                    """, [.text(pattern)] + (narrowing?.values ?? [])) { files.insert($0.int(0)) }
+            }
+            if let vector = vectors[term], vector.count == Vectors.dimension, !rowFile.isEmpty {
+                let meaning = Self.meaning(score(vector), rowModality, setsScale: setsScale)
+                for row in meaning.indices where meaning[row] >= zGate && kept?.contains(rowFile[row]) != false {
+                    files.insert(rowFile[row])
+                }
+            }
+            having = having.map { $0.intersection(files) } ?? files
+            if having?.isEmpty == true { break }
+        }
+        return having ?? []
+    }
+
+    /// Which vectors set a query's meaning scale (`meaning`'s `setsScale`) for a caller who sees only what
+    /// `exclusions` keeps (an AI app, `SearchFilter.exclusions`): `rowSetsScale`'s, of the files it may see, so a file
+    /// it can't see never decides what passes the gate. With nothing left out (DigUp's own searches), `rowSetsScale`.
+    private func rowsSettingScale(seeing exclusions: SearchFilter) throws -> [Bool] {
+        guard let query = exclusions.query else { return rowSetsScale }
+        var visible = Set<Int64>()
+        try store.db.query(query.sql, query.values) { visible.insert($0.int(0)) }
+        return rowSetsScale.indices.map { rowSetsScale[$0] && visible.contains(rowFile[$0]) }
     }
 
     /// What a filter keeps, with no words: the newest files it keeps (of `kinds`), by when Photos says a library's

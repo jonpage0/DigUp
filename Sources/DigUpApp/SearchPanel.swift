@@ -34,8 +34,14 @@ final class SearchPanelController {
     static let weakerToggle = "\u{0}weaker"
 
     var query = "" {
-        didSet { if query != oldValue { queryChanged() } }
+        didSet { if query != oldValue, !settingBoth { queryChanged() } }
     }
+    /// Words every result must have (`RequiredWords`): "must have" tokens before the field, their words left in `query`
+    /// where they were typed (`markedQuery` marks them).
+    var required: [String] = [] {
+        didSet { if required != oldValue, !settingBoth { queryChanged() } }
+    }
+    @ObservationIgnored private var settingBoth = false
     private(set) var results = ResultSet.empty
     private(set) var showWeaker = false
     private(set) var selection: String?
@@ -96,6 +102,38 @@ final class SearchPanelController {
     var savedSuggestion: SavedSearch? { app.savedSearches.suggestion(for: query) }
     /// ↩ opens the saved search being named, not the selected result.
     var returnOpensSaved: Bool { savedSuggestion != nil && !navigated }
+    /// The query as it's searched: the field's words with the required ones marked (`+beach`); a search of code's as
+    /// typed (its `+` is literal).
+    var markedQuery: String {
+        CodeQuery.text(of: query) != nil ? query : RequiredWords.marking(required, in: query)
+    }
+    /// The tip under the field shows (`RequiredTokens.showsTip`).
+    var showsRequiredTip: Bool {
+        RequiredTokens.showsTip(query: query, required: required, code: CodeQuery.text(of: query) != nil,
+                                used: model.settings.requiredWordUsed)
+    }
+
+    /// Typing in the field: a required word typed in full (`+beach `) becomes a token, its word left where it is.
+    func typed(_ text: String) {
+        guard let taken = RequiredTokens.taking(text, into: required, code: CodeQuery.text(of: text) != nil) else {
+            query = text
+            return
+        }
+        settingBoth = true
+        required = taken.required
+        settingBoth = false
+        if query == taken.text { queryChanged() } else { query = taken.text }
+    }
+
+    /// "Require “beach”" (the field's right-click): as typing + before it does.
+    func require(_ term: String) {
+        required = RequiredWords.adding([term], to: required)
+    }
+
+    /// A must-have token's ×, or ⌫ in an empty field: its word stays in the query, as a word like the others.
+    func unrequire(_ term: String) {
+        required.removeAll { $0 == term }
+    }
 
     // MARK: Showing
 
@@ -108,6 +146,7 @@ final class SearchPanelController {
         shownAt = started
         engine.prewarm()
         app.favorites.followMoves()   // a file marked ♥ that moved shows its heart where it is now
+        foldTokens()
         let window = self.window ?? makeWindow()
         placeWindow(window)
         if AppController.offscreen { return }
@@ -137,6 +176,17 @@ final class SearchPanelController {
             // The next turn of the main loop, after the window's first layout and display.
             log("panel: shown in \(ms(since: started, until: shown)), drawn by \(ms(since: started))")
         }
+    }
+
+    /// Shown again, the last query is selected (`show`), so typing replaces it: its must-have tokens go back into it as
+    /// their marks, to be replaced with it. The query searched is the same, so it isn't searched again.
+    private func foldTokens() {
+        guard !required.isEmpty else { return }
+        let marked = markedQuery
+        settingBoth = true
+        required = []
+        query = marked
+        settingBoth = false
     }
 
     func hide() {
@@ -173,7 +223,7 @@ final class SearchPanelController {
         typedAt = Date()
         navigated = false
         meaningTask?.cancel()
-        let typed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = markedQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let codeText = CodeQuery.text(of: typed)
         isCode = codeText != nil
         let code = isCode
@@ -193,6 +243,7 @@ final class SearchPanelController {
             resizeWindow()
             return
         }
+        RequiredTokens.noteUse(of: text, code: code, in: model)
         // Words now. The last word is probably half-typed, so it matches as a prefix.
         Task {
             let started = Date()
@@ -344,6 +395,9 @@ final class SearchPanelController {
         case 31 where modifiers == .command:  // ⌘O: the same search in the window, for a bigger look
             openInWindow()
             return true
+        case 51 where modifiers.isEmpty && query.isEmpty && !required.isEmpty:  // ⌫, nothing typed: the last token
+            unrequire(required[required.count - 1])
+            return true
         case 8 where modifiers == .command:
             // ⌘C copies the selected file, except right after you selected some of the query text (the panel opens
             // with the last query selected, and arrowing to a result means you want the file).
@@ -395,7 +449,7 @@ final class SearchPanelController {
 
     /// The search window, with this query (and only one kind, if given): for a bigger look.
     func openInWindow(_ kind: ResultGroupKind? = nil) {
-        let text = query
+        let text = markedQuery
         hide()
         app.showSearchWindow(query: text, kind: kind)
     }
@@ -471,7 +525,7 @@ final class SearchPanelController {
     }
 
     private var desiredHeight: CGFloat {
-        query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.fieldHeight : Self.expandedHeight
+        markedQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.fieldHeight : Self.expandedHeight
     }
 
     /// Centered on the screen with the pointer, a little above the middle, like Spotlight.
