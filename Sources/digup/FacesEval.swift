@@ -1,7 +1,7 @@
 import DigUpKit
 import Foundation
 
-/// `digup faces-eval --library <path> [--catalog <Photos.sqlite>] [--engine vision|sface] [--model <path>]`: how well
+/// `digup faces-eval --library <path> [--catalog <Photos.sqlite>] [--engine vision|sface] [--model <path>]...`: how well
 /// each face recognizer (`FaceRecognizer`) knows the people named in a Photos library. Every face Photos found in its
 /// photos is read from the photo, where Photos found it (`PhotosLibrary.photoFaces`, `FacePicture`): the named ones
 /// are the people's, the others everyone else. Per recognizer, it reports the faces read per person; each named face's
@@ -10,9 +10,10 @@ import Foundation
 /// wrongly be called a named person; and its time a face. Counts and rates only: never a file's name or a picture.
 ///
 /// `--catalog` reads a copy of the library's catalog (its database/Photos.sqlite, with the -wal beside it) instead of
-/// the library's own, which is otherwise opened read-only. `--engine` picks one recognizer (both by default, those
-/// available); `--model` is the Core ML engine's model, by default the SFace that scripts/face-model.py keeps in
-/// DigUp's models folder ($DIGUP_MODELS, else ~/Library/Application Support/DigUp/Models), faces/.
+/// the library's own, which is otherwise opened read-only. `--engine` picks Vision's faceprints or the Core ML engine
+/// (both by default, those available); `--model` is a Core ML engine's model, one engine a model given (comparing
+/// models in one run reads each picture once), by default the SFace that scripts/face-model.py keeps in DigUp's models
+/// folder ($DIGUP_MODELS, else ~/Library/Application Support/DigUp/Models), faces/.
 #if canImport(Vision) && canImport(CoreML)
 func facesEval(_ args: Arguments) throws {
     guard let chosen = args.values["--library"] else { throw CLIError("which library? --library <path>") }
@@ -62,16 +63,16 @@ func facesEval(_ args: Arguments) throws {
     }
 }
 
-/// The Core ML engine's model when `--model` doesn't name one: SFace, where scripts/face-model.py keeps it.
+/// The Core ML engine's model when no `--model` names one: SFace, where scripts/face-model.py keeps it.
 private let sfaceModel = "faces/face_recognition_sface_2021dec.mlpackage"
 
 /// What `--engine` and `--model` ask for: the recognizers to measure. Without `--engine`, every one available here
 /// (saying why one isn't).
 private func faceRecognizers(_ args: Arguments) throws -> [any FaceRecognizer] {
-    let models = ProcessInfo.processInfo.environment["DIGUP_MODELS"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+    let folder = ProcessInfo.processInfo.environment["DIGUP_MODELS"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
         ?? ModelFiles.installed
-    let model = args.values["--model"].map(Arguments.folderURL) ?? models.appendingPathComponent(sfaceModel)
-    func coreML() throws -> any FaceRecognizer {
+    let models = args.lists["--model"]?.map(Arguments.folderURL) ?? [folder.appendingPathComponent(sfaceModel)]
+    func coreML(_ model: URL) throws -> any FaceRecognizer {
         guard FileManager.default.fileExists(atPath: model.path) else {
             throw CLIError("no face model at \(tilde(model.path)) (scripts/face-model.py convert makes it)")
         }
@@ -79,10 +80,11 @@ private func faceRecognizers(_ args: Arguments) throws -> [any FaceRecognizer] {
     }
     switch args.values["--engine"] {
     case "vision": return [try VisionFaceprints()]
-    case "sface": return [try coreML()]
+    case "sface": return try models.map(coreML)
     case nil:
+        let makers = [{ try VisionFaceprints() as any FaceRecognizer }] + models.map { model in { try coreML(model) } }
         var engines: [any FaceRecognizer] = []
-        for make in [{ try VisionFaceprints() as any FaceRecognizer }, coreML] {
+        for make in makers {
             do { engines.append(try make()) } catch { print("left out: \(error)") }
         }
         guard !engines.isEmpty else { throw CLIError("no face recognizer is available here") }
@@ -119,8 +121,9 @@ private struct EngineRun {
     }
 }
 
-/// The thresholds a report goes through: from far apart to nearly the same.
-private let faceThresholds = stride(from: 0.20, through: 0.951, by: 0.05).map { Float($0) }
+/// The thresholds a report goes through: from far apart to nearly the same (LVFace's vectors call the same person at
+/// lower similarities than SFace's and Vision's).
+private let faceThresholds = stride(from: 0.05, through: 0.951, by: 0.05).map { Float($0) }
 
 private func report(_ engine: any FaceRecognizer, _ run: EngineRun, people: [String: Int], others: Int) {
     print(engine.name)
