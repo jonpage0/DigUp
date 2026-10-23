@@ -99,5 +99,35 @@ import Testing
         _ = try indexer.run()   // and fails again
         #expect(try store.readAgainOnce(readsSpeech: true) == 0)
     }
+
+    /// A shell script at `name` in the test's folder, made executable: a stand-in for parakeet-mlx or ffmpeg.
+    func program(_ name: String, _ script: String) throws -> String {
+        let url = folder.appendingPathComponent(name)
+        try Data(("#!/bin/sh\n" + script).utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url.path
+    }
+
+    /// parakeet-mlx says "Failed to load audio" whenever ffmpeg fails, the recording's fault or ffmpeg's own: the
+    /// recording is blamed (settled) only when ffmpeg decodes a sound it's known to read; else it's the reader's.
+    @Test func aRecordingIsBlamedOnlyWhenFfmpegWorks() throws {
+        let parakeet = try program("parakeet-mlx", """
+            echo "Error transcribing file talk.m4a: Failed to load audio: ffmpeg version 9.0.2"
+            echo " Error opening input: Invalid data found when processing input"
+            """)
+        let recording = folder.appendingPathComponent("talk.m4a")
+        for (ffmpeg, theRecordings) in [(try program("ffmpeg", "exit 0"), true),
+                                        (try program("broken-ffmpeg", "echo 'dyld: Library not loaded' >&2; exit 1"),
+                                         false)] {
+            #expect(throws: Speech.Failure.self) {
+                do {
+                    _ = try Speech.run(parakeet, ffmpeg: ffmpeg, on: recording, in: folder, timeout: 60)
+                } catch let failure as Speech.Failure {
+                    #expect(failure.ofRecording == theRecordings, "\(ffmpeg): \(failure)")
+                    throw failure
+                }
+            }
+        }
+    }
     #endif
 }

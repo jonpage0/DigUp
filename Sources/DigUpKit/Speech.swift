@@ -121,9 +121,10 @@ public enum Speech {
     /// Why a recording's speech couldn't be read.
     public struct Failure: Error, CustomStringConvertible {
         public let description: String
-        /// The recording's own failure: ffmpeg can't decode it. That's settled until the recording changes. Any other
-        /// failure is the reader's (parakeet-mlx or ffmpeg missing or failing, the model not downloaded, the time
-        /// limit), not a fact about the recording, and the recording is read again later (`IndexStore.readAgainOnce`).
+        /// The recording's own failure: ffmpeg, which reads a sound it's known to read (`ffmpegDecodes`), can't decode
+        /// it. That's settled until the recording changes. Any other failure is the reader's (parakeet-mlx or ffmpeg
+        /// missing, failing or broken, the model not downloaded, the time limit), not a fact about the recording, and the
+        /// recording is read again later (`IndexStore.readAgainOnce`).
         var ofRecording = false
     }
 
@@ -195,14 +196,7 @@ public enum Speech {
         let handle = try FileHandle(forWritingTo: output)
         process.standardOutput = handle
         process.standardError = handle
-        let ended = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in ended.signal() }
-        try process.run()
-        if ended.wait(timeout: .now() + timeout) == .timedOut {
-            process.terminate()
-            #if !os(Windows)
-            if ended.wait(timeout: .now() + 5) == .timedOut { kill(process.processIdentifier, SIGKILL) }
-            #endif
+        guard try ran(process, within: timeout) else {
             throw Failure(description: "parakeet-mlx took more than \(Int(timeout / 60)) minutes")
         }
         guard let data = try? Data(contentsOf: work.appendingPathComponent("speech.json")) else {
@@ -211,16 +205,56 @@ public enum Speech {
             let said = ((try? String(contentsOf: output, encoding: .utf8)) ?? "").components(separatedBy: "\n\n")
                 .filter { !$0.contains("transcription complete") }.joined(separator: " ")
                 .split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            // ffmpeg couldn't decode the recording (its last error says why): the recording's failure. Anything else
-            // is the reader's, and parakeet-mlx's own error says why.
+            // parakeet-mlx says "Failed to load audio" whenever ffmpeg fails (its last error says why): the recording's
+            // failure when ffmpeg reads a sound it's known to read, else ffmpeg's own (a library it can't load, say).
+            // Anything else is the reader's, and parakeet-mlx's own error says why.
             if said.contains("Failed to load audio") {
                 let why = said.range(of: "Error", options: .backwards).map { String(said[$0.lowerBound...]) } ?? said
-                throw Failure(description: "ffmpeg couldn't decode it: \(why.prefix(300))", ofRecording: true)
+                let works = ffmpegDecodes(ffmpeg, in: work)
+                throw Failure(description: (works ? "ffmpeg couldn't decode it: " : "ffmpeg isn't working: ")
+                                  + why.prefix(300), ofRecording: works)
             }
             let why = said.range(of: "Error").map { String(said[$0.lowerBound...]) }
                 ?? (said.isEmpty ? "it stopped (\(process.terminationStatus))" : said)
             throw Failure(description: "parakeet-mlx couldn't read it: \(why.prefix(300))")
         }
         return try JSONDecoder().decode(Transcript.self, from: data).sentences
+    }
+
+    /// How long ffmpeg may take to decode `ffmpegDecodes`' half second of sound, in seconds.
+    static let ffmpegCheck = 30.0
+
+    /// Whether `ffmpeg` decodes a sound it's known to read (half a second of a tone, written here as a WAV) the way
+    /// parakeet-mlx has it decode a recording: to 16 kHz mono 16-bit samples.
+    static func ffmpegDecodes(_ ffmpeg: String, in work: URL) -> Bool {
+        let sample = work.appendingPathComponent("known.wav")
+        let rate = AudioExtractor.sampleRate
+        let tone = (0..<Int(rate / 2)).map { Int16(8000 * sin(Double($0) * 2 * .pi * 440 / rate)) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffmpeg)
+        process.arguments = ["-nostdin", "-i", sample.path, "-threads", "0", "-f", "s16le", "-ac", "1",
+                             "-acodec", "pcm_s16le", "-ar", String(Int(rate)), "-"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try AudioExtractor.writeWAV(tone[...], to: sample)
+            return try ran(process, within: ffmpegCheck) && process.terminationStatus == 0
+        } catch {
+            return false
+        }
+    }
+
+    /// Runs `process` for up to `timeout` seconds; false when it was stopped for taking longer.
+    private static func ran(_ process: Process, within timeout: Double) throws -> Bool {
+        let ended = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in ended.signal() }
+        try process.run()
+        guard ended.wait(timeout: .now() + timeout) == .timedOut else { return true }
+        process.terminate()
+        #if !os(Windows)
+        if ended.wait(timeout: .now() + 5) == .timedOut { kill(process.processIdentifier, SIGKILL) }
+        #endif
+        return false
     }
 }
