@@ -11,6 +11,38 @@ nonisolated struct PhotosID: Codable, Hashable, Sendable {
     var uuid: String
 }
 
+/// Any key at all, to see which an object of the file has.
+nonisolated private struct AnyKey: CodingKey {
+    let stringValue: String
+    init(stringValue: String) { self.stringValue = stringValue }
+    var intValue: Int? { nil }
+    init?(intValue: Int) { nil }
+}
+
+/// An object of `saved-searches.json` has only the keys the approved shape gives it (`Key`): one with any other isn't
+/// this shape, so the file is left alone rather than read and later written over without that key (`SavedSearches`).
+nonisolated private func onlyKeys<Key: CodingKey & CaseIterable>(_: Key.Type, in decoder: any Decoder) throws {
+    let approved = Set(Key.allCases.map(\.stringValue))
+    let others = try decoder.container(keyedBy: AnyKey.self).allKeys.map(\.stringValue).filter { !approved.contains($0) }
+    guard others.isEmpty else {
+        throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                debugDescription: "keys the approved shape doesn't have: \(others)"))
+    }
+}
+
+nonisolated extension PhotosID {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case library, uuid
+    }
+
+    init(from decoder: any Decoder) throws {
+        try onlyKeys(CodingKeys.self, in: decoder)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        library = try container.decode(String.self, forKey: .library)
+        uuid = try container.decode(String.self, forKey: .uuid)
+    }
+}
+
 /// A search the user saved: its words, kind and filters, run again whenever it's opened (a smart folder: nothing about
 /// its results is kept). One entry of `saved-searches.json` (`SavedSearches`).
 struct SavedSearch: Equatable, Identifiable {
@@ -94,12 +126,13 @@ struct SavedSearch: Equatable, Identifiable {
 }
 
 extension SavedSearch: Codable {
-    private enum CodingKeys: String, CodingKey {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
         case id, name, query, kind, filters, saved
     }
 
-    /// Every key is there: `kind` too, null for All.
+    /// Every key is there, and no other: `kind` too, null for All.
     init(from decoder: any Decoder) throws {
+        try onlyKeys(CodingKeys.self, in: decoder)
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
@@ -120,18 +153,52 @@ extension SavedSearch: Codable {
     }
 }
 
+extension SavedSearch.Person {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case name, photos
+    }
+
+    init(from decoder: any Decoder) throws {
+        try onlyKeys(CodingKeys.self, in: decoder)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        photos = try container.decode([PhotosID].self, forKey: .photos)
+    }
+}
+
+extension SavedSearch.Album {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case title, folders, photos
+    }
+
+    init(from decoder: any Decoder) throws {
+        try onlyKeys(CodingKeys.self, in: decoder)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decode(String.self, forKey: .title)
+        folders = try container.decode([String].self, forKey: .folders)
+        photos = try container.decode([PhotosID].self, forKey: .photos)
+    }
+}
+
+extension SavedSearch.Area {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case south, west, north, east
+    }
+
+    init(from decoder: any Decoder) throws {
+        try onlyKeys(CodingKeys.self, in: decoder)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        south = try container.decode(Double.self, forKey: .south)
+        west = try container.decode(Double.self, forKey: .west)
+        north = try container.decode(Double.self, forKey: .north)
+        east = try container.decode(Double.self, forKey: .east)
+    }
+}
+
 /// A filter is an object with exactly one key, one of these six; anything else isn't this shape.
 extension SavedSearch.Filter: Codable {
     private enum Key: String, CodingKey, CaseIterable {
         case person, album, photosFavorites, digupFavorites, from, area
-    }
-
-    /// Any key at all, to count them.
-    private struct AnyKey: CodingKey {
-        let stringValue: String
-        init(stringValue: String) { self.stringValue = stringValue }
-        var intValue: Int? { nil }
-        init?(intValue: Int) { nil }
     }
 
     init(from decoder: any Decoder) throws {
@@ -182,14 +249,29 @@ extension SavedSearch.Filter: Codable {
 ///                                    { "area": { "south": 25.1, "west": -80.9, "north": 26.2, "east": -79.8 } } ],
 ///                       "saved": "<ISO 8601>" } ] }
 ///
-/// In the user's order, which the menu shows. A file DigUp can't read as this shape (a newer version, damaged, a filter
-/// with two keys or none, two From or two areas in one search) is left as it is and never written over: nothing can be
-/// saved, renamed or deleted until it's fixed.
+/// In the user's order, which the menu shows. A file DigUp can't read as exactly this shape (a newer version, damaged,
+/// a key anywhere that the shape doesn't have, a filter with two keys or none, two From or two areas in one search) is
+/// left as it is and never written over: nothing can be saved, renamed or deleted until it's fixed.
 @MainActor @Observable
 final class SavedSearches {
     private struct Stored: Codable {
         var version: Int
         var searches: [SavedSearch]
+
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case version, searches
+        }
+
+        init(version: Int, searches: [SavedSearch]) {
+            (self.version, self.searches) = (version, searches)
+        }
+
+        init(from decoder: any Decoder) throws {
+            try onlyKeys(CodingKeys.self, in: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            version = try container.decode(Int.self, forKey: .version)
+            searches = try container.decode([SavedSearch].self, forKey: .searches)
+        }
     }
 
     private struct Version: Decodable {
