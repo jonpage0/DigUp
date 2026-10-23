@@ -683,7 +683,8 @@ struct WhyItMatched: View {
             Label {
                 Text(row.reason)
             } icon: {
-                Image(systemName: row.matchedMeaning ? "sparkle.magnifyingglass" : "textformat")
+                Image(systemName: row.matchedMeaning ? "sparkle.magnifyingglass"
+                      : row.faces.isEmpty ? "textformat" : "person.crop.rectangle")
                     .foregroundStyle(row.matchedMeaning ? AnyShapeStyle(Brand.gradient) : AnyShapeStyle(.secondary))
             }
             .font(.system(size: 12, weight: .medium))
