@@ -350,4 +350,49 @@ import Testing
         seen.photosOnly = nil
         #expect(try searcher.browse(seen, kinds: nil, limit: 10).map(\.path) == ["/f/beach.txt", library])
     }
+
+    /// A saved search with a When, as the kit reads, runs and says it for the app's Saved menu and `digup mcp`'s
+    /// `saved` alike (`SavedSearch`): read strictly and written as it was, at most one When; run, it keeps what the
+    /// window's When token keeps; its line names it as the token does; and no AI apps' switch keeps it from one.
+    @Test func aSavedSearchWithWhenRunsAndIsSaidThroughTheKit() throws {
+        func file(_ filters: String) -> Data {
+            Data(#"""
+                { "version": 1, "searches": [ { "id": "\#(UUID().uuidString)", "name": "July at the beach",
+                  "query": "beach", "kind": null, "filters": [\#(filters)], "saved": "2026-10-23T08:00:00Z" } ] }
+                """#.utf8)
+        }
+        let july = #"{ "when": { "after": "2026-07-01", "before": "2026-08-01" } }"#
+        let saved = try #require(try SavedSearch.searches(in: file(july)).first)
+        #expect(saved.filters == [.when(try when("2026-07-01..2026-08-01"))])
+        let written = try SavedSearch.data([saved])
+        #expect(try SavedSearch.searches(in: written) == [saved])
+        let object = try #require(try JSONSerialization.jsonObject(with: written) as? [String: Any])
+        let filters = try #require(((object["searches"] as? [[String: Any]])?.first)?["filters"] as? [[String: Any]])
+        #expect(filters.first?["when"] as? [String: String] == ["after": "2026-07-01", "before": "2026-08-01"])
+        #expect(throws: SavedSearch.FileError.notWellFormed) {
+            try SavedSearch.searches(in: file(july + #", { "when": { "lastDays": 30 } }"#))
+        }
+        #expect(throws: DecodingError.self) {
+            try SavedSearch.searches(in: file(#"{ "when": { "after": "2026-08-01", "before": "2026-07-01" } }"#))
+        }
+
+        // Run: what the searcher may see stays as it was, and the When narrows it.
+        let store = try IndexStore(directory: folder)
+        try self.file("/f/beach-july.txt", in: store, kind: .doc, modified: try at("2026-07-10"), words: "beach")
+        try self.file("/f/beach-june.txt", in: store, kind: .doc, modified: try at("2026-06-10"), words: "beach")
+        try self.file("/f/july.png", in: store, kind: .screenshot, modified: try at("2026-07-12"))
+        var base = SearchFilter()
+        base.photosOnly = []
+        let filter = saved.searchFilter(narrowing: base, people: [], albums: [], myDevices: [], blurring: .off,
+                                        favorites: { [] })
+        #expect(filter.when == (try when("2026-07-01..2026-08-01")) && filter.photosOnly == [])
+        let searcher = try Searcher(store: store, loadVectors: false)
+        #expect(try searcher.search(saved.query, queryVector: nil, filter: filter).map(\.path) == ["/f/beach-july.txt"])
+        #expect(try searcher.browse(filter, kinds: nil, limit: 10).map(\.path) == ["/f/july.png", "/f/beach-july.txt"])
+
+        // Said as Save This Search… says it, the When as its token; and it needs no AI apps' switch.
+        #expect(saved.summary(people: [], albums: []) == "“beach” · All kinds · Jul 1 – Jul 31, 2026")
+        #expect(SavedSearch.Filter.when(try when("last:30")).title == SearchFilter.When(lastDays: 30)?.title)
+        #expect(saved.aiUses.isEmpty)
+    }
 }

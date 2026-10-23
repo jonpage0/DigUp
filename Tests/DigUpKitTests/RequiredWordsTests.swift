@@ -40,10 +40,6 @@ import Testing
         #expect(RequiredWords.marks(in: "+\"red car").map(\.isComplete) == [false])
         #expect(RequiredWords.marks(in: "+\"red car\"").map(\.isComplete) == [true])
         #expect(RequiredWords("dog +bea").typing == "bea" && RequiredWords("dog +beach ").typing == nil)
-        // Only some of them taken out (the search field's typed-in-full ones).
-        let marks = RequiredWords.marks(in: "+dog and +\"red car\" +bea")
-        #expect(RequiredWords.unmarking(marks.filter(\.isComplete), in: "+dog and +\"red car\" +bea")
-                == "dog and red car +bea")
         // What's embedded, and the vectors back by term.
         let words = RequiredWords("dog +beach +\"red car\"")
         #expect(words.embedded == ["dog beach red car", "beach", "red car"])
@@ -52,28 +48,48 @@ import Testing
         #expect(words.vectors([]).query == nil && words.vectors([]).required.isEmpty)
     }
 
-    @Test func markingPutsEachMarkBackOnItsWord() {
-        #expect(RequiredWords.marking(["girl"], in: "girl with pumpkin") == "+girl with pumpkin")
-        #expect(RequiredWords.marking(["golden retriever"], in: "a golden retriever puppy")
-                == "a +\"golden retriever\" puppy")
-        // A whole word that starts one: "cat" isn't in "category"; a number is marked as a phrase.
-        #expect(RequiredWords.marking(["cat"], in: "category cat") == "category +cat")
-        #expect(RequiredWords.marking(["4815"], in: "order 4815") == "order +\"4815\"")
-        // Not in the text (any more): ahead of it, where its token shows; marked already: as it is.
-        #expect(RequiredWords.marking(["beach"], in: "dog") == "+beach dog")
-        #expect(RequiredWords.marking(["beach", "sand"], in: "") == "+beach +sand")
-        #expect(RequiredWords.marking(["beach"], in: "dog +beach") == "dog +beach")
-        // What the window keeps (its words, and tokens) is what it saves, and back.
-        for (text, terms) in [("a dog running on beach", ["beach"]), ("girl with pumpkin", ["girl", "pumpkin"]),
-                              ("a golden retriever, at the beach", ["golden retriever", "beach"])] {
-            let marked = RequiredWords(RequiredWords.marking(terms, in: text))
-            #expect(marked.text == text && marked.terms == terms)
+    /// The search field keeps a query as it's typed: what it draws marked is each mark (less the punctuation after a
+    /// word), and what's searched and saved is the text itself, so it reads back as typed (cold review R3: these came
+    /// back changed from the "must have" tokens the field made of them, and the last one with another meaning).
+    @Test func theFieldDrawsEachMarkWhereItIsTyped() {
+        func drawn(_ query: String) -> [String] { RequiredWords.marks(in: query).map { String(query[$0.drawn]) } }
+        #expect(drawn("beach +beach") == ["+beach"])
+        #expect(RequiredWords("beach +beach").terms == ["beach"])
+        #expect(drawn("+dog on the +beach, +Beach") == ["+dog", "+beach", "+Beach"])
+        #expect(RequiredWords("+dog on the +beach, +Beach").terms == ["dog", "beach"])
+        // A phrase is drawn whole, its quotes and a + inside it too: "red +car" is the phrase.
+        #expect(drawn("+\"red +car\"") == ["+\"red +car\""])
+        #expect(RequiredWords("+\"red +car\"").terms == ["red +car"])
+        #expect(drawn("+\"golden retr") == ["+\"golden retr"])
+        #expect(drawn("c++ and +1 555 0100").isEmpty)
+    }
+
+    /// "Require" (the field's right-click) marks the whole words selected, or the word clicked, where they are.
+    @Test func requireMarksTheWordsSelectedWhereTheyAre() {
+        func require(_ selected: String, in query: String) -> String? {
+            guard let found = query.range(of: selected),
+                  let made = RequiredWords.requiring(found, in: query) else { return nil }
+            return query.replacingCharacters(in: made.range, with: made.mark)
         }
-        // A selection to require, and one with no word in it.
-        #expect(RequiredWords.term(selected: " beach, ") == "beach")
-        #expect(RequiredWords.term(selected: "+golden \n retriever") == "golden retriever")
-        #expect(RequiredWords.term(selected: "!?") == nil)
-        #expect(RequiredWords.adding(["Beach", "sand", "sand"], to: ["beach"]) == ["beach", "sand"])
+        #expect(require("beach", in: "a dog on the beach") == "a dog on the +beach")
+        #expect(require("ea", in: "a dog on the beach") == "a dog on the +beach")   // part of a word: the word
+        #expect(require("beach", in: "beach, at noon") == "+beach, at noon")
+        #expect(require("golden retriever", in: "a golden retriever puppy") == "a +\"golden retriever\" puppy")
+        #expect(require("den retr", in: "our golden retriever, asleep") == "our +\"golden retriever\", asleep")
+        // A number, or a word after punctuation, can't take a + alone.
+        #expect(require("4815", in: "order 4815") == "order +\"4815\"")
+        #expect(require("beach", in: "(beach) day") == "+\"(beach)\" day")
+        // Nothing to require, a quote, or required already.
+        #expect(require("!?", in: "what !? now") == nil)
+        #expect(require("hi", in: "say \"hi\" there") == nil)
+        #expect(require("beach", in: "dog +beach") == nil)
+        #expect(require("car", in: "+\"red car\" wash") == nil)
+        // The term the menu names, as the mark reads back; the + typed reads as typing it would.
+        let query = "dog on the beach,"
+        let made = RequiredWords.requiring(query.range(of: "beach")!, in: query)
+        #expect(made?.term == "beach" && made?.mark == "+beach,")
+        #expect(RequiredWords(query.replacingCharacters(in: made!.range, with: made!.mark))
+                == RequiredWords("dog on the +beach,"))
     }
 
     // MARK: Searching

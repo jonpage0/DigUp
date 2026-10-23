@@ -8,6 +8,10 @@ nonisolated struct PhotosChoices: Sendable, Equatable {
     var albums: [Album] = []
     /// The devices that took the libraries' pictures (`IndexStore.photosCameras`), most files first.
     var cameras: [IndexStore.PhotosCamera] = []
+    /// The index's rows they're made of: what a saved search's people and albums are found among
+    /// (`SavedSearch.Person.found(in:)`, as `digup mcp` finds them).
+    private var personRows: [IndexStore.PhotosPerson] = []
+    private var albumRows: [IndexStore.PhotosAlbum] = []
 
     /// "Shot on my devices" with Settings → Photos → My devices' changes (`AppSettings.myDevicesAdded`,
     /// `myDevicesRemoved`), by the kit's rule (`IndexStore.PhotosCamera.mine`).
@@ -61,6 +65,7 @@ nonisolated struct PhotosChoices: Sendable, Equatable {
     /// Only people and albums with an indexed file: the others would filter to nothing.
     init(people: [IndexStore.PhotosPerson], albums: [IndexStore.PhotosAlbum], cameras: [IndexStore.PhotosCamera]) {
         self.cameras = cameras
+        (personRows, albumRows) = (people, albums)
         var byName: [String: (photos: [Int64: PhotosID], files: Int)] = [:]
         var names: [String] = []
         for person in people where person.files > 0 {
@@ -89,35 +94,21 @@ nonisolated struct PhotosChoices: Sendable, Equatable {
         photos.sorted { $0.key < $1.key }.map(\.value)
     }
 
-    /// A saved search's person, as the indexed libraries have them now: every row of one of their Photos uuids (a
-    /// rename in Photos follows, and the token shows the name it has now). Found nowhere (deleted in Photos, or the
-    /// library isn't searched any more), the token keeps the saved name and keeps nothing (`FilterToken.isMissing`).
-    /// The token keeps the saved ids, so saving it again keeps who it was.
+    /// A saved search's person, as the indexed libraries have them now (`SavedSearch.Person.found(in:)`): every row of
+    /// one of their Photos uuids (a rename in Photos follows, and the token shows the name it has now). Found nowhere
+    /// (deleted in Photos, or the library isn't searched any more), the token keeps the saved name and keeps nothing
+    /// (`FilterToken.isMissing`). The token keeps the saved ids, so saving it again keeps who it was.
     func token(for saved: SavedSearch.Person) -> FilterToken {
-        let uuids = Set(saved.photos.map(\.uuid))
-        var name: String?, ids = Set<Int64>()
-        for person in people {
-            let found = person.photos.filter { uuids.contains($0.value.uuid) }
-            guard !found.isEmpty else { continue }
-            name = name ?? person.name
-            ids.formUnion(found.keys)
-        }
-        return .person(name: name ?? saved.name, ids: ids, photos: saved.photos)
+        let found = saved.found(in: personRows)
+        return .person(name: found?.name ?? saved.name, ids: found?.ids ?? [], photos: saved.photos)
     }
 
     /// A saved search's album, found by Photos' uuid as `token(for:)` finds a person (a rename or a move to another
     /// folder follows).
     func token(for saved: SavedSearch.Album) -> FilterToken {
-        let uuids = Set(saved.photos.map(\.uuid))
-        var place: (title: String, folders: [String])?, ids = Set<Int64>()
-        for album in albums {
-            let found = album.photos.filter { uuids.contains($0.value.uuid) }
-            guard !found.isEmpty else { continue }
-            place = place ?? (album.title, album.folders)
-            ids.formUnion(found.keys)
-        }
-        return .album(title: place?.title ?? saved.title, folders: place?.folders ?? saved.folders, ids: ids,
-                      photos: saved.photos)
+        let found = saved.found(in: albumRows)
+        return .album(title: found?.title ?? saved.title, folders: found?.folders ?? saved.folders,
+                      ids: found?.ids ?? [], photos: saved.photos)
     }
 
     /// Filters the words being typed could name: people and albums with a name or a word of it that starts with the
@@ -196,6 +187,9 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
     case shape(SearchFilter.Shape)
     /// A file from this time, by its date (`SearchFilter.when`, `FileDate`): one When at a time.
     case when(SearchFilter.When)
+    /// Only these parts of a file may make it match (`SearchFilter.matchBy`): one Match by token at a time, its parts
+    /// checked in the Filters menu's Match by section (`SearchModel.setMatch(by:on:)`).
+    case matchBy(SearchFilter.MatchBy)
 
     /// A person by their name and an album by its folders and title, as the menus offer them; one that isn't in
     /// Photos now by the Photos ids it was saved with.
@@ -214,14 +208,15 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case .length(let length): "length:\(length.text)"
         case .shape(let shape): "shape:\(shape.text)"
         case .when(let when): "when:\(when.text)"
+        case .matchBy(let matchBy): "match-by:\(matchBy.text)"
         }
     }
 
     /// The filters that are on one at a time, each with its group: what was shot on my devices and what was saved from
-    /// apps exclude each other (both together would keep nothing), and so do two lengths, two shapes or two times. The
-    /// one picked replaces the one on.
+    /// apps exclude each other (both together would keep nothing), and so do two lengths, two shapes or two times;
+    /// Match by is one token whatever parts it has. The one picked replaces the one on.
     enum Choice {
-        case from, length, shape, when
+        case from, length, shape, when, matchBy
     }
 
     var choice: Choice? {
@@ -230,6 +225,7 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case .length: .length
         case .shape: .shape
         case .when: .when
+        case .matchBy: .matchBy
         default: nil
         }
     }
@@ -252,19 +248,22 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         }
     }
 
+    /// What the token says: as a saved search's element of it says it (`SavedSearch.Filter.title`, which the Saved
+    /// summary line and `digup mcp`'s `list_choices` show too).
     var title: String {
         switch self {
         case .person(let name, _, _): name
         case .album(let title, _, _, _): title
-        case .photosFavorites: "Photos Favorites"
-        case .digupFavorites: "Favorites"
-        case .shotOnMyDevices: "Shot on my devices"
-        case .origin(let origin): origin == .imported ? "Imported into Photos" : "Saved from other apps"
-        case .area: "In the map's area"
-        case .sensitive: "Sensitive"
+        case .photosFavorites: SavedSearch.Filter.photosFavorites.title
+        case .digupFavorites: SavedSearch.Filter.digupFavorites.title
+        case .shotOnMyDevices: SavedSearch.From.mine.title
+        case .origin(let origin): (origin == .imported ? SavedSearch.From.imported : .saved).title
+        case .area: SavedSearch.Area.title
+        case .sensitive: SavedSearch.Filter.sensitive.title
         case .length(let length): length.title
         case .shape(let shape): shape.title
         case .when(let when): when.title
+        case .matchBy(let matchBy): matchBy.title
         }
     }
 
@@ -281,6 +280,7 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case .length: "timer"
         case .shape(let shape): shape.symbol
         case .when: "calendar"
+        case .matchBy: "scope"
         }
     }
 
@@ -309,61 +309,15 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case .when(let when):
             "When: \(when.title). A file's date is when Photos or the camera says it was taken, else when the file was "
                 + "last changed"
+        case .matchBy(let matchBy):
+            "Only what's \(matchBy.parts.map(\.phrase).formatted(.list(type: .or))) can make a file match, by what it "
+                + "means or by its words (a word that must be there too); with no words, the files that have it"
         }
     }
 }
 
-/// What the Length menu and a Length token say of a length.
-nonisolated extension SearchFilter.Length {
-    /// The menu's buckets as they're named ("Under 15 s", "15 s – 1 min", "1 – 5 min", "Over 5 min"), any other
-    /// length (a saved search's, made by hand) by its bounds the same way.
-    var title: String {
-        switch (atLeast, under) {
-        case (let atLeast?, let under?):
-            Self.minutes(atLeast).flatMap { from in Self.minutes(under).map { "\(from) – \($0) min" } }
-                ?? "\(Self.spoken(atLeast)) – \(Self.spoken(under))"
-        case (let atLeast?, nil): "Over \(Self.spoken(atLeast))"
-        case (nil, let under?): "Under \(Self.spoken(under))"
-        case (nil, nil): ""   // not a length (`init` turns it down)
-        }
-    }
-
-    /// "shorter than 15 s", "at least 15 s long and shorter than 1 min", "5 min long or longer".
-    var phrase: String {
-        switch (atLeast, under) {
-        case (let atLeast?, let under?): "at least \(Self.spoken(atLeast)) long and shorter than \(Self.spoken(under))"
-        case (let atLeast?, nil): "\(Self.spoken(atLeast)) long or longer"
-        case (nil, let under?): "shorter than \(Self.spoken(under))"
-        case (nil, nil): ""
-        }
-    }
-
-    /// "15 s", "1 min", "1 min 30 s".
-    private static func spoken(_ seconds: Double) -> String {
-        if let whole = minutes(seconds) { return "\(whole) min" }
-        let over = Int(seconds) / 60
-        let rest = "\((seconds - Double(over * 60)).formatted(.number.precision(.fractionLength(0...1)))) s"
-        return over > 0 ? "\(over) min \(rest)" : rest
-    }
-
-    /// Whole minutes, from 1 up; nil for any other number of seconds.
-    private static func minutes(_ seconds: Double) -> Int? {
-        seconds >= 60 && seconds.truncatingRemainder(dividingBy: 60) == 0 ? Int(seconds / 60) : nil
-    }
-}
-
-/// What the Shape menu and a Shape token say of a shape.
+/// What the Shape menu and a Shape token say of a shape, besides its title (the kit's `SearchFilter.Shape.title`).
 nonisolated extension SearchFilter.Shape {
-    var title: String {
-        switch self {
-        case .portrait: "Portrait"
-        case .landscape: "Landscape"
-        case .square: "Square"
-        case .wide: "Wide"
-        case .ratio: text
-        }
-    }
-
     /// The Shape menu's item: its title, and for square and wide what they take in.
     var menuTitle: String {
         switch self {
@@ -391,6 +345,31 @@ nonisolated extension SearchFilter.Shape {
         case .square: "with sides within 5 % of each other"
         case .wide: "at least twice as wide as they're tall (panoramas, cinema)"
         case .ratio: "shaped \(text) (within 2 %)"
+        }
+    }
+}
+
+/// What the Filters menu's Match by section and a Match by token say of a part of a file.
+nonisolated extension SearchFilter.Part {
+    /// The section's item: the part's name, and what's in it.
+    var menuTitle: String {
+        switch self {
+        case .visual: "Visual (pictures, video frames)"
+        case .audio: "Audio (sound)"
+        case .spoken: "Spoken (what's said)"
+        case .text: "Text (documents, names, words in pictures)"
+        case .tags: "Tags (what Photos says of an item)"
+        }
+    }
+
+    /// "Only what's said or written…": what of a file it is.
+    var phrase: String {
+        switch self {
+        case .visual: "seen"
+        case .audio: "heard"
+        case .spoken: "said"
+        case .text: "written"
+        case .tags: "tagged in Photos"
         }
     }
 }
@@ -476,8 +455,9 @@ struct FilterSuggestionsBar: View {
 /// Filters ▾ beside the kinds and the Favorites chip (Jon, 2026-10-22: "yes"): every filter but DigUp's favorites and
 /// the map's area, in one menu, so the row fits the window. Photos' people (everyone picked must be in a picture),
 /// albums (it may be in any one picked), favorites and From while a library is searched; then When, Sensitive, Length
-/// and Shape. A filter with choices has a submenu, whose title says which is on. The menu's title counts the filters on
-/// ("Filters · 2"), and each is a token in the field too.
+/// and Shape; then Match by (approved 2026-10-23), a section of the five parts of a file, any of them checked. A filter
+/// with choices has a submenu, whose title says which is on. The menu's title counts the filters on ("Filters · 2"),
+/// and each is a token in the field too.
 struct FiltersMenu: View {
     let search: SearchModel
 
@@ -495,9 +475,10 @@ struct FiltersMenu: View {
         .fixedSize()
         .help(search.searchesPhotos
               ? "Filters: Photos' people, albums, favorites and where it came from, when it's from, pictures rated "
-                + "sensitive, how long a video or a recording is, and what shape a picture or a video is"
-              : "Filters: when it's from, pictures rated sensitive, how long a video or a recording is, and what shape "
-                + "a picture or a video is")
+                + "sensitive, how long a video or a recording is, what shape a picture or a video is, and which parts "
+                + "of a file may match"
+              : "Filters: when it's from, pictures rated sensitive, how long a video or a recording is, what shape a "
+                + "picture or a video is, and which parts of a file may match")
     }
 }
 
@@ -506,10 +487,14 @@ struct FiltersMenu: View {
 enum FilterMenuItem: Identifiable {
     /// A filter, checked while it's on.
     case toggle(String, FilterToken, enabled: Bool = true)
+    /// A part of a file, checked while Match by has it (`SearchModel.matchBy`).
+    case part(String, SearchFilter.Part, enabled: Bool = true)
     /// A submenu: its title, which says what of it is on, a name for it among its neighbours, and its items.
     case submenu(String, id: String, [FilterMenuItem])
     /// An item that does something rather than turn a filter on (Custom Range…).
     case command(String, id: String, run: () -> Void)
+    /// Items under a heading of their own, in the menu they're in.
+    case section(String, id: String, [FilterMenuItem])
     /// A line that can't be chosen.
     case note(String)
     case divider(id: String)
@@ -517,8 +502,10 @@ enum FilterMenuItem: Identifiable {
     var id: String {
         switch self {
         case .toggle(_, let token, _): token.id
+        case .part(_, let part, _): "part:\(part.rawValue)"
         case .submenu(_, let id, _): "menu:\(id)"
         case .command(_, let id, _): "command:\(id)"
+        case .section(_, let id, _): "section:\(id)"
         case .note(let text): "note:\(text)"
         case .divider(let id): "divider:\(id)"
         }
@@ -545,6 +532,12 @@ enum FilterMenuItem: Identifiable {
         let shapeItems = shapes.map { FilterMenuItem.toggle($0.menuTitle, .shape($0)) } + [.divider(id: "ratios")]
             + SearchFilter.Shape.ratios.map { FilterMenuItem.toggle($0.menuTitle, .shape($0)) }
         items.append(.submenu(titled("Shape", on: titles(of: .shape, in: search)), id: "shape", shapeItems))
+        // Tags are Photos' alone: offered while a library is searched, or to take off.
+        let parts = SearchFilter.Part.allCases.map { part in
+            FilterMenuItem.part(part.menuTitle, part, enabled: part != .tags || search.searchesPhotos
+                                || search.matchBy?.contains(part) == true)
+        }
+        items.append(.section("Match by", id: "match-by", parts))
         return items
     }
 
@@ -616,7 +609,7 @@ enum FilterMenuItem: Identifiable {
     }
 }
 
-/// The Filters menu's items at one level of it (a submenu's are a level of their own).
+/// The Filters menu's items at one level of it (a submenu's are a level of their own; a section's are at its level).
 private struct FilterMenuContent: View {
     let items: [FilterMenuItem]
     let search: SearchModel
@@ -627,10 +620,16 @@ private struct FilterMenuContent: View {
             case .toggle(let title, let token, let enabled):
                 Toggle(title, isOn: Binding(get: { search.has(token) }, set: { search.set(token, on: $0) }))
                     .disabled(!enabled)
+            case .part(let title, let part, let enabled):
+                Toggle(title, isOn: Binding(get: { search.matchBy?.contains(part) == true },
+                                            set: { search.setMatch(by: part, on: $0) }))
+                    .disabled(!enabled)
             case .submenu(let title, _, let items):
                 Menu(title) { AnyView(FilterMenuContent(items: items, search: search)) }
             case .command(let title, _, let run):
                 Button(title, action: run)
+            case .section(let title, _, let items):
+                Section(title) { AnyView(FilterMenuContent(items: items, search: search)) }
             case .note(let text):
                 Text(text)
             case .divider:

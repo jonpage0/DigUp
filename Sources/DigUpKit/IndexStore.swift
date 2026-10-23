@@ -1190,6 +1190,46 @@ public final class IndexStore {
         return people
     }
 
+    /// A name of the indexed libraries' People, as the People filter takes it by name (`digup mcp`'s `people`), and
+    /// how many files the filter keeps for the people who have it, whatever its case.
+    public struct PhotosName: Sendable, Equatable {
+        /// As the first of them spells it.
+        public let name: String
+        public let files: Int
+    }
+
+    /// The People's names as a searcher who sees only what `filter` keeps finds them (`digup mcp`'s `list_choices`):
+    /// only names with a Photos file it keeps (`photosPeople(keptBy:)`, in its order), each with how many of the files
+    /// it keeps the People filter keeps for them: Photos' pictures of them, and pictures outside Photos with a face
+    /// that matches theirs, matched only with the faces of the files it keeps (`faceMatches(referencesKeptBy:)`).
+    public func photosNames(keptBy filter: SearchFilter) throws -> [PhotosName] {
+        var groups: [(name: String, ids: Set<Int64>)] = []
+        for person in try photosPeople(keptBy: filter) where person.files > 0 {
+            if let group = groups.firstIndex(where: { $0.name.caseInsensitiveCompare(person.name) == .orderedSame }) {
+                groups[group].ids.insert(person.id)
+            } else {
+                groups.append((person.name, [person.id]))
+            }
+        }
+        guard !groups.isEmpty else { return [] }
+        var seen: Set<Int64>?
+        if let kept = filter.query {
+            var files = Set<Int64>()
+            try db.query(kept.sql, kept.values) { files.insert($0.int(0)) }
+            seen = files
+        }
+        let matches = try faceMatches(referencesKeptBy: filter)
+        return try groups.map { group in
+            var people = SearchFilter(people: [group.ids])
+            people.faceMatches = matches
+            var files = 0
+            if let kept = people.query {
+                try db.query(kept.sql, kept.values) { if seen?.contains($0.int(0)) ?? true { files += 1 } }
+            }
+            return PhotosName(name: group.name, files: files)
+        }
+    }
+
     /// The albums of the indexed libraries: the ones in no folder first, then folder by folder (by the folders' names,
     /// outermost first), each folder's by title. With a filter, only those with a file it keeps, counted so.
     public func photosAlbums(keptBy filter: SearchFilter = SearchFilter()) throws -> [PhotosAlbum] {
@@ -1207,6 +1247,38 @@ public final class IndexStore {
         return albums.sorted {
             $0.folders != $1.folders ? $0.folders.lexicographicallyPrecedes($1.folders)
                 : $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        }
+    }
+
+    /// One album title in one folder path, as the app's Albums menu offers it (each library's album of it, and any
+    /// two of one title in one folder, count for it), and how many files are in any of them.
+    public struct PhotosAlbumChoice: Sendable, Equatable {
+        public let title: String
+        /// The folders it's in, outermost first.
+        public let folders: [String]
+        public let files: Int
+    }
+
+    /// The albums as a searcher who sees only what `filter` keeps finds them (`digup mcp`'s `list_choices`), one title
+    /// in one folder path each, in `photosAlbums`' order: only those with a file it keeps, each with how many of the
+    /// files it keeps are in any of its albums, a file in two of them counted once, as the Albums filter keeps it.
+    public func photosAlbumChoices(keptBy filter: SearchFilter) throws -> [PhotosAlbumChoice] {
+        var groups: [(title: String, folders: [String], ids: [Int64])] = []
+        for album in try photosAlbums(keptBy: filter) where album.files > 0 {
+            if let group = groups.firstIndex(where: { $0.title == album.title && $0.folders == album.folders }) {
+                groups[group].ids.append(album.id)
+            } else {
+                groups.append((album.title, album.folders, [album.id]))
+            }
+        }
+        let kept = filter.query
+        return try groups.map { group in
+            var files = 0
+            try db.query("""
+                SELECT COUNT(DISTINCT file) FROM photos_album_files
+                WHERE album IN (\(group.ids.map(String.init).joined(separator: ",")))
+                """ + (kept.map { " AND file IN (\($0.sql))" } ?? ""), kept?.values ?? []) { files = Int($0.int(0)) }
+            return PhotosAlbumChoice(title: group.title, folders: group.folders, files: files)
         }
     }
 
@@ -1245,18 +1317,30 @@ public final class IndexStore {
         }
     }
 
-    /// The devices that took the indexed libraries' pictures and videos, the one with most files first.
-    public func photosCameras() throws -> [PhotosCamera] {
+    /// The devices that took the indexed libraries' pictures and videos, the one with most files first. With a filter,
+    /// only those that took a file it keeps, counted so (`digup mcp`: the ones in what an AI app may see).
+    public func photosCameras(keptBy filter: SearchFilter = SearchFilter()) throws -> [PhotosCamera] {
         var cameras: [PhotosCamera] = []
+        let kept = filter.query
         try db.query("""
             SELECT camera, COUNT(*), SUM(origin = '\(PhotosLibrary.Origin.camera.rawValue)'),
                    SUM(origin = '\(PhotosLibrary.Origin.unknown.rawValue)') FROM photos_assets
-            WHERE camera IS NOT NULL GROUP BY camera ORDER BY COUNT(*) DESC, camera
-            """) {
+            WHERE camera IS NOT NULL\(kept.map { " AND file IN (\($0.sql))" } ?? "")
+            GROUP BY camera ORDER BY COUNT(*) DESC, camera
+            """, kept?.values ?? []) {
             cameras.append(PhotosCamera(model: $0.text(0) ?? "", files: Int($0.int(1)), fromCamera: Int($0.int(2)),
                                         unknownOrigin: Int($0.int(3))))
         }
         return cameras
+    }
+
+    /// The user's devices ("Shot on my devices", `PhotosCamera.mine`, with their changes `added` and `removed`) as a
+    /// searcher who sees only what `filter` keeps finds them (`digup mcp`): the rule over the devices of the files it
+    /// keeps, so a device is theirs to it by the items it sees its camera saved, or because they added it, and an item
+    /// kept from it bears on neither. Without a filter, as DigUp's window has them.
+    public func myDevices(added: [String], removed: [String], keptBy filter: SearchFilter = SearchFilter()) throws
+        -> [String] {
+        PhotosCamera.mine(of: try photosCameras(keptBy: filter), added: added, removed: removed)
     }
 
     /// The indexed file of each of these Photos assets (by uuid), wherever the crawl found it now (an asset's file

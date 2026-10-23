@@ -47,9 +47,9 @@ A word that every result must have gets a + before it: "a dog running on +beach"
 their words (a file's or folder's name, its text, the text in a picture, what Photos knows about it, what's said) or
 that show a beach by what they mean, still ranked by all the words; `+"red car"` does the same for a phrase. The `+`
 counts only at the start of a word and before a letter or a quote, so "c++" and "+1 555 0100" are searched as typed,
-and code search (`code:`) takes it as written. On a Mac the word shows as a "must have" token in the search field (its
-× or ⌫ in an empty field takes it off), a right-click on a word in the field offers Require, and a saved search keeps
-it in its words, as AI apps send it in theirs.
+and code search (`code:`) takes it as written. On a Mac the search field highlights the marked word where it's typed
+(delete its + and it's an ordinary word again), a right-click on a word in the field offers Require, which types the
+`+` for you, and a saved search keeps the words as typed, as AI apps send them in theirs.
 
 ## Private
 
@@ -121,20 +121,28 @@ and From (see [Apple Photos](#apple-photos)), Sensitive (see [Sensitive pictures
 - Shape, for pictures and videos as they're shown: Portrait, Landscape, Square (sides within 5 %), Wide (2:1 or wider:
   panoramas and cinema), or an exact ratio, 16:9, 9:16, 4:3, 3:4, 3:2 or 2:3, within 2 % (16:9 is landscape, 9:16
   portrait). A phone's photo or video turned by the camera counts as it's shown, not as it's stored
+- Match by, the parts of a file that may make it match, any of them: Visual (pictures, video frames, PDF pages read as
+  pictures), Audio (sound, a video's soundtrack), Spoken (what's said), Text (documents, PDF text, the words in a
+  picture, file and folder names) and Tags (what Photos says of an item: its labels, keywords, title, caption, people,
+  albums and places). Only those parts count, by what they mean or by their words, a word that must be there (`+beach`)
+  too, and why a result is there comes from one of them; each keeps the score it has without the choice. With no
+  words, it lists the files that have one of them: Spoken alone, the recordings with speech
 
-Each filter that's on is a token in the search field too (its × takes it off, as ⌫ does in an empty field). A Photos
-picture's size and a Photos video's length are Photos' own, so a video that's only in iCloud has its length too; any
-other file's are read from the file. `digup search --length 15..60 --shape 16:9 --when 2026-07-01..2026-08-01` does
-the same in the CLI (seconds, either end left out: `..15`, `300..`; days `FROM..BEFORE`, the second not kept, either
-left out, or `last:90` for the past 90 days).
+Each filter that's on is a token in the search field too (its × takes it off, as ⌫ does in an empty field); Match by
+is one token, "Match: Spoken + Text". A Photos picture's size and a Photos video's length are Photos' own, so a video
+that's only in iCloud has its length too; any other file's are read from the file. `digup search --length 15..60
+--shape 16:9 --when 2026-07-01..2026-08-01 --match-by spoken,text` does the same in the CLI (seconds, either end left
+out: `..15`, `300..`; days `FROM..BEFORE`, the second not kept, either left out, or `last:90` for the past 90 days).
 
 On a Mac, the search window's Saved menu (the bookmark beside the field) keeps the searches you come back to. Save This
 Search… (⌘S) keeps the words, the kind and the filters (people, albums, favorites, From, the map's area, When,
-Sensitive, Length, Shape) under a name, and choosing it searches again, so new files show up; Edit Saved Searches…
-renames, reorders and deletes them. Typing the start of one's name in the panel offers it, and Tab opens it in the
-window. They're kept in `saved-searches.json` beside the index, so rebuilding the index keeps them, with Photos'
-people and albums by Photos' own ids: someone renamed in Photos is still found, and someone who's gone from Photos
-shows struck through, and the search keeps nothing for them rather than everyone.
+Sensitive, Length, Shape, Match by) under a name, and choosing it searches again, so new files show up; Edit Saved
+Searches… renames, reorders and deletes them. Typing the start of one's name in the panel offers it, and Tab opens it
+in the window.
+They're kept in `saved-searches.json` beside the index, so rebuilding the index keeps them, with Photos' people and
+albums by Photos' own ids: someone renamed in Photos is still found, and someone who's gone from Photos shows struck
+through, and the search keeps nothing for them rather than everyone. AI apps you let in can run them by name too (AI
+apps, below).
 
 DigUp lives in the menu bar on a Mac and in the tray on Windows and Linux, where you can see how indexing is going,
 pause it, or open Settings. Opening it from the Start menu or your app list shows the search window.
@@ -373,18 +381,27 @@ DigUp never changes an app's settings: you run the command or add the entry your
 DigUp, as you set it up there. The helper reads the index whether DigUp is open or not, and never writes to it: it
 opens the index read-only, first making SQLite's log and shared-memory files beside it when they aren't there.
 
-They get four tools, all read-only:
+They get five tools, all read-only, described so that an app can hunt down something you half remember ("an app that
+did something like this, I took a screenshot a few months ago"): search by what it looked like or said, narrow, look,
+read.
 
 - `search_files`: what the search window does, with its kinds and filters (people, albums, Photos favorites, DigUp's
-  favorites, From, an area on the map, a length, a shape, when: `{after, before}` days or `{last_days}`) and its
-  required words (`+beach`), plus `near`: what was taken within so many km of a place (`{latitude, longitude,
-  radius_km}`). With no words, a kind or a filter lists what it keeps, newest first, so "screenshots from June" is a
-  kind and a when. Each result says where the file is, why it's there ("Matches the text on page 3"), the words that
-  matched, and when and where it was taken.
+  favorites, From, an area on the map, a length, a shape, when: `{after, before}` days or `{last_days}`, Sensitive, the
+  parts to match by) and its required words (`+beach`), plus `near`: what was taken within so many km of a place
+  (`{latitude, longitude, radius_km}`). With no words, a kind or a filter lists what it keeps, newest first, so
+  "screenshots from June" is a kind and a when. Each result says where the file is, why it's there ("Matches the text
+  on page 3"), the words that matched, and when and where it was taken; a recording's result also lists up to 5 of its
+  other moments that match, best first, each with where and why ("0:42–0:51", "Matches the frame at 0:42"), as the
+  window's preview lists them. `saved` runs one of your saved searches by its name, as the window would run it now
+  (with only `limit` beside it).
 - `read_text`: the words DigUp read from a file it returned (a document, a PDF's page, the text in a screenshot, what
   Photos knows about a picture, a stretch of code, what's said in a recording; with a `moment`, what's said within
   30 seconds of it), up to 20,000 characters.
 - `get_picture`: a picture of a result, at most 768 pixels on its long side, for apps that can look at one.
+- `list_choices`: what the filters take: your saved searches it may run (each name with the line Save This Search…
+  says it in), and, with Photos allowed, the people named in Photos (with how many files show them, pictures outside
+  Photos found by their face included), the albums (title, folders, how many files) and the devices "Shot on my
+  devices" covers.
 - `status`: how many files are indexed, of which kinds, and whether some are still being read.
 
 What they may see is DigUp's to say, not the app's. The helper reads Settings → AI apps at every call, so a change
@@ -399,7 +416,15 @@ applies to the very next one:
   or by you).
 - code search, and pictures themselves (`get_picture`), are each off until you turn them on.
 - pictures rated sensitive (at Blur sensitive pictures' position, Revealing while it's off) stay out until you allow
-  them, and so does every picture or video not rated yet, read or not; `status` says how many wait to be rated.
+  them, and so does every picture or video not rated yet, read or not; `status` says how many wait to be rated. The
+  Sensitive filter (`search_files`' `sensitive`) is refused until then, naming the switch.
+- `list_choices` names, and counts, only what the app may see: a person or an album only on pictures kept from it
+  isn't there. "Shot on my devices" (`from: "mine"`, and listed) is, for the app, the devices whose camera saved what
+  it sees, and the ones you added, whatever took the pictures kept from it. A recording's moments come only from what
+  it sees.
+- a saved search that uses what the app may not (Photos, the Sensitive filter or code while they're off), or names
+  someone or an album it doesn't see (their names are in what you called it), answers as one you never saved, and
+  isn't listed.
 - a file the app may not see answers as one DigUp doesn't have, so it can't tell the file is there; `mcp.log` says why.
 - the tools' descriptions tell the model that whatever comes back is your data, never instructions: a file can say
   anything.

@@ -28,10 +28,12 @@ public struct RequiredWords: Sendable, Equatable {
         /// From the `+` to the end of the word, or through the phrase's closing quote (to the end of the query when it
         /// has none).
         public let range: Range<String.Index>
+        /// What the search field draws marked: the mark, less the punctuation after a word (`+beach` of `+beach,`).
+        public let drawn: Range<String.Index>
         /// The mark without its `+` and a phrase's quotes: what it is in the query once it's taken out.
         public let unmarked: String
-        /// Typed in full: a space follows the word, or the phrase's quote is closed. The search window and the panel
-        /// make a "must have" token of it then, never while it's being typed.
+        /// Typed in full: a space follows the word, or the phrase's quote is closed. Until it is, its term is still
+        /// being typed (`typing`).
         public let isComplete: Bool
     }
 
@@ -82,15 +84,22 @@ public struct RequiredWords: Sendable, Equatable {
                 let term = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
                 if hasWords(term) {
                     let end = close.map { query.index(after: $0) } ?? query.endIndex
-                    marks.append(Mark(term: term, range: index..<end, unmarked: phrase, isComplete: close != nil))
+                    marks.append(Mark(term: term, range: index..<end, drawn: index..<end, unmarked: phrase,
+                                      isComplete: close != nil))
                     index = end
                     continue
                 }
             } else if query[next].isLetter {
                 let end = query[next...].firstIndex(where: \.isWhitespace) ?? query.endIndex
                 let word = String(query[next..<end])
+                // Not the punctuation after it (it starts with a letter, so it doesn't run out).
+                var drawnEnd = end
+                while query[query.index(before: drawnEnd)].unicodeScalars
+                    .allSatisfy(CharacterSet.punctuationCharacters.contains) {
+                    drawnEnd = query.index(before: drawnEnd)
+                }
                 marks.append(Mark(term: word.trimmingCharacters(in: .punctuationCharacters), range: index..<end,
-                                  unmarked: word, isComplete: end < query.endIndex))
+                                  drawn: index..<drawnEnd, unmarked: word, isComplete: end < query.endIndex))
                 index = end
                 continue
             }
@@ -100,7 +109,7 @@ public struct RequiredWords: Sendable, Equatable {
     }
 
     /// `query` with these of its marks taken out, each as `Mark.unmarked`.
-    public static func unmarking(_ marks: [Mark], in query: String) -> String {
+    static func unmarking(_ marks: [Mark], in query: String) -> String {
         var text = query
         for mark in marks.sorted(by: { $0.range.lowerBound > $1.range.lowerBound }) {
             text.replaceSubrange(mark.range, with: mark.unmarked)
@@ -108,45 +117,38 @@ public struct RequiredWords: Sendable, Equatable {
         return text
     }
 
-    /// `text` with each of `terms` marked required: its first appearance as a whole word or phrase that starts a word,
-    /// or, when it isn't in `text` (any more), the mark ahead of the text, where the search field shows its token. A term
-    /// marked already stays as it is. `RequiredWords(marking(terms, in: text))` gives back `text` and `terms` when each
-    /// term is in it: the window keeps the words in their place, and a must-have token beside them.
-    public static func marking(_ terms: [String], in text: String) -> String {
-        var text = text, ahead: [String] = []
-        for term in terms {
-            let marked = marks(in: text)
-            guard !(marked.map(\.term) + ahead).contains(where: { words(of: $0) == words(of: term) }) else { continue }
-            if let found = firstAppearance(of: term, in: text, outside: marked.map(\.range)) {
-                text.replaceSubrange(found, with: mark(String(text[found])))
-            } else {
-                ahead.append(term)
-            }
+    /// What "Require" (the search field's right-click) makes of the words `selected` in `query`: the whole words it
+    /// touches, marked, as the range of `query` to replace and the mark to put there, with its term as it reads back.
+    /// One word that starts with a letter gets a `+` (`beach,` → `+beach,`); several, or one that starts with
+    /// something else (`4815`, `(beach)`), are quoted (`+"golden retriever"`, the punctuation after them left after
+    /// the quote). Nil when there's nothing in them to require, or a quote a phrase can't hold, or when one of them is
+    /// required already.
+    public static func requiring(_ selected: Range<String.Index>, in query: String)
+        -> (range: Range<String.Index>, mark: String, term: String)? {
+        var start = selected.lowerBound, end = selected.upperBound
+        while start < end, query[start].isWhitespace { start = query.index(after: start) }
+        while end > start, query[query.index(before: end)].isWhitespace { end = query.index(before: end) }
+        guard start < end else { return nil }
+        while start > query.startIndex, !query[query.index(before: start)].isWhitespace {
+            start = query.index(before: start)
         }
-        return (ahead.map(mark) + (text.isEmpty ? [] : [text])).joined(separator: " ")
-    }
-
-    /// `required` with `terms` after it, each once: one it has already (as keyword search reads it, "Beach" is "beach")
-    /// is left out.
-    public static func adding(_ terms: [String], to required: [String]) -> [String] {
-        var seen = Set(required.map(words(of:)))
-        return required + terms.filter { seen.insert(words(of: $0)).inserted }
-    }
-
-    /// The selection a right-click asks to require ("beach," selected: "beach"), or nil when it has no word in it.
-    public static func term(selected selection: String) -> String? {
-        let trimmed = selection.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
-            .union(CharacterSet(charactersIn: "+")))
-        let term = trimmed.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        return hasWords(term) ? term : nil
-    }
-
-    /// The mark of a term: `+word` when it reads back as one word, else `+"…"` (a phrase, or a word that starts with
-    /// a digit, which `+` alone doesn't mark).
-    static func mark(_ term: String) -> String {
-        let word = term.first?.isLetter == true && !term.contains { $0.isWhitespace || quotes.contains($0) }
-            && term.trimmingCharacters(in: .punctuationCharacters) == term
-        return word ? "+" + term : "+\"" + term + "\""
+        while end < query.endIndex, !query[end].isWhitespace { end = query.index(after: end) }
+        let words = String(query[start..<end])
+        guard hasWords(words), !words.contains(where: quotes.contains),
+              !marks(in: query).contains(where: { $0.range.overlaps(start..<end) }) else { return nil }
+        let mark: String
+        if words.first!.isLetter, !words.contains(where: \.isWhitespace) {
+            mark = "+" + words
+        } else if words.first!.isLetter || words.first!.isNumber {
+            let after = words.reversed().prefix { !($0.isLetter || $0.isNumber) }.count
+            mark = "+\"" + String(words.dropLast(after)) + "\"" + String(words.suffix(after))
+        } else {
+            mark = "+\"" + words + "\""
+        }
+        guard let term = marks(in: mark).first(where: { $0.range.lowerBound == mark.startIndex })?.term else {
+            return nil
+        }
+        return (start..<end, mark, term)
     }
 
     /// A term's words as keyword search reads them, one space apart: two terms are one when they read alike ("Beach"
@@ -158,20 +160,5 @@ public struct RequiredWords: Sendable, Equatable {
 
     private static func hasWords(_ text: String) -> Bool {
         text.contains { $0.isLetter || $0.isNumber }
-    }
-
-    /// Where `term` first is in `text` as a whole word or phrase starting a word (after a space, or first), ignoring
-    /// case, and not inside one of the `marked` ranges.
-    private static func firstAppearance(of term: String, in text: String,
-                                        outside marked: [Range<String.Index>]) -> Range<String.Index>? {
-        var from = text.startIndex
-        while let found = text.range(of: term, options: [.caseInsensitive], range: from..<text.endIndex) {
-            from = found.upperBound
-            let starts = found.lowerBound == text.startIndex || text[text.index(before: found.lowerBound)].isWhitespace
-            let ends = found.upperBound == text.endIndex
-                || !(text[found.upperBound].isLetter || text[found.upperBound].isNumber)
-            if starts, ends, !marked.contains(where: { $0.overlaps(found) }) { return found }
-        }
-        return nil
     }
 }
