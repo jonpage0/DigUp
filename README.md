@@ -404,8 +404,10 @@ applies to the very next one:
 - pictures rated sensitive (at Blur sensitive pictures' position, Revealing while it's off) stay out until you allow
   them, and so does every picture or video not rated yet, read or not; `status` says how many wait to be rated. The
   Sensitive filter (`search_files`' `sensitive`) is refused until then, naming the switch.
-- `list_choices` names, and counts, only what the app may see: a person, an album or a device only on pictures kept
-  from it isn't there, and a recording's moments come only from what it sees.
+- `list_choices` names, and counts, only what the app may see: a person or an album only on pictures kept from it
+  isn't there. "Shot on my devices" (`from: "mine"`, and listed) is, for the app, the devices whose camera saved what
+  it sees, and the ones you added, whatever took the pictures kept from it. A recording's moments come only from what
+  it sees.
 - a saved search that uses what the app may not (Photos, the Sensitive filter or code while they're off), or names
   someone or an album it doesn't see (their names are in what you called it), answers as one you never saved, and
   isn't listed.

@@ -536,10 +536,7 @@ final class MCPServer {
         }
         filter.favorites = photosFavorites
         switch from {
-        case "mine":
-            let changes = deviceChanges
-            filter.shotOn = Set(IndexStore.PhotosCamera.mine(of: try store.photosCameras(), added: changes.added,
-                                                             removed: changes.removed))
+        case "mine": filter.shotOn = Set(try myDevices(in: store, keptBy: allowed))
         case let origin?: filter.origins = [origin]
         case nil: break
         }
@@ -577,11 +574,7 @@ final class MCPServer {
             return try search(CodeQuery.text(of: query) ?? query, in: code, kinds: nil, filter: SearchFilter(),
                               limit: limit, prompt: Prompts.codeQuery)
         }
-        let changes = deviceChanges
-        let devices = saved.filters.contains(.from(.mine))
-            ? IndexStore.PhotosCamera.mine(of: try store.photosCameras(), added: changes.added,
-                                           removed: changes.removed)
-            : []
+        let devices = saved.filters.contains(.from(.mine)) ? try myDevices(in: store, keptBy: allowed) : []
         var filter = try saved.searchFilter(narrowing: allowed, people: people, albums: albums, myDevices: devices,
                                             blurring: SensitivePosition(settings),
                                             favorites: { try favoritePaths(in: store) })
@@ -596,12 +589,14 @@ final class MCPServer {
         (try? Data(contentsOf: SavedSearch.url(beside: index))).flatMap { try? SavedSearch.searches(in: $0) } ?? []
     }
 
-    /// The user's changes to "Shot on my devices" (Settings → Photos → My devices), as the app's settings have them
-    /// now (`IndexStore.PhotosCamera.mine`).
-    private var deviceChanges: (added: [String], removed: [String]) {
+    /// "Shot on my devices" as the AI app may see it (`IndexStore.myDevices`): the rule over the devices of the files
+    /// it sees, with the user's changes in the app's settings now (Settings → Photos → My devices). An item kept from
+    /// it never makes a device the user's to it, nor keeps one the user added off the list.
+    private func myDevices(in store: IndexStore, keptBy allowed: SearchFilter) throws -> [String] {
         let defaults = settings
-        return (defaults.stringArray(forKey: AppDefaults.myDevicesAdded) ?? [],
-                defaults.stringArray(forKey: AppDefaults.myDevicesRemoved) ?? [])
+        return try store.myDevices(added: defaults.stringArray(forKey: AppDefaults.myDevicesAdded) ?? [],
+                                   removed: defaults.stringArray(forKey: AppDefaults.myDevicesRemoved) ?? [],
+                                   keptBy: allowed)
     }
 
     /// Finds them by meaning and words (words alone when the model can't run or the index has no vectors), or with no
@@ -851,9 +846,9 @@ final class MCPServer {
 
     /// What `search_files`' filters take, as the AI app may see it (approved 2026-10-23): the saved searches it may run
     /// (`SavedSearch.withheld`), each with the line Save This Search… says it in, its people and albums by their names
-    /// now; and, with Photos allowed, the People's names, the albums (by title and folders) and the devices "mine"
-    /// covers, only those with a file it sees, each counted only over what it sees (a person's pictures outside Photos
-    /// by the faces it may see, `IndexStore.photosNames(keptBy:)`).
+    /// now; and, with Photos allowed, the People's names and the albums (by title and folders), only those with a file
+    /// it sees, each counted only over what it sees (a person's pictures outside Photos by the faces it may see,
+    /// `IndexStore.photosNames(keptBy:)`), and the devices "mine" covers for it (`myDevices(in:keptBy:)`).
     private func listChoices(_ arguments: [String: Any], access: AIAccess) throws -> Outcome {
         _ = try Input(arguments, allowed: [])
         let store = try mainIndex().store
@@ -878,10 +873,7 @@ final class MCPServer {
                 }
             }
             fields["albums"] = places.map { ["title": $0.title, "folders": $0.folders, "files": $0.files] }
-            let changes = deviceChanges
-            let devices = IndexStore.PhotosCamera.mine(of: try store.photosCameras(),
-                                                        seen: try store.photosCameras(keptBy: allowed),
-                                                        added: changes.added, removed: changes.removed)
+            let devices = try myDevices(in: store, keptBy: allowed)
             fields["devices"] = devices
             results += names.count + places.count + devices.count
         } else {

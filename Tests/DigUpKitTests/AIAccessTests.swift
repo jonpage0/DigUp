@@ -440,12 +440,13 @@ import Testing
         // Albums: Trip alone.
         let albums = try store.photosAlbums(keptBy: seen)
         #expect(albums.map(\.title) == ["Trip"] && albums.map(\.files) == [1])
-        // The devices "mine" covers: the one that took what it sees, and one the user added that took nothing indexed;
-        // not the one that took only the hidden picture, which "mine" has for DigUp's window.
-        let cameras = try store.photosCameras()
-        #expect(IndexStore.PhotosCamera.mine(of: cameras, seen: try store.photosCameras(keptBy: seen),
-                                             added: ["iPhone 18"], removed: []) == ["iPhone 15 Pro", "iPhone 18"])
-        #expect(IndexStore.PhotosCamera.mine(of: cameras, added: ["iPhone 18"], removed: [])
+        // The devices "mine" covers, by the rule over what it sees: the one whose camera saved what it sees, not the one
+        // that saved only the hidden picture, which "mine" has for DigUp's window. One the user added is theirs whatever
+        // took it: the one that took only the hidden picture as much as one that took nothing indexed, so the hidden
+        // picture shows in nothing it's told.
+        #expect(try store.myDevices(added: [], removed: [], keptBy: seen) == ["iPhone 15 Pro"])
+        #expect(try store.myDevices(added: [], removed: []) == ["iPhone 15 Pro", "iPhone Air"])
+        #expect(try store.myDevices(added: ["iPhone Air", "iPhone 18"], removed: [], keptBy: seen)
                 == ["iPhone 15 Pro", "iPhone Air", "iPhone 18"])
         // Saved searches: one of Suzy in Trip is its own; one naming Katie, or Secret, isn't.
         let people = try store.photosPeople(keptBy: seen)

@@ -1268,17 +1268,6 @@ public final class IndexStore {
             cameras.filter { $0.isMine(added: added, removed: removed) }.map(\.model)
                 + added.filter { name in !removed.contains(name) && !cameras.contains { $0.model == name } }
         }
-
-        /// The user's devices (`mine(of:added:removed:)`, of every camera) as a searcher who sees only some files
-        /// finds them (`digup mcp`'s `list_choices`): the ones that took a file it sees (`seen`,
-        /// `IndexStore.photosCameras(keptBy:)`), and the ones the user added that no indexed file names. A device that
-        /// took only files it may not see isn't named to it.
-        public static func mine(of cameras: [PhotosCamera], seen: [PhotosCamera], added: [String],
-                                removed: [String]) -> [String] {
-            let (shown, named) = (Set(seen.map(\.model)), Set(cameras.map(\.model)))
-            return mine(of: cameras, added: added, removed: removed)
-                .filter { shown.contains($0) || !named.contains($0) }
-        }
     }
 
     /// The devices that took the indexed libraries' pictures and videos, the one with most files first. With a filter,
@@ -1296,6 +1285,15 @@ public final class IndexStore {
                                         unknownOrigin: Int($0.int(3))))
         }
         return cameras
+    }
+
+    /// The user's devices ("Shot on my devices", `PhotosCamera.mine`, with their changes `added` and `removed`) as a
+    /// searcher who sees only what `filter` keeps finds them (`digup mcp`): the rule over the devices of the files it
+    /// keeps, so a device is theirs to it by the items it sees its camera saved, or because they added it, and an item
+    /// kept from it bears on neither. Without a filter, as DigUp's window has them.
+    public func myDevices(added: [String], removed: [String], keptBy filter: SearchFilter = SearchFilter()) throws
+        -> [String] {
+        PhotosCamera.mine(of: try photosCameras(keptBy: filter), added: added, removed: removed)
     }
 
     /// The indexed file of each of these Photos assets (by uuid), wherever the crawl found it now (an asset's file
