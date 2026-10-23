@@ -16,6 +16,8 @@ public enum IndexerError: Error, CustomStringConvertible {
 ///
 /// Model work goes to an `Embedder` (made on first use, freed by `closeWorker`). Extraction (ImageIO, Vision, PDFKit,
 /// AVFoundation) runs on a second thread one batch ahead, so reading files and embedding them overlap (see `run`).
+/// Given a `FaceReader`, a picture read is read for its faces there too (`faces`), and pictures read before get theirs
+/// from the faces pass (`readFaces`).
 public final class Indexer {
     public struct SyncSummary: Sendable {
         public var added = 0, changed = 0, moved = 0, removed = 0, unchanged = 0
@@ -41,6 +43,20 @@ public final class Indexer {
     private let makeEmbedder: () throws -> any Embedder
     private var worker: (any Embedder)?
     private let scratch: URL
+    /// What reads the faces in pictures (`Faces.reader`), when there's one.
+    private let faces: (any FaceReader)?
+    /// The faces Photos names in each library picture, as the last sync's listing has them, each with its person's
+    /// row: what reading the picture prints, and what the faces pass holds the index's named faces to (`readFaces`).
+    /// Every file of a library the sync listed has an entry, empty when Photos names no face in it.
+    private var namedFaces: [Int64: [NamedFace]] = [:]
+    /// The library pictures the faces pass read in this process, with the people it read them for: one whose named faces
+    /// couldn't all be read waits for the next helper, or for Photos to name others in it.
+    private var triedNamed: [Int64: [Int64]] = [:]
+    /// The pictures outside Photos the faces pass found away in this process: they wait for the next helper.
+    private var triedAway = Set<Int64>()
+    /// The named faces that faces just read outside Photos are matched with (`IndexStore.faceMatcher`), loaded once a
+    /// run: named faces read in the same run join at its end, when `face_matches` is made again.
+    private var matcher: FaceMatcher?
 
     /// When set, an index built with another model or other settings is emptied and embedded again (the app: a new
     /// version may bring a new model), and this hears about it. When nil, indexing stops with `fingerprintMismatch`.
@@ -54,10 +70,15 @@ public final class Indexer {
     public var costsFolder: URL?
     private var measured = MeasuredCosts()
 
-    public init(store: IndexStore, options: IndexOptions, makeEmbedder: @escaping () throws -> any Embedder) throws {
+    /// `faces`: what reads the faces in pictures; the faces already in the index are another recognizer's, or nobody's,
+    /// and go (`IndexStore.adoptFaceRecognizer`). Without one, no faces are read and the index's stay as they are.
+    public init(store: IndexStore, options: IndexOptions, faces: (any FaceReader)? = nil,
+                makeEmbedder: @escaping () throws -> any Embedder) throws {
         self.store = store
         self.options = options
+        self.faces = faces
         self.makeEmbedder = makeEmbedder
+        if let faces { try store.adoptFaceRecognizer(faces.identity) }
         // One folder per process ($TMPDIR/DigUp-<pid>, which the helper clears up after a process that died), and one
         // in it per indexer: the helper runs two (the main index and the code index), and each clears its own away.
         scratch = FileManager.default.temporaryDirectory
@@ -94,7 +115,8 @@ public final class Indexer {
     /// with it its people, albums, favorite and place. That row is the asset's before any file is matched by its inode,
     /// and a move by inode never crosses a library's edge (`staysOnItsSide`). What Photos says about a Photos library's
     /// files (its words, favorites, places, people and albums) is brought up to date too, without reading them again,
-    /// and a person or album no file is linked to any more is deleted.
+    /// and a person or album no file is linked to any more is deleted. Where Photos named faces is kept for reading the
+    /// pictures (`readFaces`); named faces that went with their pictures or people take their matches with them.
     public func sync(_ roots: [URL]) throws -> SyncSummary {
         let crawl = Crawler.crawl(roots, options: options)
         let existing = try store.files(under: roots.map { $0.standardizedFileURL.path })
@@ -161,11 +183,14 @@ public final class Indexer {
                 && !vanished.contains(where: { row.path.hasPrefix($0) })
                 && !crawl.unlisted.contains(where: { FolderSelection.isInside(row.path, $0) }) {
                 try store.delete(row.id)
+                namedFaces[row.id] = nil
                 summary.removed += 1
             }
             try describe(ids, from: crawl, summary: &summary)
             try store.deleteUnlinkedPeopleAndAlbums()
         }
+        // Named faces gone with their pictures or people: the matches made with them go too.
+        if faces != nil { try store.rebuildFaceMatchesIfNamedChanged() }
         return summary
     }
 
@@ -185,7 +210,8 @@ public final class Indexer {
 
     /// Writes what Photos says about the library files a sync found (`ids`, by path) where it differs from what's
     /// stored: each library's people and albums first (the ones its files show), then each file's facts, linked to
-    /// its own library's rows (a file whose library was renamed or moved is linked to the new one's).
+    /// its own library's rows (a file whose library was renamed or moved is linked to the new one's). The faces Photos
+    /// names in each are kept for reading the picture (`namedFaces`).
     private func describe(_ ids: [String: Int64], from crawl: CrawlReport, summary: inout SyncSummary) throws {
         guard !ids.isEmpty else { return }
         let stored = try store.photosFacts()
@@ -210,6 +236,12 @@ public final class Indexer {
                     try store.setPhotosFacts(facts, replacing: stored[id], of: id)
                     summary.described += 1
                 }
+                // A listing from before faces were listed says nothing of them: what's kept stays as it is.
+                if let named = asset.faces {
+                    namedFaces[id] = named.compactMap { face in
+                        face.person.flatMap { people[$0.uuid] }.map { NamedFace(person: $0, box: face) }
+                    }
+                }
             }
         }
     }
@@ -220,7 +252,8 @@ public final class Indexer {
     /// their first step (`IndexOptions.pdfStep` pages, `docStep` chunks) and stay `partial` for `finishLongFiles`.
     /// Per-file problems are recorded on the file; a dead worker or a settings mismatch stops the run (pending files stay
     /// pending, so the next run resumes). `shouldStop` is asked between batches: pausing, or new files that should go
-    /// first.
+    /// first. With a face reader, the faces of each picture read are kept, those outside Photos matched as they come,
+    /// and `face_matches` is made again at the end when named faces were read.
     @discardableResult
     public func run(limit: Int? = nil, only ids: Set<Int64>? = nil, shouldStop: () -> Bool = { false },
                     onEvent: (Event) -> Void = { _ in }) throws -> [String: Int] {
@@ -229,7 +262,12 @@ public final class Indexer {
         let standIns = queue.contains { $0.kind == .video } ? try store.photosStandIns() : [:]
         var states: [String: Int] = [:]
         var done = 0
-        let jobs = Self.batches(queue).map { Job(files: $0, reading: standIns[$0[0].id]) }
+        let jobs = Self.batches(queue).map { files in
+            Job(files: files, reading: standIns[files[0].id], named: Dictionary(uniqueKeysWithValues: files.compactMap {
+                file in namedFaces[file.id].map { (file.id, $0) }
+            }))
+        }
+        defer { matcher = nil }
         try process(jobs, shouldStop: shouldStop) { _, job, results, seconds in
             for (offset, file) in job.files.enumerated() {
                 let (state, note) = results[offset]
@@ -239,6 +277,7 @@ public final class Indexer {
             }
             done += job.files.count
         }
+        if faces != nil { try store.rebuildFaceMatchesIfNamedChanged() }
         return states
     }
 
@@ -354,10 +393,18 @@ public final class Indexer {
     /// Files read and embedded together (images 8 at a time, other files one by one), or one step of a long file
     /// (`step`: the pages of a PDF or the chunks of a document to read, from 0). The first step comes with the file.
     /// `reading`: a library's video in iCloud, read from what Photos keeps of it (`PhotosLibrary.Reading.isStandIn`).
+    /// `named`: the faces Photos names in its library pictures, by file (`namedFaces`).
     struct Job: Sendable {
         let files: [FileRecord]
         var step: Range<Int>?
         var reading: PhotosLibrary.Reading?
+        var named: [Int64: [NamedFace]] = [:]
+    }
+
+    /// A face Photos named in a library picture: its person's row, and where it is.
+    struct NamedFace: Sendable {
+        let person: Int64
+        let box: PhotosLibrary.FaceBox
     }
 
     /// Images and screenshots go to the model 8 at a time; other files one by one.
@@ -450,6 +497,8 @@ public final class Indexer {
         let ocr: String
         /// `ocr` is what Photos read in the picture (`PhotosLibrary.RecognizedText`), not DigUp's OCR.
         var fromPhotos = false
+        /// Its faces (`faces`), and how long reading them took; nil when they weren't read.
+        var faces: (rows: [IndexStore.FaceRow], seconds: Double)? = nil
     }
 
     /// A batch being prepared on the preparation queue.
@@ -487,14 +536,14 @@ public final class Indexer {
     private func prepare(_ job: Job) -> PendingBatch {
         let pending = PendingBatch()
         jobsPrepared += 1
-        let (options, folder) = (options, scratch.appendingPathComponent("batch-\(jobsPrepared)"))
+        let (options, faces, folder) = (options, faces, scratch.appendingPathComponent("batch-\(jobsPrepared)"))
         preparing.async {
-            pending.fulfill(Self.prepare(job, options: options, into: folder))
+            pending.fulfill(Self.prepare(job, options: options, faces: faces, into: folder))
         }
         return pending
     }
 
-    static func prepare(_ job: Job, options: IndexOptions, into folder: URL) -> Prepared {
+    static func prepare(_ job: Job, options: IndexOptions, faces: (any FaceReader)?, into folder: URL) -> Prepared {
         let batch = job.files
         var prepared = Prepared(batch: batch, step: job.step, folder: folder)
         let url = URL(fileURLWithPath: batch[0].path)
@@ -525,8 +574,9 @@ public final class Indexer {
                             read = reading.text(of: asset.uuid)
                         }
                         let ocr = read ?? (screenshot ? OCR.text(ofImageAt: url) : "")
-                        ready.append(ReadyImage(slot: slot, image: image, frames: frames, ocr: ocr,
-                                                fromPhotos: read != nil))
+                        var item = ReadyImage(slot: slot, image: image, frames: frames, ocr: ocr, fromPhotos: read != nil)
+                        item.faces = faces.flatMap { Self.faces(of: file, named: job.named[file.id], with: $0) }
+                        ready.append(item)
                     } catch let error as ExtractError {
                         if case .tooSmall = error {
                             prepared.outcomes[slot] = Outcome(state: "skipped", detail: "\(error)")
@@ -679,7 +729,8 @@ public final class Indexer {
                     results[item.slot] = ("failed", vectors[position].error)
                     continue
                 }
-                try store.addSegment(file: file.id, kind: .image, modality: .image, vector: vector)
+                let picture = try store.addSegment(file: file.id, kind: .image, modality: .image, vector: vector)
+                if let faces = item.faces { try keep(faces.rows, ofSegment: picture) }
                 for (frame, embedding) in itsFrames {
                     try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
                                          locEnd: frame.end, vector: embedding.vector)
@@ -700,11 +751,29 @@ public final class Indexer {
                 if let location = item.image.location, PhotosLibrary.library(containing: file.path) == nil {
                     try store.setLocation(location, of: file.id)
                 }
-                let note = item.fromPhotos ? (screenshot || !item.ocr.isEmpty ? "Photos' text \(item.ocr.count) chars" : nil)
+                let words = item.fromPhotos ? (screenshot || !item.ocr.isEmpty ? "Photos' text \(item.ocr.count) chars" : nil)
                     : screenshot ? "ocr \(item.ocr.count) chars" : nil
-                results[item.slot] = ("done", note)
+                let seen = item.faces.map { Self.facesNote($0.rows.count, seconds: $0.seconds) }
+                let notes = [words, seen].compactMap { $0 }
+                results[item.slot] = ("done", notes.isEmpty ? nil : notes.joined(separator: ", "))
             }
         }
+    }
+
+    /// Writes the faces read in a picture (inside the caller's transaction), and matches the ones outside Photos with the
+    /// named faces, as the run found them when it first needed them (`matcher`).
+    private func keep(_ rows: [IndexStore.FaceRow], ofSegment segment: Int64) throws {
+        let ids = try store.setFaces(rows, ofSegment: segment)
+        let outside = zip(ids, rows).filter { $0.1.person == nil }.map { (id: $0.0, print: $0.1.print) }
+        guard !outside.isEmpty else { return }
+        let matcher = try self.matcher ?? store.faceMatcher()
+        self.matcher = matcher
+        try store.matchFaces(outside, with: matcher)
+    }
+
+    /// "2 faces in 31 ms": what reading a picture's faces found, and took.
+    static func facesNote(_ count: Int, seconds: Double) -> String {
+        "\(count) \(count == 1 ? "face" : "faces") in \(Int((seconds * 1000).rounded())) ms"
     }
 
     /// Pages `read` of a PDF (all of a short one, a step of a long one). A long one stays `partial` with `read_to` and
@@ -881,5 +950,129 @@ public final class Indexer {
             try store.finish(file.id, state: "done", info: ["frames": "\(stills.count)"])
         }
         return ("done", "\(stills.count) of Photos' stills (the video is in iCloud)")
+    }
+
+    // MARK: Faces
+
+    /// The faces of a picture to keep, read with `reader`, and how long that took: in a Photos library the ones Photos
+    /// names in it (`named`), each with its person, elsewhere every one found. Nil for a library picture in which Photos
+    /// names none, or whose listing doesn't say: there's nothing to read. A picture that can't be read has no faces.
+    static func faces(of file: FileRecord, named: [NamedFace]?, with reader: any FaceReader)
+        -> (rows: [IndexStore.FaceRow], seconds: Double)? {
+        let given = PhotosLibrary.library(containing: file.path) == nil ? nil : named ?? []
+        guard given?.isEmpty != true else { return nil }
+        let started = Date()
+        let found = (try? reader.faces(inPictureAt: URL(fileURLWithPath: file.path), named: given?.map(\.box))) ?? []
+        let rows = found.map { face in
+            IndexStore.FaceRow(box: face.box, print: face.print, person: face.named.flatMap { given?[$0].person })
+        }
+        return (rows, Date().timeIntervalSince(started))
+    }
+
+    /// A picture's faces as the faces pass reads them (`faces(of:named:with:)`; none for a library picture in which
+    /// Photos names none now), the watchdog told which file is being read. Nil when it's away: gone, on a drive that's
+    /// unplugged, or only in iCloud, where reading it would download it.
+    private static func facesHere(of file: FileRecord, named: [NamedFace]?, with reader: any FaceReader)
+        -> [IndexStore.FaceRow]? {
+        guard let info = FileSystem.info(of: file.path), info.isRegular, !info.dataless else { return nil }
+        startReading(file.path)
+        defer { readingLock.withLock { reading = nil } }
+        return autoreleasepool { faces(of: file, named: named, with: reader)?.rows ?? [] }
+    }
+
+    /// One step of the faces pass: `done` of the `total` pictures it set out to read, and the one it just read: how
+    /// many faces it kept of it (nil: it was away, and waits for a later pass).
+    public struct FacesStep: Sendable {
+        public let done: Int
+        public let total: Int
+        public let path: String
+        public let kind: FileKind
+        public let faces: Int?
+        public let seconds: Double
+    }
+
+    /// What the faces pass has to read: the library pictures whose named faces in the index aren't the ones Photos
+    /// names now (as the last sync listed them), unless it read them for those people in this process already; and the
+    /// pictures outside Photos it hasn't come to, or that were away when it did (`IndexStore.FacesRead`), unless it
+    /// found them away in this process. Nil without a face reader.
+    private func facesToRead() throws
+        -> (named: [IndexStore.FacesToRead], outside: [IndexStore.FacesToRead], read: IndexStore.FacesRead)? {
+        guard faces != nil else { return nil }
+        let stored = try store.namedFacePeople()
+        let differ = namedFaces.compactMap { file, named -> Int64? in
+            let people = named.map(\.person).sorted()
+            return people != stored[file, default: []] && triedNamed[file] != people ? file : nil
+        }
+        let read = try store.facesRead()
+        let outside = try store.picturesOutsideWithoutFaces(read).filter { !triedAway.contains($0.file.id) }
+        return (try store.readPictures(differ), outside, read)
+    }
+
+    /// How many pictures the faces pass has to read now (`readFaces`): none without a face reader.
+    public func facesWaiting() throws -> Int {
+        guard let work = try facesToRead() else { return 0 }
+        return work.named.count + work.outside.count
+    }
+
+    /// The faces pass: the faces of pictures read before DigUp kept faces, or before the recognizer changed (which took
+    /// them all), read again from the pictures with nothing embedded. First the library pictures whose named faces
+    /// aren't the ones Photos names now (the last sync's listing: someone named in Photos since, or no longer), then
+    /// `face_matches` made again if they changed, then the pictures outside Photos it hasn't come to, each matched as
+    /// it's read. A picture that's away (gone, on a drive that's unplugged, or only in iCloud, where reading it would
+    /// download it) waits for a later pass. Each picture is one transaction, so stopping between them (`shouldStop`)
+    /// loses nothing. Returns how many pictures it read.
+    @discardableResult
+    public func readFaces(shouldStop: () -> Bool = { false }, onStep: (FacesStep) -> Void = { _ in }) throws -> Int {
+        guard let reader = faces, let work = try facesToRead() else { return 0 }
+        let total = work.named.count + work.outside.count
+        var (done, count) = (0, 0)
+        func report(_ picture: IndexStore.FacesToRead, _ rows: [IndexStore.FaceRow]?, since started: Date) {
+            done += 1
+            if rows != nil { count += 1 }
+            onStep(FacesStep(done: done, total: total, path: picture.file.path, kind: picture.file.kind,
+                             faces: rows?.count, seconds: Date().timeIntervalSince(started)))
+        }
+        for picture in work.named {
+            guard !shouldStop() else { break }
+            let named = namedFaces[picture.file.id] ?? []
+            triedNamed[picture.file.id] = named.map(\.person).sorted()
+            let started = Date()
+            let rows = Self.facesHere(of: picture.file, named: named, with: reader)
+            if let rows { try store.db.transaction { try store.setFaces(rows, ofSegment: picture.segment) } }
+            report(picture, rows, since: started)
+        }
+        try store.rebuildFaceMatchesIfNamedChanged()
+        let matcher = try store.faceMatcher()
+        var read = work.read, finished = true
+        for picture in work.outside {
+            guard !shouldStop() else {
+                finished = false
+                break
+            }
+            let started = Date()
+            let rows = Self.facesHere(of: picture.file, named: nil, with: reader)
+            let id = picture.file.id
+            read.after = max(read.after, id)
+            read.away.removeAll { $0 == id }
+            if rows == nil {
+                read.away.append(id)
+                triedAway.insert(id)
+            }
+            try store.db.transaction {
+                if let rows {
+                    let ids = try store.setFaces(rows, ofSegment: picture.segment)
+                    try store.matchFaces(zip(ids, rows).map { (id: $0.0, print: $0.1.print) }, with: matcher)
+                }
+                try store.setFacesRead(read)
+            }
+            report(picture, rows, since: started)
+        }
+        // Every picture up to `to` was come to: the ones not on the list had faces, or weren't read yet (they're read
+        // with their faces).
+        if finished, read.after < read.to {
+            read.after = read.to
+            try store.setFacesRead(read)
+        }
+        return count
     }
 }

@@ -627,6 +627,10 @@ nonisolated final class Engine: @unchecked Sendable {
         case "summary":
             let states = (event["states"] as? [String: Int] ?? [:]).sorted { $0.key < $1.key }
                 .map { "\($0.value) \($0.key)" }.joined(separator: " · ")
+            if event["faces"] as? Bool == true {
+                log("index: the faces of \(int("pictures")) pictures read before, in \(int("ms")) ms")
+                return
+            }
             let what = event["rest"] as? Bool == true ? "the rest of long files"
                 : event["new"] as? Bool == true ? "new files" : "backfill"
             log("index: \(what): \(states) in \(int("ms")) ms")
@@ -889,6 +893,15 @@ nonisolated final class Engine: @unchecked Sendable {
                 continuation.resume(returning: PhotosChoices(people: (try? searchStore?.photosPeople()) ?? [],
                                                              albums: (try? searchStore?.photosAlbums()) ?? [],
                                                              cameras: (try? searchStore?.photosCameras()) ?? []))
+            }
+        }
+    }
+
+    /// What the index knows of faces (Settings → Photos): the recognizer, and the pictures outside Photos with someone.
+    func faceCounts() async -> IndexStore.FaceCounts? {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: (try? searchStore?.faceCounts()) ?? nil)
             }
         }
     }

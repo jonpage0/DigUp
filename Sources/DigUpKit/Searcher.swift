@@ -26,6 +26,16 @@ public struct SearchHit: Sendable {
     /// A video or audio file: how many moments of it match the query (`Searcher.moments(of:queryVector:zGate:)`),
     /// counted from the scores the search has anyway. 0 when none does (it's here by its name, say).
     public var momentCount = 0
+    /// A picture outside Photos kept by the People filter: the faces in it taken for its people.
+    public var faces: [FaceMatch] = []
+}
+
+/// A face in a picture outside Photos that the People filter took for one of its people (`SearchFilter.people`): who,
+/// by their name in Photos, where the face is, and how alike it is to theirs.
+public struct FaceMatch: Sendable, Equatable {
+    public let name: String
+    public let box: Faces.Box
+    public let similarity: Double
 }
 
 /// A stretch of a recording that matches a query (`Searcher.moments(of:queryVector:zGate:)`): its segments that stand
@@ -75,7 +85,9 @@ public struct PhotosHit: Sendable, Equatable {
 public struct SearchFilter: Sendable, Equatable {
     /// People a file must show, every one of them (ids of `IndexStore.photosPeople`). An entry is one person, or the
     /// people who share a name, any of whom counts for it. An empty entry keeps nothing: a saved search's person who
-    /// isn't in the indexed libraries any more (the app's saved searches never widen to everyone).
+    /// isn't in the indexed libraries any more (the app's saved searches never widen to everyone). A file shows a person
+    /// when Photos says so, or, outside Photos, when one of its faces matches theirs at `Faces.threshold`
+    /// (`face_matches`, or `faceMatches`).
     public var people: [Set<Int64>]
     /// Albums a file must be in, any of them (ids of `IndexStore.photosAlbums`). Nil keeps every file; an empty set
     /// keeps none (a saved search's albums, none of them indexed any more).
@@ -102,6 +114,10 @@ public struct SearchFilter: Sendable, Equatable {
     /// before anything is matched, counted or cut to the best, so it's never in a result or a count, and found by path,
     /// whatever the index knows of the file yet.
     public var photosOnly: Set<String>?
+    /// The faces outside Photos matched to people, by face, to go by instead of the index's own (`face_matches`): what an
+    /// AI app is told is matched only with the named faces it may see (`IndexStore.faceMatches(referencesKeptBy:)`,
+    /// `digup mcp`). Nil goes by the index's.
+    public var faceMatches: [Int64: FaceMatcher.Match]?
 
     /// A box on the map, in degrees: south to north, west to east.
     public struct Area: Sendable, Equatable {
@@ -134,8 +150,13 @@ public struct SearchFilter: Sendable, Equatable {
         func placeholders(_ words: Set<String>) -> String { words.map { _ in "?" }.joined(separator: ",") }
         var parts: [String] = [], values: [SQLValue] = []
         for group in people {
-            parts.append(group.isEmpty ? Self.keepsNothing
-                                       : "SELECT file FROM photos_person_files WHERE person IN (\(list(group)))")
+            guard !group.isEmpty else {
+                parts.append(Self.keepsNothing)
+                continue
+            }
+            // Compound selects run left to right: the two ways a file shows someone are one select of the INTERSECT.
+            parts.append("SELECT file FROM (SELECT file FROM photos_person_files WHERE person IN (\(list(group))) UNION "
+                         + matched(group, values: &values) + ")")
         }
         if let albums {
             parts.append(albums.isEmpty ? Self.keepsNothing
@@ -185,6 +206,22 @@ public struct SearchFilter: Sendable, Equatable {
             }
         }
         return parts.isEmpty ? nil : (parts.joined(separator: " INTERSECT "), values)
+    }
+
+    /// The files outside Photos with a face that matches one of `group` at `Faces.threshold`, as SQL (its values added to
+    /// `values`).
+    private func matched(_ group: Set<Int64>, values: inout [SQLValue]) -> String {
+        guard let faceMatches else {
+            return """
+                SELECT s.file FROM face_matches m JOIN faces f ON f.id = m.face JOIN segments s ON s.id = f.segment
+                WHERE m.person IN (\(group.map(String.init).joined(separator: ","))) AND m.similarity >= \(Faces.threshold)
+                """
+        }
+        let faces = faceMatches.filter { group.contains($0.value.person) && $0.value.similarity >= Faces.threshold }
+        values.append(.text("[" + faces.keys.map(String.init).joined(separator: ",") + "]"))
+        return """
+            SELECT s.file FROM faces f JOIN segments s ON s.id = f.segment WHERE f.id IN (SELECT value FROM json_each(?))
+            """
     }
 }
 
@@ -422,7 +459,8 @@ public final class Searcher {
                                   segmentID: segmentID, loc: loc, locEnd: locEnd, excerpt: snippet ?? storedExcerpt,
                                   modified: row.modified, size: row.size, info: row.info, focus: focus,
                                   photos: try photosHit(file: file, path: row.path, segment: segmentID, kind: segment),
-                                  momentCount: try moments(ofFile: file, standouts[file] ?? []).count))
+                                  momentCount: try moments(ofFile: file, standouts[file] ?? []).count,
+                                  faces: try faceMatches(ofFile: file, path: row.path, filter: filter)))
         }
         return hits
     }
@@ -451,7 +489,8 @@ public final class Searcher {
             return SearchHit(path: row.path, kind: row.kind, score: 0, z: nil, cosine: nil, keywordRank: nil,
                              segment: segment.kind, segmentID: segment.id, loc: nil, locEnd: nil, excerpt: nil,
                              modified: row.modified, size: row.size, info: row.info,
-                             photos: try photosHit(file: file, path: row.path, segment: segment.id, kind: segment.kind))
+                             photos: try photosHit(file: file, path: row.path, segment: segment.id, kind: segment.kind),
+                             faces: try faceMatches(ofFile: file, path: row.path, filter: filter))
         }
     }
 
@@ -497,6 +536,35 @@ public final class Searcher {
         }
         return PhotosHit(library: asset.library, uuid: asset.uuid, title: title, date: date, reading: reading,
                          still: still)
+    }
+
+    /// The faces of a picture outside Photos that the filter's people were taken for (`SearchFilter.people`, at
+    /// `Faces.threshold`, by `face_matches` or the filter's own `faceMatches`): each person's likeliest, likeliest
+    /// first. None for a library's file, or without people to filter by.
+    private func faceMatches(ofFile file: Int64, path: String, filter: SearchFilter) throws -> [FaceMatch] {
+        let people = filter.people.reduce(into: Set<Int64>()) { $0.formUnion($1) }
+        guard !people.isEmpty, PhotosLibrary.library(containing: path) == nil else { return [] }
+        var best: [Int64: (similarity: Double, box: Faces.Box)] = [:]
+        try store.db.query("""
+            SELECT f.id, f.x, f.y, f.width, f.height, m.person, m.similarity FROM faces f
+            JOIN segments s ON s.id = f.segment LEFT JOIN face_matches m ON m.face = f.id
+            WHERE s.file = ? AND f.person IS NULL
+            """, [.int(file)]) { row in
+            let match: FaceMatcher.Match? = if let given = filter.faceMatches { given[row.int(0)] }
+                else { row.isNull(5) ? nil : FaceMatcher.Match(person: row.int(5), similarity: row.double(6)) }
+            guard let match, people.contains(match.person), match.similarity >= Faces.threshold,
+                  match.similarity > best[match.person]?.similarity ?? -1,
+                  let box = Faces.Box(x: row.double(1), y: row.double(2), width: row.double(3), height: row.double(4))
+            else { return }
+            best[match.person] = (match.similarity, box)
+        }
+        guard !best.isEmpty else { return [] }
+        var names: [Int64: String] = [:]
+        let ids = best.keys.map(String.init).joined(separator: ",")
+        try store.db.query("SELECT id, name FROM photos_people WHERE id IN (\(ids))") { names[$0.int(0)] = $0.text(1) }
+        return best.compactMap { person, face in
+            names[person].map { FaceMatch(name: $0, box: face.box, similarity: face.similarity) }
+        }.sorted { $0.similarity > $1.similarity }
     }
 
     // MARK: Moments

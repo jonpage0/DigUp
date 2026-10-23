@@ -564,7 +564,7 @@ import Testing
         try store.db.query("SELECT COUNT(*) FROM photos_assets") { rows = Int($0.int(0)) }
         try store.db.query("PRAGMA user_version") { version = $0.int(0) }
         #expect(columns == ["file", "favorite", "reading", "origin", "origin_app", "camera"] && rows == 0)
-        #expect(try store.meta("fork_photos_facts") == "2" && version == 5)
+        #expect(try store.meta("fork_photos_facts") == "\(IndexStore.forkFactsVersion)" && version == 5)
 
         // The next sync writes them, and reads no file again.
         let sync = try indexer(store) { _ in PhotosLibrary.Listing(assets: assets) }.sync([library])

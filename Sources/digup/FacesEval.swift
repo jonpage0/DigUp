@@ -80,15 +80,12 @@ private func namedPeople(in photos: [PhotosLibrary.PhotoFaces]) -> [(label: Stri
     }
 }
 
-/// The Core ML engine's model when no `--model` names one: SFace, where scripts/face-model.py keeps it.
-private let sfaceModel = "faces/face_recognition_sface_2021dec.mlpackage"
-
 /// What `--engine` and `--model` ask for: the recognizers to measure. Without `--engine`, every one available here
-/// (saying why one isn't).
+/// (saying why one isn't). The Core ML engine's model, when no `--model` names one, is SFace where
+/// scripts/face-model.py keeps it (`Faces.sfaceModel`).
 private func faceRecognizers(_ args: Arguments) throws -> [any FaceRecognizer] {
-    let folder = ProcessInfo.processInfo.environment["DIGUP_MODELS"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
-        ?? ModelFiles.installed
-    let models = args.lists["--model"]?.map(Arguments.folderURL) ?? [folder.appendingPathComponent(sfaceModel)]
+    let models = args.lists["--model"]?.map(Arguments.folderURL)
+        ?? [modelsFolder().appendingPathComponent(Faces.sfaceModel)]
     func coreML(_ model: URL) throws -> any FaceRecognizer {
         guard FileManager.default.fileExists(atPath: model.path) else {
             throw CLIError("no face model at \(tilde(model.path)) (scripts/face-model.py convert makes it)")

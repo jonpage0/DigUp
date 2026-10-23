@@ -243,7 +243,8 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         case _ where isMissing:
             "\(title) isn't in Photos now (deleted there, or its library isn't searched): this search keeps nothing "
                 + "for it"
-        case .person(let name, _, _): "Only pictures Photos knows \(name) is in"
+        case .person(let name, _, _):
+            "Only pictures Photos knows \(name) is in, and pictures outside Photos with a face that matches theirs"
         case .album(let title, _, _, _): "Only what's in the album “\(title)”"
         case .photosFavorites: "Only what you've marked ♥ in Photos"
         case .digupFavorites: "Only what you've marked ♥ in DigUp"

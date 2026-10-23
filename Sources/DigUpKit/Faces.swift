@@ -1,16 +1,20 @@
 import Foundation
 
-/// Telling people apart by their faces: a prototype, measured with `digup faces-eval` on the people named in a Photos
-/// library. Nothing of it is kept or shown in the app yet.
+/// Telling people apart by their faces, to find the people named in Photos in pictures outside it (approved
+/// 2026-10-22: PHOTOS-FACTS-SCHEMA.md, "faces outside Photos"). The index keeps the faces of pictures (`faces`): in a
+/// Photos library the ones Photos named, with who they are, and outside every face found. Each face outside is matched
+/// to the nearest named face (`FaceMatcher`, kept as `face_matches`), and the People filter keeps a picture outside
+/// Photos with a face that matches the person at `threshold` (`SearchFilter.people`). `digup faces-eval` measured it.
 ///
 /// A face recognizer (`FaceRecognizer`, on the Mac: Platform/Apple/Faces+Apple.swift) turns each face of a picture into
-/// an embedding, a list of numbers that comes out alike for two faces of one person and apart for two people's; how
-/// alike two are is the cosine of the angle between them (`cosine`). Apple publishes no way to say who a face is, so
-/// there are two: Vision's own faceprints, through a request Vision doesn't publish, and a Core ML model of the ArcFace
-/// family given by its file (SFace, from OpenCV Zoo, made by scripts/face-model.py), which needs each face aligned
-/// first: turned, scaled and moved so that its eyes, nose and mouth sit where the model expects them
+/// an embedding, its print: a list of numbers that comes out alike for two faces of one person and apart for two
+/// people's; how alike two are is the cosine of the angle between them (`cosine`). Apple publishes no way to say who a
+/// face is, so there are two: Vision's own faceprints, through a request Vision doesn't publish, and a Core ML model of
+/// the ArcFace family given by its file (SFace, from OpenCV Zoo, made by scripts/face-model.py), which needs each face
+/// aligned first: turned, scaled and moved so that its eyes, nose and mouth sit where the model expects them
 /// (`arcFaceTemplate`, `Similarity`). What's here needs neither Vision nor Core ML: the alignment's arithmetic, the
-/// comparison, the measurement (`Measure`), and the faces Photos found in a library (`PhotosLibrary.photoFaces`).
+/// comparison, the matching, the measurement (`Measure`), and the faces Photos found in a library
+/// (`PhotosLibrary.photoFaces`, and the listing's `PhotosLibrary.Asset.faces`).
 public enum Faces {
     /// A point of a picture, in pixels from its top-left corner (a pixel's center is half a pixel in).
     public struct Point: Equatable, Sendable {
@@ -88,6 +92,68 @@ public enum Faces {
         return aa > 0 && bb > 0 ? dot / (aa.squareRoot() * bb.squareRoot()) : 0
     }
 
+    /// The least similarity at which a face outside Photos is kept as its nearest named face's person
+    /// (`face_matches`): DigUp's guess, kept with how near it is.
+    public static let matchFloor = 0.80
+    /// The similarity at which the People filter takes a face outside Photos for the person (`SearchFilter.people`).
+    /// A constant to tune: on a real library's named faces, Vision's nearest named face was the same person's for all
+    /// of 3,549, and at 0.90 about 97 % of the calls were right, with about 8 % of the faces nobody named called
+    /// someone (an upper bound: Photos leaves some faces of named people unnamed). `digup faces-eval` measured it.
+    public static let threshold = 0.90
+
+    /// Where a face is in a picture, as the index keeps it (`faces`' x, y, width and height): a box in the picture as
+    /// it's shown (upright), in fractions of its width and height from its top-left corner, all of it inside.
+    public struct Box: Sendable, Equatable {
+        public let x: Double
+        public let y: Double
+        public let width: Double
+        public let height: Double
+
+        /// The part of this box that's inside the picture; nil when none is.
+        public init?(x: Double, y: Double, width: Double, height: Double) {
+            let (left, top) = (min(max(x, 0), 1), min(max(y, 0), 1))
+            let (right, bottom) = (min(max(x + width, 0), 1), min(max(y + height, 0), 1))
+            guard right > left, bottom > top else { return nil }
+            (self.x, self.y, self.width, self.height) = (left, top, right - left, bottom - top)
+        }
+
+        /// Where Photos says a face is (`PhotosLibrary.FaceBox`: its center from the bottom-left corner, the side of a
+        /// square over the picture's long side) in a picture of `width` × `height` pixels, shown upright.
+        public init?(_ face: PhotosLibrary.FaceBox, width: Double, height: Double) {
+            guard width > 0, height > 0 else { return nil }
+            let side = face.size * max(width, height)
+            let (across, down) = (side / width, side / height)
+            self.init(x: face.x - across / 2, y: 1 - face.y - down / 2, width: across, height: down)
+        }
+    }
+
+    /// A face read from a picture (`FaceReader`): where it is, and its print. `named`: which of the faces Photos named
+    /// in it this is (their place in the list it was given); nil for a face found in a picture outside Photos.
+    public struct Found: Sendable {
+        public let box: Box
+        public let print: [Float]
+        public let named: Int?
+
+        public init(box: Box, print: [Float], named: Int?) {
+            (self.box, self.print, self.named) = (box, print, named)
+        }
+    }
+
+    /// A print as the index keeps it (`faces.print`): its numbers as 32-bit floats, in this Mac's byte order.
+    static func bytes(of print: [Float]) -> Data {
+        print.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
+    /// A print the index kept (`bytes(of:)`); nil for bytes that aren't one.
+    static func floats(fromBytes data: Data) -> [Float]? {
+        guard !data.isEmpty, data.count.isMultiple(of: MemoryLayout<Float>.size) else { return nil }
+        return data.withUnsafeBytes { raw in
+            (0..<raw.count / MemoryLayout<Float>.size).map {
+                raw.loadUnaligned(fromByteOffset: $0 * MemoryLayout<Float>.size, as: Float.self)
+            }
+        }
+    }
+
     /// How well a recognizer's embeddings tell named people apart, and keep everyone else out (`digup faces-eval`).
     /// People are told apart by Photos' id for them: two of one name are two people. Each named face is called by the
     /// nearest of the other named faces (leave-one-out): it's called that face's person, with their similarity. A
@@ -154,6 +220,96 @@ public enum Faces {
     }
 }
 
+/// Reads the faces of a picture for the index: where each is and its print (on the Mac, `Faces.reader(models:)`). The
+/// indexer uses one from its own threads, one picture at a time.
+public protocol FaceReader: Sendable {
+    /// Which recognizer makes the prints, and its version, as the index records it (`IndexStore.facesModelKey`):
+    /// prints of two recognizers are never compared.
+    var identity: String { get }
+    /// The faces of the picture at `url`, read upright. Given `named` (where Photos found the faces it named in it), those
+    /// faces in Photos' boxes, each with its place in `named`, less any it couldn't read; else every face found in it.
+    /// Throws when the picture can't be read.
+    func faces(inPictureAt url: URL, named: [PhotosLibrary.FaceBox]?) throws -> [Faces.Found]
+}
+
+/// Who a face outside Photos is likeliest to be: the person of the nearest of the faces it compares against
+/// (`references`, the faces Photos named), by the cosine of their prints, when it's at least `Faces.matchFloor`. What
+/// `face_matches` holds (`IndexStore.rebuildFaceMatches`), and what `digup mcp` works out against only the faces an AI
+/// app may see. Two people of one name are two people: a match is to a person's row, never to a name.
+public struct FaceMatcher {
+    public struct Match: Sendable, Equatable {
+        /// The person's row (`IndexStore.photosPeople`).
+        public let person: Int64
+        public let similarity: Double
+
+        public init(person: Int64, similarity: Double) {
+            (self.person, self.similarity) = (person, similarity)
+        }
+    }
+
+    private let people: [Int64]
+    /// The references' prints scaled to length 1, one column each (`dimension` × `people.count`, row-major): one
+    /// multiplication scores many faces against all of them.
+    private let columns: [Float]
+    private let dimension: Int
+
+    /// Faces to compare against: who each is, and its print. One that isn't the first one's length (another
+    /// recognizer's), or all zeros, is left out.
+    public init(references: [(person: Int64, print: [Float])]) {
+        let dimension = references.first?.print.count ?? 0
+        let kept: [(person: Int64, unit: [Float])] = references.compactMap { reference in
+            Self.unit(reference.print, dimension: dimension).map { (reference.person, $0) }
+        }
+        var columns = [Float](repeating: 0, count: dimension * kept.count)
+        for (column, reference) in kept.enumerated() {
+            for row in 0..<dimension { columns[row * kept.count + column] = reference.unit[row] }
+        }
+        (people, self.columns, self.dimension) = (kept.map { $0.person }, columns, dimension)
+    }
+
+    /// Faces scored together, at most: a block of scores is this many times the references.
+    private static let block = 128
+
+    /// Each print's match: the nearest reference's person and how near, nil below `Faces.matchFloor` (or for a print
+    /// that isn't the references' length).
+    public func matches(_ prints: [[Float]]) -> [Match?] {
+        var found = [Match?](repeating: nil, count: prints.count)
+        guard !people.isEmpty else { return found }
+        let usable: [(index: Int, unit: [Float])] = prints.indices.compactMap { index in
+            Self.unit(prints[index], dimension: dimension).map { (index, $0) }
+        }
+        var scores = [Float](repeating: 0, count: Self.block * people.count)
+        for start in stride(from: 0, to: usable.count, by: Self.block) {
+            let some = usable[start..<min(start + Self.block, usable.count)]
+            let rows = some.flatMap { $0.unit }
+            rows.withUnsafeBufferPointer { rows in
+                columns.withUnsafeBufferPointer { columns in
+                    scores.withUnsafeMutableBufferPointer { scores in
+                        Vectors.multiply(rows.baseAddress!, rows: some.count, by: columns.baseAddress!,
+                                         columns: people.count, inner: dimension, into: scores.baseAddress!)
+                    }
+                }
+            }
+            for (row, face) in some.enumerated() {
+                let scored = scores[row * people.count..<(row + 1) * people.count]
+                guard let best = scored.indices.max(by: { scored[$0] < scored[$1] }) else { continue }
+                let similarity = Double(scored[best])
+                if similarity >= Faces.matchFloor {
+                    found[face.index] = Match(person: people[best - row * people.count], similarity: min(similarity, 1))
+                }
+            }
+        }
+        return found
+    }
+
+    /// `print` scaled to length 1, or nil when it isn't `dimension` long or is all zeros.
+    private static func unit(_ print: [Float], dimension: Int) -> [Float]? {
+        guard print.count == dimension, dimension > 0 else { return nil }
+        let length = print.reduce(0) { $0 + $1 * $1 }.squareRoot()
+        return length > 0 ? print.map { $0 / length } : nil
+    }
+}
+
 // MARK: The faces Photos found
 
 extension PhotosLibrary {
@@ -171,13 +327,17 @@ extension PhotosLibrary {
         }
     }
 
-    /// A face Photos found, and who it is when someone named them in Photos. Where it is, as Photos keeps it and as
-    /// Vision gives faces: its center from the picture's left and bottom edges, as fractions of its width and height,
-    /// and its size, the side of a square, as a fraction of its long side; all in the picture as it's shown (turned
-    /// upright). Checked 2026-10-22 against the faces Vision finds itself: on the osxphotos test library's originals
-    /// (each within 0.005), and on 264 random faces of a real library's previews, portrait photos turned by their
-    /// orientation among them (252 had one of Vision's within a quarter of the face's size).
-    public struct FaceBox: Sendable, Equatable {
+    /// A face Photos found, and who it is when someone named them in Photos: in its catalog (`photoFaces`), and in the
+    /// listing, which has only the named ones (`Asset.faces`). Where it is, as Photos keeps it and as Vision gives
+    /// faces: its center from the picture's left and bottom edges, as fractions of its width and height, and its size,
+    /// the side of a square, as a fraction of its long side; all in the picture as it's shown (turned upright), Photos'
+    /// render of an edit when it's edited (the listing's file). Checked 2026-10-22 against the faces Vision finds
+    /// itself: on the osxphotos test library's originals (each within 0.005), and on 264 random faces of a real
+    /// library's previews, portrait photos turned by their orientation among them (252 had one of Vision's within a
+    /// quarter of the face's size). osxphotos' `FaceInfo.center_x`, `center_y` and `size` are these as the catalog has
+    /// them (ZCENTERX, ZCENTERY, ZSIZE); its `center` and `face_rect` turn them again by the picture's orientation, as
+    /// if they were in the picture as stored, which they aren't.
+    public struct FaceBox: Codable, Sendable, Equatable {
         /// Who it is, when someone named them in Photos: Photos' id for them and their name (two people can share a
         /// name, and stay two). Nil for a face nobody named.
         public let person: Person?

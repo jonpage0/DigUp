@@ -31,6 +31,8 @@ struct ResultRow: Identifiable, Equatable {
     private(set) var photos: PhotosHit?
     /// A video or audio file: how many moments of it match (`SearchHit.momentCount`).
     let momentCount: Int
+    /// A picture outside Photos the People filter keeps: the faces in it taken for its people (`SearchHit.faces`).
+    let faces: [FaceMatch]
 
     init(_ hit: SearchHit, query: String = "", terms: [String] = []) {
         id = hit.path
@@ -66,6 +68,7 @@ struct ResultRow: Identifiable, Equatable {
         size = hit.size
         info = hit.info
         momentCount = hit.momentCount
+        faces = hit.faces
         self.query = query
         self.terms = terms
     }
@@ -127,10 +130,10 @@ struct ResultRow: Identifiable, Equatable {
 
     var duration: Double? { info["duration"].flatMap(Double.init) }
 
-    /// Why it's here, in a few words: "Matches the picture", "Matches the frame at 0:06".
+    /// Why it's here, in a few words: "Matches the picture", "Matches the frame at 0:06", "Tati, by their face".
     var reason: String {
         MatchDescription.reason(segment, kind: kind, loc: loc, locEnd: locEnd, meaning: matchedMeaning,
-                                words: matchedWords, listed: listed, reading: photos?.reading)
+                                words: matchedWords, listed: listed, reading: photos?.reading, faces: faces.map(\.name))
     }
 
     /// "Screenshot · Oct 1, 2026 · 1440 × 900 · 2.1 MB", "PDF · … · 463 pages, 120 read so far · 23 MB",

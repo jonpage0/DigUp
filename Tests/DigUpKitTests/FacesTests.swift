@@ -113,4 +113,320 @@ import CoreGraphics
         #expect(abs(red - 128) <= 2 && abs(green - 128) <= 2 && abs(blue - 128) <= 2)
     }
     #endif
+
+    /// A face outside Photos is its nearest reference's person when it's at least the floor alike, never a name.
+    @Test func aFaceMatchesItsNearestNamedFaceAtTheFloorOrMore() {
+        let matcher = FaceMatcher(references: [(1, [1, 0, 0]), (2, [0, 2, 0]), (3, [0.6, 0.8, 0]), (4, [1, 0])])
+        let matches = matcher.matches([[0.81, 0, 0.586], [0.79, 0, 0.613], [0, 1, 0.1], [0, 0, 1], [1, 0], [0, 0, 0]])
+        #expect(matches[0]?.person == 1 && abs((matches[0]?.similarity ?? 0) - 0.81) < 0.001)
+        #expect(matches[1] == nil)                     // below the floor
+        #expect(matches[2]?.person == 2)               // lengths don't count, only directions
+        #expect(matches[3] == nil && matches[4] == nil && matches[5] == nil)   // no one; another length; nothing
+        #expect(Faces.matchFloor == 0.8 && Faces.threshold == 0.9)
+        #expect(FaceMatcher(references: []).matches([[1, 0, 0]]) == [nil])
+    }
+
+    /// Photos' box (its center from the bottom-left, its side over the long side) becomes the index's: from the top-left,
+    /// in fractions of each side, inside the picture.
+    @Test func photosBoxesAreKeptFromTheTopLeftInsideThePicture() throws {
+        let face = PhotosLibrary.FaceBox(person: nil, x: 0.5, y: 0.75, size: 0.25)
+        let box = try #require(Faces.Box(face, width: 400, height: 300))   // a side of 100 pixels
+        #expect(abs(box.x - 0.375) < 1e-9 && abs(box.y - (0.25 - 1.0 / 6)) < 1e-9)
+        #expect(abs(box.width - 0.25) < 1e-9 && abs(box.height - 1.0 / 3) < 1e-9)
+        let edge = try #require(Faces.Box(PhotosLibrary.FaceBox(person: nil, x: 0.95, y: 0.02, size: 0.2), width: 100,
+                                          height: 100))
+        // Over the right and bottom edges: what's inside.
+        #expect(abs(edge.x - 0.85) < 1e-9 && abs(edge.x + edge.width - 1) < 1e-9)
+        #expect(abs(edge.y - 0.88) < 1e-9 && abs(edge.y + edge.height - 1) < 1e-9)
+        #expect(Faces.Box(x: 1.2, y: 0.5, width: 0.1, height: 0.1) == nil)   // none of it inside
+    }
+
+    /// The listing's named faces, and a listing kept from before they were listed.
+    @Test func aListingSaysTheFacesPhotosNamedOrNothingAboutThem() throws {
+        let asset = #"{"uuid": "U", "path": "/L.photoslibrary/originals/U.jpeg", "reading": "original", "movie": false, "#
+            + #""screenshot": false, "title": "", "date": 0, "words": [], "favorite": false, "people": ["P"], "#
+            + #""albums": []"#
+        let named = try JSONDecoder().decode(PhotosLibrary.Asset.self, from: Data((asset + #", "faces": [{"person": "#
+            + #"{"uuid": "P", "name": "Katie"}, "x": 0.5, "y": 0.4, "size": 0.2}]}"#).utf8))
+        #expect(named.faces == [PhotosLibrary.FaceBox(person: PhotosLibrary.Person(uuid: "P", name: "Katie"), x: 0.5,
+                                                      y: 0.4, size: 0.2)])
+        #expect(try JSONDecoder().decode(PhotosLibrary.Asset.self, from: Data((asset + "}").utf8)).faces == nil)
+    }
+
+    @Test func aPictureKeptByAFaceSaysWhose() {
+        func reason(meaning: Bool = false, words: Bool = false, faces: [String]) -> String {
+            MatchDescription.reason(.image, kind: .image, loc: nil, locEnd: nil, meaning: meaning, words: words,
+                                    listed: !meaning && !words, reading: nil, faces: faces)
+        }
+        #expect(reason(faces: ["Tatiana Rotari"]) == "Tatiana Rotari, by their face")
+        #expect(reason(faces: ["Katie", "Sam"]) == "Katie and Sam, by their faces")
+        #expect(reason(faces: ["Sam", "Sam"]) == "Sam, by their faces")   // two people of one name
+        #expect(reason(meaning: true, faces: ["Katie"]) == "Matches the picture · Katie, by their face")
+        #expect(reason(faces: []) == "Fits your filters")
+    }
+ }
+
+#if canImport(ImageIO)
+/// Faces read by a reader that knows each picture's faces from its name, prints and all: no Vision. What the index
+/// keeps (`faces`, `face_matches`), the faces pass, and what the People filter keeps.
+final class FakeFaceReader: FaceReader, @unchecked Sendable {
+    let identity: String
+    /// A named face's print, by its person's uuid in Photos.
+    let people: [String: [Float]]
+    /// The prints of the faces in a picture outside Photos, by its file's name.
+    let found: [String: [[Float]]]
+    /// The pictures read, by file name (the indexer's preparing thread writes it; the test reads it once it's done).
+    private(set) var read: [String] = []
+
+    init(_ identity: String, people: [String: [Float]], found: [String: [[Float]]]) {
+        (self.identity, self.people, self.found) = (identity, people, found)
+    }
+
+    func faces(inPictureAt url: URL, named: [PhotosLibrary.FaceBox]?) throws -> [Faces.Found] {
+        read.append(url.lastPathComponent)
+        guard let named else {
+            return (found[url.lastPathComponent] ?? []).enumerated().compactMap { index, print in
+                Faces.Box(x: 0.1 + 0.4 * Double(index), y: 0.2, width: 0.3, height: 0.3)
+                    .map { Faces.Found(box: $0, print: print, named: nil) }
+            }
+        }
+        return named.enumerated().compactMap { index, face in
+            guard let print = face.person.flatMap({ people[$0.uuid] }), let box = Faces.Box(face, width: 400, height: 300)
+            else { return nil }
+            return Faces.Found(box: box, print: print, named: index)
+        }
+    }
 }
+
+@Suite struct FaceIndexTests {
+    let folder: URL = {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("DigUpTests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return URL(fileURLWithPath: FolderSelection.realPath(url.path))
+    }()
+
+    static let katie = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katie")
+    static let sam = PhotosLibrary.Person(uuid: "P-SAM", name: "Sam")
+    static let otherSam = PhotosLibrary.Person(uuid: "P-SAM-2", name: "Sam")
+    /// Each person's print, one direction each; the fourth is no one's.
+    static let prints: [String: [Float]] = ["P-KATIE": [1, 0, 0, 0], "P-SAM": [0, 1, 0, 0], "P-SAM-2": [0, 0, 1, 0]]
+
+    /// A print `cosine` alike to direction `axis`'s, and otherwise no one's.
+    static func face(_ cosine: Float, like axis: Int) -> [Float] {
+        var print: [Float] = [0, 0, 0, (1 - cosine * cosine).squareRoot()]
+        print[axis] = cosine
+        return print
+    }
+
+    /// The pictures outside Photos, by name, and their faces.
+    static let outside: [String: [[Float]]] = [
+        "katie-95.jpg": [face(0.95, like: 0)], "katie-85.jpg": [face(0.85, like: 0)], "stranger.jpg": [face(0, like: 0)],
+        "nobody.jpg": [], "sam2-97.jpg": [face(0.97, like: 2)], "katie-and-sam.jpg": [face(0.93, like: 0), face(0.92, like: 1)],
+    ]
+
+    struct Indexed {
+        let store: IndexStore
+        let library: URL
+        let downloads: URL
+        /// The library's three pictures: Katie's, Sam's and the other Sam's.
+        let pictures: [String]
+        var listing: PhotosLibrary.Listing
+
+        func path(_ name: String) -> String { downloads.appendingPathComponent(name).path }
+
+        func person(_ uuid: String) throws -> Int64 {
+            try #require(try store.photosPeople().first { $0.uuid == uuid }?.id)
+        }
+
+        func indexer(_ reader: FakeFaceReader?) throws -> Indexer {
+            var options = IndexOptions()
+            let listing = listing
+            options.photos = PhotosLibrary.Reader { _, _ in listing }
+            return try Indexer(store: store, options: options, faces: reader, makeEmbedder: { FakeEmbedder() })
+        }
+
+        func kept(_ people: [Set<Int64>], _ filter: SearchFilter = SearchFilter()) throws -> [SearchHit] {
+            var filter = filter
+            filter.people = people
+            return try Searcher(store: store, loadVectors: false).search("", queryVector: nil, filter: filter)
+        }
+
+        func count(_ table: String, _ condition: String = "1") throws -> Int {
+            var count = 0
+            try store.db.query("SELECT COUNT(*) FROM \(table) WHERE \(condition)") { count = Int($0.int(0)) }
+            return count
+        }
+    }
+
+    func reader(_ identity: String = "fake 1") -> FakeFaceReader {
+        FakeFaceReader(identity, people: Self.prints, found: Self.outside)
+    }
+
+    /// A library of three pictures, one person named in each (two of them Sams), and Downloads with `outside`'s, read by
+    /// `reader` (none: an index from before faces were kept).
+    func indexed(by reader: FakeFaceReader?) throws -> Indexed {
+        let library = folder.appendingPathComponent("Photos Library.photoslibrary")
+        let originals = library.appendingPathComponent("originals/F")
+        let downloads = folder.appendingPathComponent("Downloads")
+        for made in [originals, library.appendingPathComponent("database"), downloads] {
+            try FileManager.default.createDirectory(at: made, withIntermediateDirectories: true)
+        }
+        try Data("SQLite format 3".utf8).write(to: library.appendingPathComponent("database/Photos.sqlite"))
+        var assets: [PhotosLibrary.Asset] = []
+        for (number, person) in [Self.katie, Self.sam, Self.otherSam].enumerated() {
+            let uuid = UUID().uuidString
+            let file = originals.appendingPathComponent(uuid + ".jpeg")
+            try ImageTests.writeJPEG(file)
+            assets.append(PhotosLibrary.Asset(uuid: uuid, path: file.path, movie: false, screenshot: false,
+                                              title: "IMG_\(number)", date: 1_700_000_000 + Double(number), words: [],
+                                              people: [person.uuid],
+                                              faces: [PhotosLibrary.FaceBox(person: person, x: 0.5, y: 0.5, size: 0.3)]))
+        }
+        for name in Self.outside.keys { try ImageTests.writeJPEG(downloads.appendingPathComponent(name)) }
+        let indexed = Indexed(store: try IndexStore(directory: folder.appendingPathComponent("index")), library: library,
+                              downloads: downloads, pictures: assets.map(\.path),
+                              listing: PhotosLibrary.Listing(assets: assets, people: [Self.katie, Self.sam, Self.otherSam]))
+        let indexer = try indexed.indexer(reader)
+        _ = try indexer.sync([library, downloads])
+        #expect(try indexer.run()["done"] == 9)
+        return indexed
+    }
+
+    /// Read with its faces: a library picture's named ones with their person, every one outside Photos with none, each
+    /// matched to its nearest named face at the floor or more; the People filter keeps those at the threshold.
+    @Test func picturesReadKeepTheirFacesAndThoseOutsideAreMatched() throws {
+        let indexed = try indexed(by: reader())
+        let katie = try indexed.person("P-KATIE"), sam = try indexed.person("P-SAM")
+        #expect(try indexed.count("faces", "person IS NOT NULL") == 3)
+        #expect(try indexed.count("faces", "person IS NULL") == 6)
+        var matched: [String: [String]] = [:]
+        try indexed.store.db.query("""
+            SELECT fi.path, p.name, round(m.similarity, 2) FROM face_matches m JOIN faces f ON f.id = m.face
+            JOIN segments s ON s.id = f.segment JOIN files fi ON fi.id = s.file JOIN photos_people p ON p.id = m.person
+            ORDER BY m.similarity DESC
+            """) { matched[($0.text(0)! as NSString).lastPathComponent, default: []].append("\($0.text(1)!) \($0.double(2))") }
+        // The stranger matches no one: below the floor.
+        #expect(matched == ["sam2-97.jpg": ["Sam 0.97"], "katie-95.jpg": ["Katie 0.95"], "katie-85.jpg": ["Katie 0.85"],
+                            "katie-and-sam.jpg": ["Katie 0.93", "Sam 0.92"]])
+
+        // Katie: her picture in Photos, and the ones outside with her face at the threshold, not the one below it.
+        let withKatie = try indexed.kept([[katie]])
+        #expect(Set(withKatie.map(\.path)) == [indexed.pictures[0], indexed.path("katie-95.jpg"),
+                                               indexed.path("katie-and-sam.jpg")])
+        let byFace = try #require(withKatie.first { $0.path == indexed.path("katie-95.jpg") })
+        #expect(byFace.faces.map(\.name) == ["Katie"] && byFace.photos == nil)
+        #expect(byFace.faces.first?.box == Faces.Box(x: 0.1, y: 0.2, width: 0.3, height: 0.3))
+        #expect(withKatie.first { $0.path == indexed.pictures[0] }?.faces == [])   // Photos says so: no guess
+        // Everyone picked must be in it: by their faces, both of them.
+        let both = try indexed.kept([[katie], [sam]])
+        #expect(both.map(\.path) == [indexed.path("katie-and-sam.jpg")])
+        #expect(both.first?.faces.map(\.name) == ["Katie", "Sam"])
+        #expect(try indexed.kept([[]]).isEmpty)   // a saved search's person who's gone keeps nothing
+    }
+
+    /// Two people of one name are two people: a face matched to one isn't the other's, and the name's group has both.
+    @Test func twoPeopleOfOneNameStayTwo() throws {
+        let indexed = try indexed(by: reader())
+        let sam = try indexed.person("P-SAM"), otherSam = try indexed.person("P-SAM-2")
+        let sam2 = indexed.path("sam2-97.jpg")
+        #expect(!(try indexed.kept([[sam]]).map(\.path).contains(sam2)))
+        #expect(try indexed.kept([[otherSam]]).map(\.path).contains(sam2))
+        let either = try indexed.kept([[sam, otherSam]])
+        #expect(either.contains { $0.path == sam2 && $0.faces.map(\.name) == ["Sam"] })
+    }
+
+    /// Faces go with their picture's segment, their person or their file, and their matches with them; a named face
+    /// that went takes away the matches made with it once `face_matches` is made again.
+    @Test func facesAndMatchesGoWithWhatTheyreOf() throws {
+        let indexed = try indexed(by: reader())
+        let store = indexed.store
+        let files = Dictionary(uniqueKeysWithValues: try store.files(under: [indexed.library.path, indexed.downloads.path])
+            .map { ($0.path, $0.id) })
+        // Read again (it changed): its faces go, and those matched with Katie's go with the next making.
+        try store.requeue(try #require(files[indexed.pictures[0]]))
+        #expect(try indexed.count("faces", "person IS NOT NULL") == 2)
+        #expect(try store.rebuildFaceMatchesIfNamedChanged())
+        #expect(!(try store.rebuildFaceMatchesIfNamedChanged()))   // nothing changed since
+        #expect(try indexed.count("face_matches", "person = \(try indexed.person("P-KATIE"))") == 0)
+        // A file gone: its faces and their matches.
+        try store.delete(try #require(files[indexed.path("katie-and-sam.jpg")]))
+        #expect(try indexed.count("faces", "person IS NULL") == 4 && indexed.count("face_matches") == 1)
+        // A person gone from Photos: their named faces and the matches to them.
+        try store.db.run("DELETE FROM photos_people WHERE id = ?", [.int(try indexed.person("P-SAM-2"))])
+        #expect(try indexed.count("faces", "person IS NOT NULL") == 1 && indexed.count("face_matches") == 0)
+    }
+
+    /// An index from before faces gets them once from the pass; another recognizer takes every face, and the pass reads
+    /// them all again. Once it's through, nothing waits: the helper goes idle.
+    @Test func thePassReadsTheFacesOfPicturesReadBeforeAndAgainForAnotherRecognizer() throws {
+        let indexed = try indexed(by: nil)
+        #expect(try indexed.count("faces") == 0 && indexed.store.meta(IndexStore.facesModelKey) == nil)
+        for identity in ["fake 1", "fake 2"] {
+            let reader = reader(identity)
+            let indexer = try indexed.indexer(reader)
+            #expect(try indexed.count("faces") == 0 && indexed.count("face_matches") == 0)   // none, or another's
+            _ = try indexer.sync([indexed.library, indexed.downloads])
+            #expect(try indexer.facesWaiting() == 9)   // three named, six outside (one has no face)
+            #expect(try indexer.readFaces() == 9)
+            #expect(try indexed.count("faces") == 9 && indexed.count("face_matches") == 5)
+            #expect(try indexer.facesWaiting() == 0)
+            #expect(Set(reader.read).count == 9)
+            #expect(try indexed.store.meta(IndexStore.facesModelKey) == identity)
+        }
+        // The next helper, with the same recognizer: nothing to read.
+        let next = try indexed.indexer(reader("fake 2"))
+        _ = try next.sync([indexed.library, indexed.downloads])
+        #expect(try next.facesWaiting() == 0)
+    }
+
+    /// Someone named in Photos in a picture already read, or a name taken off: the pass reads that picture's named
+    /// faces again (none read for a name taken off), and the matches follow.
+    @Test func namesGivenOrTakenOffInPhotosAreReadAgain() throws {
+        var indexed = try indexed(by: reader())
+        // Sam's picture shows Katie too, now; Katie's own picture has no one named in it any more.
+        var assets = indexed.listing.assets
+        func asset(_ index: Int, faces: [PhotosLibrary.FaceBox]) -> PhotosLibrary.Asset {
+            let old = assets[index]
+            return PhotosLibrary.Asset(uuid: old.uuid, path: old.path, movie: false, screenshot: false, title: old.title,
+                                       date: old.date, words: [], people: faces.compactMap { $0.person?.uuid }, faces: faces)
+        }
+        assets[1] = asset(1, faces: [PhotosLibrary.FaceBox(person: Self.sam, x: 0.5, y: 0.5, size: 0.3),
+                                     PhotosLibrary.FaceBox(person: Self.katie, x: 0.2, y: 0.5, size: 0.2)])
+        assets[0] = asset(0, faces: [])
+        indexed.listing.assets = assets
+        let reader = reader()
+        let indexer = try indexed.indexer(reader)
+        _ = try indexer.sync([indexed.library, indexed.downloads])
+        let (waiting, stored) = (try indexer.facesWaiting(), try indexed.store.namedFacePeople())
+        #expect(waiting == 2, "\(waiting) waiting; stored \(stored)")
+        #expect(try indexer.readFaces() == 2)
+        #expect(reader.read == [(indexed.pictures[1] as NSString).lastPathComponent], "\(reader.read)")
+        var named: [String: Int] = [:]
+        try indexed.store.db.query("""
+            SELECT p.name, COUNT(*) FROM faces f JOIN photos_people p ON p.id = f.person GROUP BY p.id
+            """) { named[$0.text(0)! + ($0.int(1) == 1 ? "" : " ×\($0.int(1))")] = 1 }
+        #expect(Set(named.keys) == ["Katie", "Sam"])   // Katie's face now in Sam's picture; the other Sam's picture
+        #expect(try indexed.count("faces", "person IS NOT NULL") == 3)
+        #expect(try indexer.facesWaiting() == 0)
+    }
+
+    /// What an AI app is told is matched only with the named faces it may see: a picture outside Photos matched with a
+    /// face in an item kept from it isn't anyone's to it.
+    @Test func faceMatchesForAnAIAppUseOnlyTheFacesItMaySee() throws {
+        let indexed = try indexed(by: reader())
+        let katie = try indexed.person("P-KATIE")
+        var allowed = SearchFilter()
+        #expect(try indexed.store.faceMatches(referencesKeptBy: allowed) == nil)   // all of them: the index's own
+        allowed.photosOnly = Set(indexed.pictures.dropFirst())   // Katie's picture kept from it
+        let matches = try #require(try indexed.store.faceMatches(referencesKeptBy: allowed))
+        #expect(!matches.values.contains { $0.person == katie })
+        var filter = allowed
+        filter.faceMatches = matches
+        #expect(try indexed.kept([[katie]], filter).isEmpty)
+        // By the index's own matches the pictures outside with her face would be hers.
+        #expect(try indexed.kept([[katie]], SearchFilter()).count == 3)
+        allowed.photosOnly = Set(indexed.pictures)
+        #expect(try indexed.store.faceMatches(referencesKeptBy: allowed) == nil)
+    }
+}
+#endif

@@ -372,6 +372,8 @@ struct PreviewPicture: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .overlay(alignment: .bottomLeading) { marks }
+                    // The faces the People filter took it for (not on a GIF's later frame: they're on its first).
+                    .overlay { if !row.faces.isEmpty, row.segment != .frame { FaceOutlines(faces: row.faces) } }
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2, perform: open)
                     .overlay { if row.moment != nil { PlayButton(row: row) } }
@@ -432,6 +434,38 @@ struct PreviewPicture: View {
                 }
             }
         }
+    }
+}
+
+/// The faces the People filter took a picture outside Photos for (`ResultRow.faces`), outlined where they are, each with
+/// the person's name.
+struct FaceOutlines: View {
+    let faces: [FaceMatch]
+
+    var body: some View {
+        GeometryReader { geometry in
+            ForEach(Array(faces.enumerated()), id: \.offset) { _, face in
+                let (width, height) = (face.box.width * geometry.size.width, face.box.height * geometry.size.height)
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .strokeBorder(Color.white, lineWidth: 2)
+                    .shadow(color: .black.opacity(0.6), radius: 2)
+                    .frame(width: width, height: height)
+                    .overlay(alignment: .bottomLeading) {
+                        Text(face.name)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(.black.opacity(0.55)))
+                            .offset(y: 18)
+                    }
+                    .offset(x: face.box.x * geometry.size.width, y: face.box.y * geometry.size.height)
+                    .accessibilityLabel("\(face.name), by their face")
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 

@@ -12,8 +12,9 @@ let usage = """
     digup: search your files by meaning (DigUp developer CLI)
 
       digup estimate <folder>... [--json]     what would be indexed, and how long the first pass takes
-      digup index <folder>... [--limit N]     sync the index with these folders, embed what's new, then the rest
-                                              of long PDFs and documents
+      digup index <folder>... [--limit N]     sync the index with these folders, embed what's new, read the faces of
+                                              pictures read before faces were, then the rest of long PDFs and
+                                              documents
       digup search [<words>...] [--kind K,K] [--with NAME]... [--album TITLE]... [--favorites] [--origin O]...
                    [--camera NAME]... [--shot-on NAME]... [--within LAT,LON,LAT,LON] [-n 10] [--json]
                                               "code: <words>" searches the code index; with filters and no
@@ -49,8 +50,9 @@ let usage = """
       --code               estimate, index or show the code index of these folders (code.sqlite in the index
                            folder): source files, their repos' docs and notebooks, minus what git ignores
       --kind K,K           screenshot, image, pdf, doc, audio, video
-      --with NAME          only pictures Photos says NAME is in (repeatable: all of them; a name several
-                           people share in Photos means any of them)
+      --with NAME          only pictures Photos says NAME is in, and pictures outside Photos with a face that
+                           matches theirs (repeatable: all of them; a name several people share in Photos means any
+                           of them)
       --album TITLE        only pictures in this Photos album (repeatable: any of them)
       --favorites          only Photos' favorites
       --origin O           only Photos' pictures and videos that came into the library this way: camera,
@@ -305,6 +307,18 @@ func embedderSource() -> String? {
     ProcessInfo.processInfo.environment["DIGUP_WORKER_DIR"] == nil ? LlamaEmbedder.modelInfo.vectorSource : nil
 }
 
+/// DigUp's models folder, as the app gives it to its helpers: $DIGUP_MODELS, else Application Support's.
+func modelsFolder() -> URL {
+    ProcessInfo.processInfo.environment["DIGUP_MODELS"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+        ?? ModelFiles.installed
+}
+
+/// What reads the faces in pictures for the main index (`Faces.reader`): none where there's no recognizer, and then no
+/// faces are read.
+func faceReader() -> (any FaceReader)? {
+    Faces.reader(models: modelsFolder())
+}
+
 func estimate(_ args: Arguments) throws {
     guard !args.positional.isEmpty else { throw CLIError("which folders? e.g. digup estimate ~/Documents") }
     let options = args.options
@@ -400,7 +414,7 @@ func estimate(_ args: Arguments) throws {
 func index(_ args: Arguments) throws {
     let store = try args.store()
     if args.flags.contains("--reindex") { try store.resetAll() }
-    let indexer = try Indexer(store: store, options: args.options, makeEmbedder: {
+    let indexer = try Indexer(store: store, options: args.options, faces: args.code ? nil : faceReader(), makeEmbedder: {
         try makeEmbedder(textOnly: false, log: store.directory.appendingPathComponent("worker.log"))
     })
     indexer.embedderSource = embedderSource()
@@ -429,6 +443,17 @@ func index(_ args: Arguments) throws {
         print("nothing pending")
     } else {
         print("done in \(duration(Date().timeIntervalSince(started))): " + statesLine(states))
+    }
+    // The faces of pictures read before faces were, once (not after a --limit run: files are still pending).
+    if limit == nil {
+        started = Date()
+        let read = try indexer.readFaces(onStep: { step in
+            let name = (step.path as NSString).lastPathComponent
+            print("[faces \(lpad("\(step.done)", 5))/\(step.total)] \(pad(step.kind.rawValue, 10)) "
+                  + String(format: "%5.2fs  ", step.seconds) + name
+                  + "  (" + (step.faces.map { "\($0) \($0 == 1 ? "face" : "faces")" } ?? "away: later") + ")")
+        })
+        if read > 0 { print("faces of \(read) pictures read before in \(duration(Date().timeIntervalSince(started)))") }
     }
     // The rest of long files, as the app does once nothing is pending (not after a --limit run: things still are).
     guard limit == nil, try store.unfinishedCount().files > 0 else { return }
@@ -509,6 +534,9 @@ func search(_ args: Arguments) throws {
                 + (photos.reading.flatMap { $0.isStandIn ? " · in iCloud, read from Photos' \($0.rawValue)" : nil } ?? "")
         } ?? tilde((hit.path as NSString).deletingLastPathComponent)))
         if let taken = locations[hit.path] { print("      " + whereTaken(taken)) }
+        for face in hit.faces {
+            print("      \(face.name), by their face (" + String(format: "%.2f", face.similarity) + ")")
+        }
         if let excerpt = hit.excerpt, !excerpt.isEmpty { print("      “\(excerpt.prefix(160))”") }
     }
     print(String(format: "(%d vectors · query encoder %.2f s incl. start-up · search %.0f ms)", searcher.vectorCount,
@@ -534,6 +562,12 @@ func status(_ args: Arguments) throws {
     if counts.unfinished > 0 {
         print("long files still being read: \(number(counts.unfinished)) (\(number(counts.left)) pages and chunks left)")
     }
+    let faces = try store.faceCounts()
+    if let recognizer = faces.recognizer {
+        print("faces: \(number(faces.named)) named in Photos; \(number(faces.outside)) found in "
+              + "\(number(faces.outsidePictures)) pictures outside Photos, \(number(faces.matchedPictures)) of them "
+              + "showing someone named there (\(recognizer))")
+    }
     if let fingerprint = try store.meta("fingerprint") { print("built with: \(fingerprint)") }
     print("this digup: llama.cpp \(LlamaEmbedder.buildTag), vectors \(LlamaEmbedder.vectorVersion)")
     print("size: \(ByteCountFormatter.string(fromByteCount: IndexStore.size(of: store.file), countStyle: .file))")
@@ -547,7 +581,9 @@ func indexService(_ args: Arguments) throws -> Int32 {
     }
     func part(_ file: String, options: IndexOptions, roots: [URL]) throws -> IndexService.Part {
         let store = try IndexStore(directory: args.indexFolder, file: file)
-        let indexer = try Indexer(store: store, options: options, makeEmbedder: { try model.embedder() })
+        // The main index reads faces in pictures, where there's a recognizer; code has none.
+        let indexer = try Indexer(store: store, options: options, faces: options.code ? nil : faceReader(),
+                                  makeEmbedder: { try model.embedder() })
         indexer.costsFolder = args.indexFolder   // what indexing costs here, for later estimates
         // A new app version may bring a new model: the index starts over by itself (keyword search on names goes on).
         indexer.embedderSource = embedderSource()

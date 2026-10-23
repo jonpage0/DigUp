@@ -163,6 +163,7 @@ final class SettingsState {
             let counts = await app.engine.summaries(of: libraries.map(\.url.path))
             for (index, summary) in counts.enumerated() where index < libraries.count { libraries[index].summary = summary }
         }
+        faces = await app.engine.faceCounts()
     }
 
     /// The index changed: refresh the folder counts, at most every 2 s while files are being indexed.
@@ -209,6 +210,8 @@ final class SettingsState {
     private(set) var photosLoaded = false
     /// The devices the indexed libraries' pictures were taken with (the "My devices" list).
     private(set) var cameras: [IndexStore.PhotosCamera] = []
+    /// What the index knows of faces: the recognizer, and the pictures outside Photos that show someone.
+    private(set) var faces: IndexStore.FaceCounts?
 
     /// "Shot on my devices", as the From menu uses it.
     var myDevices: [String] {
@@ -249,6 +252,7 @@ final class SettingsState {
         }
         libraries = found
         cameras = await app.engine.photosChoices().cameras
+        faces = await app.engine.faceCounts()
         photosLoaded = true
         estimating.removeAll { !$0.isRunning }
         let unestimated = found.filter { !$0.searched && $0.estimate == nil && $0.access == .allowed }.map(\.url)
@@ -862,6 +866,28 @@ private struct PhotosSettings: View {
                     }
                 }
             }
+            Section {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Faces outside Photos")
+                        Text(facesDetail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Text(state.faces?.recognizer == nil ? "Off" : "On").foregroundStyle(.secondary)
+                }
+            } footer: {
+                Text("People ▾ also keeps your other pictures (Downloads, the Desktop, anywhere DigUp searches) that show "
+                     + "someone you've named in Photos: DigUp compares the faces in them with the faces you named, on "
+                     + "this Mac. It's a guess, said as “Tati, by their face”.")
+                    .font(.system(size: 11))
+                    .multilineTextAlignment(.leading)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             // Whenever there's a device to turn on or off, an added one no picture names now included.
             if !state.deviceChoices.isEmpty {
                 Section {
@@ -894,6 +920,19 @@ private struct PhotosSettings: View {
         .sheet(isPresented: $editingDevices) { MyDevicesSheet(state: state) }
         .task { await state.refreshPhotos() }
         .onChange(of: state.model.status) { state.statusChanged() }
+    }
+
+    /// How many pictures outside Photos show someone, and how the faces are read; or that none are yet.
+    private var facesDetail: String {
+        guard let faces = state.faces, let recognizer = faces.recognizer else {
+            return "No faces read yet: DigUp reads them as it indexes, where this Mac can tell faces apart (Apple's "
+                + "Vision, or the SFace model)."
+        }
+        let by = recognizer.split(separator: ",").first.map(String.init) ?? recognizer
+        return "\(faces.matchedPictures.formatted()) "
+            + (faces.matchedPictures == 1 ? "picture shows" : "pictures show") + " someone you've named · "
+            + "\(faces.outside.formatted()) faces found in \(faces.outsidePictures.formatted()) pictures, compared with "
+            + "\(faces.named.formatted()) you named (\(by))"
     }
 }
 

@@ -19,6 +19,8 @@ import Foundation
 /// - what Photos knows goes to keyword search in a segment of its own (`SegmentKind.photosInfo`), and what can be
 ///   filtered on (who is in it, its albums, favorites, where it was taken, how it came in, the device that took it) to
 ///   tables of its own (`IndexStore.PhotosFacts`). The crawl keeps both up to date without reading the picture again.
+/// - the faces Photos named in a picture, and where they are (`Asset.faces`): the indexer prints them when it reads the
+///   picture, to find those people in pictures outside Photos by their faces (`Faces`).
 /// - the words in a picture are the ones Photos read in it (`RecognizedText`): a screenshot isn't read again, and a
 ///   photo is found by the words in it too (a sign, a label, a saved post).
 /// - an asset whose original is only in iCloud ("Optimize Mac Storage") is read from what Photos keeps of it here, and
@@ -186,16 +188,22 @@ public enum PhotosLibrary {
         /// Hidden in Photos (its Hidden album: listed only with `IndexOptions.includeHiddenPhotos`); nil in a listing
         /// kept from before DigUp recorded it. What AI apps don't see until they're allowed (`visibleAssets`).
         public let hidden: Bool?
+        /// The faces Photos named in it, each with who it is (`people` has their uuids) and where it is in `path`'s
+        /// picture: the faces pictures outside Photos are compared with (`Indexer`, `IndexStore.faces`). People's faces
+        /// only, not pets'. Nil in a listing kept from before DigUp listed them.
+        public let faces: [FaceBox]?
 
         public init(uuid: String, path: String, movie: Bool, screenshot: Bool, title: String, date: Double,
                     words: [String], favorite: Bool = false, latitude: Double? = nil, longitude: Double? = nil,
                     place: String? = nil, people: [String] = [], albums: [String] = [], reading: Reading = .original,
-                    importedBy: Int? = nil, originApp: String? = nil, camera: String? = nil, hidden: Bool? = false) {
+                    importedBy: Int? = nil, originApp: String? = nil, camera: String? = nil, hidden: Bool? = false,
+                    faces: [FaceBox]? = []) {
             (self.uuid, self.path, self.reading, self.movie, self.screenshot) = (uuid, path, reading, movie, screenshot)
             (self.title, self.date, self.words) = (title, date, words)
             (self.favorite, self.latitude, self.longitude, self.place) = (favorite, latitude, longitude, place)
             (self.people, self.albums) = (people, albums)
             (self.importedBy, self.originApp, self.camera, self.hidden) = (importedBy, originApp, camera, hidden)
+            self.faces = faces
         }
 
         /// A video stays one, whichever file of it is read (`reading`).
@@ -685,11 +693,42 @@ public enum PhotosLibrary {
             return (plain(quietly(lambda: info.camera_model)) or None) if info else None
 
 
+        def face_kinds(db):
+            """The faces Photos found that are people's faces, by Photos' id for the face: its catalog says what each
+            one is (ZDETECTEDFACE.ZDETECTIONTYPE 1; pets' faces are others), read through osxphotos' own connection to
+            the catalog. None where the catalog doesn't say (an older Photos): every face counts then."""
+            connection, cursor = db.get_db_connection()
+            try:
+                return {uuid for (uuid,) in cursor.execute("SELECT ZUUID FROM ZDETECTEDFACE WHERE ZDETECTIONTYPE = 1")}
+            except Exception:
+                return None
+            finally:
+                connection.close()
+
+
+        def faces(photo, kinds):
+            """The faces Photos named in a picture: who (Photos' id and the name) and where, as the catalog keeps it
+            (PhotosLibrary.FaceBox): the center from the picture's bottom-left corner, as fractions of its width and
+            height, and the side of a square over its long side, in the picture as it's shown. That's osxphotos'
+            center_x, center_y and size; not its center or face_rect, which turn them again by the picture's
+            orientation. A face with no size is a body whose face wasn't seen."""
+            found = []
+            for face in quietly(lambda: photo.face_info):
+                if kinds is not None and face.uuid not in kinds:
+                    continue
+                name, person = named(face.name), quietly(lambda: face.person_info)
+                x, y, size = face.center_x, face.center_y, face.size
+                if not name or not person or not all(isinstance(v, (int, float)) for v in (x, y, size)) or size <= 0:
+                    continue
+                found.append({"person": {"uuid": person.uuid, "name": name}, "x": x, "y": y, "size": size})
+            return found
+
+
         def main():
             library, output, hidden = sys.argv[1], sys.argv[2], sys.argv[3] == "include-hidden"
             db = osxphotos.PhotosDB(dbfile=library)
             root = os.path.realpath(library) + os.sep
-            numbers = imported_by(db)
+            numbers, kinds = imported_by(db), face_kinds(db)
             assets, skipped = [], {}
 
             def skip(reason):
@@ -733,6 +772,8 @@ public enum PhotosLibrary {
                     "originApp": origin_app(photo),
                     "camera": camera(photo),
                     "hidden": bool(photo.hidden),
+                    # A video's faces are on its frames, which aren't compared.
+                    "faces": [] if photo.ismovie else faces(photo, kinds),
                 })
             people = [{"uuid": p.uuid, "name": named(p.name)}
                       for p in quietly(lambda: db.person_info) if named(p.name)]

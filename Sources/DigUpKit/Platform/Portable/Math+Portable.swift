@@ -23,5 +23,18 @@ extension Vectors {
             scores[row] = sum.sum()
         }
     }
+
+    /// `c` = `a` (`rows` × `inner`) times `b` (`inner` × `columns`), all row-major (`FaceMatcher`; faces are only read
+    /// on the Mac, so this never runs on many).
+    static func multiply(_ a: UnsafePointer<Float>, rows: Int, by b: UnsafePointer<Float>, columns: Int, inner: Int,
+                         into c: UnsafeMutablePointer<Float>) {
+        for row in 0..<rows {
+            for column in 0..<columns {
+                var sum: Float = 0
+                for step in 0..<inner { sum += a[row * inner + step] * b[step * columns + column] }
+                c[row * columns + column] = sum
+            }
+        }
+    }
 }
 #endif

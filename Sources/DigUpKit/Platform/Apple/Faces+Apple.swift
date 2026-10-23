@@ -8,11 +8,13 @@ import Foundation
 import ImageIO
 import Vision
 
-/// Turns the faces of a picture into embeddings (`Faces`): Vision's own faceprints (`VisionFaceprints`), or a Core ML
-/// model's (`CoreMLFaceEmbedder`).
+/// Turns the faces of a picture into embeddings, their prints (`Faces`): Vision's own faceprints (`VisionFaceprints`),
+/// or a Core ML model's (`CoreMLFaceEmbedder`).
 public protocol FaceRecognizer {
     /// What a report calls it.
     var name: String { get }
+    /// Which recognizer it is, and its version, as the index records it (`FaceReader.identity`).
+    var identity: String { get }
     /// An embedding for each of the picture's faces (`FacePicture.faces`, in order); nil for one it couldn't read.
     func embeddings(of picture: FacePicture) -> [[Float]?]
     /// How alike two of its embeddings are: higher is more alike, 1 the most.
@@ -22,6 +24,56 @@ public protocol FaceRecognizer {
 extension FaceRecognizer {
     /// The cosine of the angle between them (`Faces.cosine`).
     public func similarity(_ a: [Float], _ b: [Float]) -> Float { Faces.cosine(a, b) }
+}
+
+extension Faces {
+    /// Where SFace is kept in DigUp's models folder (scripts/face-model.py convert sface puts it there).
+    public static let sfaceModel = "faces/face_recognition_sface_2021dec.mlpackage"
+
+    /// The faces indexing reads (`FaceReader`): Vision's faceprints where this macOS has them, else SFace when it's in
+    /// `models` (`sfaceModel`), else none, and then no faces are read and the index's stay as they are.
+    public static func reader(models: URL) -> (any FaceReader)? {
+        if let vision = try? VisionFaceprints() { return RecognizedFaces(vision) }
+        let sface = models.appendingPathComponent(sfaceModel)
+        guard FileManager.default.fileExists(atPath: sface.path), let model = try? CoreMLFaceEmbedder(model: sface)
+        else { return nil }
+        return RecognizedFaces(model)
+    }
+}
+
+extension Faces.Box {
+    /// Vision's box of a face (from the picture's bottom-left corner, as fractions of its width and height).
+    init?(vision box: CGRect) {
+        self.init(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+    }
+}
+
+/// The faces of pictures as the index keeps them (`FaceReader`), printed by one recognizer.
+///
+/// Unchecked Sendable: a recognizer (Vision's request, a Core ML model) isn't made to be shared between threads, and it
+/// isn't: the indexer reads one picture at a time, on its preparing queue while it runs, or in its faces pass, which
+/// runs only between runs.
+public final class RecognizedFaces: FaceReader, @unchecked Sendable {
+    private let recognizer: any FaceRecognizer
+
+    public init(_ recognizer: any FaceRecognizer) {
+        self.recognizer = recognizer
+    }
+
+    public var identity: String { recognizer.identity }
+
+    /// A named face's box is Photos' (`Faces.Box(_:width:height:)`), whatever Vision makes of it; a face found here
+    /// has Vision's.
+    public func faces(inPictureAt url: URL, named: [PhotosLibrary.FaceBox]?) throws -> [Faces.Found] {
+        let picture = try FacePicture(contentsOf: url, photosFaces: named)
+        let (width, height) = (Double(picture.image.width), Double(picture.image.height))
+        return zip(picture.faces.indices, recognizer.embeddings(of: picture)).compactMap { index, print in
+            guard let print else { return nil }
+            let box = if let named { Faces.Box(named[index], width: width, height: height) }
+                else { Faces.Box(vision: picture.faces[index].box) }
+            return box.map { Faces.Found(box: $0, print: print, named: named == nil ? nil : index) }
+        }
+    }
 }
 
 extension Faces {
@@ -151,6 +203,10 @@ public final class FacePicture {
 /// and asked for first: on a macOS without them it's unavailable (`init` throws), never a crash.
 public final class VisionFaceprints: FaceRecognizer {
     public let name = "Vision faceprint"
+    /// The request's revision, Vision's version and macOS's ("Vision faceprint, revision 3737841669, Vision 10.0.44,
+    /// macOS 27.0.1" on 2026-10-22): an update of macOS may change what Vision prints, and the index's prints are all
+    /// made again then.
+    public let identity: String
     private let request: VNImageBasedRequest.Type
 
     private static let input = "inputFaceObservations"
@@ -163,6 +219,10 @@ public final class VisionFaceprints: FaceRecognizer {
               VNFaceObservation.instancesRespond(to: NSSelectorFromString(Self.faceprint))
         else { throw Faces.Failure(description: "Vision's faceprints aren't available on this macOS") }
         self.request = request
+        let vision = Bundle(for: VNRequest.self).infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        identity = "\(name), revision \(request.init().revision), Vision \(vision), "
+            + "macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
     }
 
     public func embeddings(of picture: FacePicture) -> [[Float]?] {
@@ -174,10 +234,9 @@ public final class VisionFaceprints: FaceRecognizer {
                   let printed = printing.results?.first as? VNFaceObservation,
                   let faceprint = printed.value(forKey: Self.faceprint) as? NSObject,
                   faceprint.responds(to: NSSelectorFromString(Self.descriptor)),
-                  let data = faceprint.value(forKey: Self.descriptor) as? Data,
-                  !data.isEmpty, data.count.isMultiple(of: MemoryLayout<Float>.size)
+                  let data = faceprint.value(forKey: Self.descriptor) as? Data
             else { return nil }
-            return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+            return Faces.floats(fromBytes: data)
         }
     }
 }
@@ -215,6 +274,8 @@ public final class CoreMLFaceEmbedder: FaceRecognizer {
         (self.input, self.output, side) = (input, output, constraint.pixelsWide)
         name = "Core ML " + url.deletingPathExtension().lastPathComponent
     }
+
+    public var identity: String { name }
 
     deinit {
         if let compiled { try? FileManager.default.removeItem(at: compiled) }
