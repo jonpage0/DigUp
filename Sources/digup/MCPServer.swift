@@ -847,8 +847,9 @@ final class MCPServer {
     /// What `search_files`' filters take, as the AI app may see it (approved 2026-10-23): the saved searches it may run
     /// (`SavedSearch.withheld`), each with the line Save This Search… says it in, its people and albums by their names
     /// now; and, with Photos allowed, the People's names and the albums (by title and folders), only those with a file
-    /// it sees, each counted only over what it sees (a person's pictures outside Photos by the faces it may see,
-    /// `IndexStore.photosNames(keptBy:)`), and the devices "mine" covers for it (`myDevices(in:keptBy:)`).
+    /// it sees, each counted only over what it sees, a file once (a person's pictures outside Photos by the faces it
+    /// may see, `IndexStore.photosNames(keptBy:)`; `photosAlbumChoices(keptBy:)`), and the devices "mine" covers for
+    /// it (`myDevices(in:keptBy:)`).
     private func listChoices(_ arguments: [String: Any], access: AIAccess) throws -> Outcome {
         _ = try Input(arguments, allowed: [])
         let store = try mainIndex().store
@@ -863,19 +864,11 @@ final class MCPServer {
         if access.photos {
             let names = try store.photosNames(keptBy: allowed)
             fields["people"] = names.map { ["name": $0.name, "files": $0.files] }
-            // One album title in one folder, as the app's Albums menu has it: each library's album of it counts.
-            var places: [(title: String, folders: [String], files: Int)] = []
-            for album in albums where album.files > 0 {
-                if let place = places.firstIndex(where: { $0.title == album.title && $0.folders == album.folders }) {
-                    places[place].files += album.files
-                } else {
-                    places.append((album.title, album.folders, album.files))
-                }
-            }
-            fields["albums"] = places.map { ["title": $0.title, "folders": $0.folders, "files": $0.files] }
+            let choices = try store.photosAlbumChoices(keptBy: allowed)
+            fields["albums"] = choices.map { ["title": $0.title, "folders": $0.folders, "files": $0.files] }
             let devices = try myDevices(in: store, keptBy: allowed)
             fields["devices"] = devices
-            results += names.count + places.count + devices.count
+            results += names.count + choices.count + devices.count
         } else {
             fields["note"] = "Photos libraries are off for AI apps, so there are no people, albums or devices to list: "
                 + "the user can turn them on in DigUp's Settings → AI apps."

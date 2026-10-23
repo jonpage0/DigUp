@@ -1235,6 +1235,38 @@ public final class IndexStore {
         }
     }
 
+    /// One album title in one folder path, as the app's Albums menu offers it (each library's album of it, and any
+    /// two of one title in one folder, count for it), and how many files are in any of them.
+    public struct PhotosAlbumChoice: Sendable, Equatable {
+        public let title: String
+        /// The folders it's in, outermost first.
+        public let folders: [String]
+        public let files: Int
+    }
+
+    /// The albums as a searcher who sees only what `filter` keeps finds them (`digup mcp`'s `list_choices`), one title
+    /// in one folder path each, in `photosAlbums`' order: only those with a file it keeps, each with how many of the
+    /// files it keeps are in any of its albums, a file in two of them counted once, as the Albums filter keeps it.
+    public func photosAlbumChoices(keptBy filter: SearchFilter) throws -> [PhotosAlbumChoice] {
+        var groups: [(title: String, folders: [String], ids: [Int64])] = []
+        for album in try photosAlbums(keptBy: filter) where album.files > 0 {
+            if let group = groups.firstIndex(where: { $0.title == album.title && $0.folders == album.folders }) {
+                groups[group].ids.append(album.id)
+            } else {
+                groups.append((album.title, album.folders, [album.id]))
+            }
+        }
+        let kept = filter.query
+        return try groups.map { group in
+            var files = 0
+            try db.query("""
+                SELECT COUNT(DISTINCT file) FROM photos_album_files
+                WHERE album IN (\(group.ids.map(String.init).joined(separator: ",")))
+                """ + (kept.map { " AND file IN (\($0.sql))" } ?? ""), kept?.values ?? []) { files = Int($0.int(0)) }
+            return PhotosAlbumChoice(title: group.title, folders: group.folders, files: files)
+        }
+    }
+
     /// A device that took pictures and videos of the indexed libraries (`photos_assets.camera`, as Photos kept its
     /// EXIF: "iPhone 15 Pro"), how many indexed files it took, how many of those its camera saved there (origin
     /// `camera`), and how many came in with nothing recorded (origin `unknown`: older items). The app's list of the

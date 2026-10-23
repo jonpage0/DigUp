@@ -400,8 +400,8 @@ import Testing
     /// `list_choices`: the people, albums and devices an AI app is told of are only those of what it sees, counted by
     /// what it sees; a saved search naming someone or an album it doesn't see isn't its own.
     @Test func anAIAppIsToldOnlyOfThePeopleAlbumsAndDevicesOfWhatItSees() throws {
-        // A library of two pictures shot on two phones: the first of Suzy, in the album Trip; the second, hidden, of
-        // Suzy and Katie, in the album Secret.
+        // A library of two pictures shot on two phones: the first of Suzy, in the album Trip and in a second album of
+        // that title; the second, hidden, of Suzy and Katie, in the album Secret and in the second Trip.
         let library = folder.appendingPathComponent("Photos Library.photoslibrary")
         let originals = library.appendingPathComponent("originals/F")
         try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
@@ -411,18 +411,19 @@ import Testing
         let suzy = PhotosLibrary.Person(uuid: "P-SUZY", name: "Suzy")
         let katie = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katie")
         let trip = PhotosLibrary.Album(uuid: "A-TRIP", title: "Trip")
+        let otherTrip = PhotosLibrary.Album(uuid: "A-TRIP-2", title: "Trip")
         let secret = PhotosLibrary.Album(uuid: "A-SECRET", title: "Secret")
         let assets = [PhotosLibrary.Asset(uuid: uuids[0], path: paths[0], movie: false, screenshot: false,
                                           title: "IMG_0.JPG", date: 1_700_000_000, words: [], people: [suzy.uuid],
-                                          albums: [trip.uuid], importedBy: 1, camera: "iPhone 15 Pro"),
+                                          albums: [trip.uuid, otherTrip.uuid], importedBy: 1, camera: "iPhone 15 Pro"),
                       PhotosLibrary.Asset(uuid: uuids[1], path: paths[1], movie: false, screenshot: false,
                                           title: "IMG_1.JPG", date: 1_700_000_001, words: [],
-                                          people: [suzy.uuid, katie.uuid], albums: [secret.uuid], importedBy: 1,
-                                          camera: "iPhone Air", hidden: true)]
+                                          people: [suzy.uuid, katie.uuid], albums: [secret.uuid, otherTrip.uuid],
+                                          importedBy: 1, camera: "iPhone Air", hidden: true)]
         let store = try IndexStore(directory: index)
         var options = IndexOptions()
         options.photos = PhotosLibrary.Reader { _, _ in
-            PhotosLibrary.Listing(assets: assets, people: [suzy, katie], albums: [trip, secret])
+            PhotosLibrary.Listing(assets: assets, people: [suzy, katie], albums: [trip, otherTrip, secret])
         }
         _ = try Indexer(store: store, options: options, makeEmbedder: { throw WorkerError.notFound("not needed") })
             .sync([library])
@@ -437,9 +438,14 @@ import Testing
         }
         #expect(try named(seen) == ["Suzy 1"])
         #expect(try named(SearchFilter()) == ["Katie 1", "Suzy 2"])
-        // Albums: Trip alone.
+        // Albums: Trip alone, one choice for both albums of the title, its picture in both counted once. DigUp's window
+        // has Secret too, and Trip's two pictures.
+        func albumed(_ filter: SearchFilter) throws -> [String] {
+            try store.photosAlbumChoices(keptBy: filter).map { "\($0.title) \($0.folders) \($0.files)" }
+        }
+        #expect(try albumed(seen) == ["Trip [] 1"])
+        #expect(try albumed(SearchFilter()) == ["Secret [] 1", "Trip [] 2"])
         let albums = try store.photosAlbums(keptBy: seen)
-        #expect(albums.map(\.title) == ["Trip"] && albums.map(\.files) == [1])
         // The devices "mine" covers, by the rule over what it sees: the one whose camera saved what it sees, not the one
         // that saved only the hidden picture, which "mine" has for DigUp's window. One the user added is theirs whatever
         // took it: the one that took only the hidden picture as much as one that took nothing indexed, so the hidden
