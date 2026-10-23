@@ -129,5 +129,28 @@ import Testing
             }
         }
     }
+
+    /// The model is the one Jon chose (`Speech.model`), whatever parakeet-mlx's own settings in the environment say
+    /// (PARAKEET_MODEL picks another model, PARAKEET_DECODING another way of decoding).
+    @Test func parakeetRunsTheChosenModelAsDigUpSetsIt() throws {
+        let seen = folder.appendingPathComponent("seen.txt")
+        let parakeet = try program("parakeet-mlx", """
+            echo "$@" > '\(seen.path)'
+            echo "${PARAKEET_MODEL:-none} ${PARAKEET_DECODING:-none}" >> '\(seen.path)'
+            while [ $# -gt 0 ]; do [ "$1" = "--output-dir" ] && dir="$2"; shift; done
+            echo '{"text": "", "sentences": []}' > "$dir/speech.json"
+            """)
+        setenv("PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v2", 1)
+        setenv("PARAKEET_DECODING", "beam", 1)
+        defer {
+            unsetenv("PARAKEET_MODEL")
+            unsetenv("PARAKEET_DECODING")
+        }
+        #expect(try Speech.run(parakeet, ffmpeg: try program("ffmpeg", "exit 0"),
+                               on: folder.appendingPathComponent("talk.m4a"), in: folder, timeout: 60).isEmpty)
+        let lines = try String(contentsOf: seen, encoding: .utf8).split(separator: "\n")
+        #expect(lines.first?.contains("--model \(Speech.model)") == true)
+        #expect(lines.last == "none none")
+    }
     #endif
 }

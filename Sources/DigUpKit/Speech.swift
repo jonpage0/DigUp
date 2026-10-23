@@ -15,7 +15,8 @@ import Foundation
 /// (`stretches(of:)`): `speech` segments, each with its words, for keyword search and to show, and a text vector, as a
 /// document's passage has.
 public enum Speech {
-    /// The model parakeet-mlx runs by default, as Hugging Face names it: NVIDIA's weights, converted for MLX.
+    /// The model DigUp has parakeet-mlx run (Jon, 2026-10-22: "parakeet v3"), as Hugging Face names it: NVIDIA's
+    /// weights, converted for MLX. Also parakeet-mlx's default.
     public static let model = "mlx-community/parakeet-tdt-0.6b-v3"
     /// What it downloads the first time: the weights and their tokenizer (Hugging Face's sizes, 2026-10-22).
     public static let modelBytes: Int64 = 2_509_044_141
@@ -171,9 +172,9 @@ public enum Speech {
         let sentences: [Sentence]
     }
 
-    /// Runs parakeet-mlx on the recording for up to `timeout` seconds, its sentences cut at a stretch's limits (one that
-    /// runs on is never longer than a stretch). It writes its JSON into a folder of its own in `scratch`; it says what
-    /// went wrong on its output and ends with 0 anyway, so a missing JSON is the failure.
+    /// Runs parakeet-mlx on the recording for up to `timeout` seconds, with `model`, its sentences cut at a stretch's
+    /// limits (one that runs on is never longer than a stretch). It writes its JSON into a folder of its own in
+    /// `scratch`; it says what went wrong on its output and ends with 0 anyway, so a missing JSON is the failure.
     static func run(_ program: String, ffmpeg: String, on recording: URL, in scratch: URL, timeout: Double) throws
         -> [Sentence] {
         let fm = FileManager.default
@@ -184,11 +185,13 @@ public enum Speech {
         fm.createFile(atPath: output.path, contents: nil)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: program)
-        process.arguments = [recording.path, "--output-format", "json", "--output-dir", work.path,
+        process.arguments = [recording.path, "--model", model, "--output-format", "json", "--output-dir", work.path,
                              "--output-template", "speech", "--max-words", String(mostWords),
                              "--max-duration", String(longest), "--silence-gap", String(longestSilence)]
-        // It runs ffmpeg by name, and the app's helpers have launchd's PATH, which doesn't hold it.
-        var environment = ProcessInfo.processInfo.environment
+        // Without parakeet-mlx's own settings (PARAKEET_MODEL would pick another model, PARAKEET_DECODING another way of
+        // decoding): DigUp sets how it reads. It runs ffmpeg by name, and the app's helpers have launchd's PATH, which
+        // doesn't hold it.
+        var environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("PARAKEET_") }
         let folder = (ffmpeg as NSString).deletingLastPathComponent
         environment["PATH"] = folder + (environment["PATH"].map { ":" + $0 } ?? "")
         process.environment = environment
