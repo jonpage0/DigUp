@@ -60,8 +60,8 @@ import SwiftUI
 ///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup|sensitive|length:15..60|shape:16:9|matchBy:text"
 ///                             with -debugWindow search: these filters on (a Photos library's people and albums, by
 ///                             name; Photos' favorites; DigUp's own; the Sensitive filter; a Length, in seconds as
-///                             `digup search --length` takes it; a Shape, as `--shape`; Match by, as `--match-by`
-///                             takes it: matchBy:spoken,text)
+///                             `digup search --length` takes it; a Shape, as `--shape`; a When, as `--when` takes
+///                             it: when:last:90; Match by, as `--match-by` takes it: matchBy:spoken,text)
 ///     -debugSaved "<name>"    with -debugWindow search: then open the saved search of that name, as the Saved menu
 ///                             would
 ///     -debugSavedNext "<name>"   with -debugWindow search: after the snapshot (and -debugMoment's pick), open the
@@ -76,6 +76,11 @@ import SwiftUI
 ///                             items, choose "Require “WORD”", and draw the window into <snapshot>-required.png
 ///     -debugFiltersMenu YES   with -debugWindow search: after the snapshot, log the Filters menu's items and draw them
 ///                             into <snapshot>-filtersmenu.png, each submenu's under it (as -debugSavedMenu does)
+///     -debugWhenSheet YES|use   with -debugWindow search: after the snapshot, open When's Custom Range… (the range
+///                             on, or the past month), log the days its pickers show and what its Use would put on,
+///                             and draw it into <snapshot>-when.png; `use` then presses Use and logs the tokens.
+///                             -debugWhenThrough DAY (YYYY-MM-DD) first picks that day on its Through picker, as a
+///                             click on it would
 ///     -debugSavedSheet save|edit   with -debugWindow search: then open Save This Search… (its name suggested) or
 ///                             Edit Saved Searches…, and draw it into <snapshot>-saved.png; -debugSaveAs NAME
 ///                             then presses Save with that name
@@ -418,6 +423,8 @@ enum DebugHooks {
                                 search.set(.length(length), on: true)
                             } else if kind == "shape", let shape = SearchFilter.Shape(String(name)) {
                                 search.set(.shape(shape), on: true)
+                            } else if kind == "when", let when = SearchFilter.When(String(name)) {
+                                search.set(.when(when), on: true)
                             } else if kind == "matchBy", let matchBy = SearchFilter.MatchBy(String(name)) {
                                 search.set(.matchBy(matchBy), on: true)
                             } else {
@@ -464,15 +471,17 @@ enum DebugHooks {
                                     + "skipping \(settings.codeExcluded.map { tildePath($0.path) })")
                             }
                             filtersMenuStep(app)
-                            savedSearchSteps(app) {
-                                savedNextStep(app) {
-                                    requireSteps(app) {
-                                        press(keys, app, describe: { windowState(app) }) {
-                                            if defaults.bool(forKey: "debugCloseWindow") {
-                                                close()
-                                                log("window: closed")
+                            whenSheetStep(app) {
+                                savedSearchSteps(app) {
+                                    savedNextStep(app) {
+                                        requireSteps(app) {
+                                            press(keys, app, describe: { windowState(app) }) {
+                                                if defaults.bool(forKey: "debugCloseWindow") {
+                                                    close()
+                                                    log("window: closed")
+                                                }
+                                                if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                                             }
-                                            if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                                         }
                                     }
                                 }
@@ -498,6 +507,7 @@ enum DebugHooks {
                 case .part(let title, let part, let enabled):
                     (search.matchBy?.contains(part) == true ? "✓ " : "") + title + (enabled ? "" : " (disabled)")
                 case .submenu(let title, _, let items): "\(title) ▸ [\(described(items))]"
+                case .command(let title, _, _): title
                 case .section(let title, _, let items): "— \(title): [\(described(items))]"
                 case .note(let text): "\(text) (disabled)"
                 case .divider: "—"
@@ -512,6 +522,80 @@ enum DebugHooks {
             drawing.contentView = view
             try Snapshot.write(drawing, to: url, cornerRadius: 6)
         }, to: snapshotPath("filtersmenu"))
+    }
+
+    /// After the search window's snapshot: `-debugWhenSheet YES|use` opens When's Custom Range…, picks
+    /// `-debugWhenThrough DAY` on its Through picker if given (as a click on that day of its calendar would), logs the
+    /// days its pickers show, the zone they show them in and the day they take for today, and what Use would put on,
+    /// and draws it into <snapshot>-when.png; `use` then presses Use and logs the tokens.
+    private static func whenSheetStep(_ app: AppController, then done: @escaping () -> Void) {
+        let defaults = UserDefaults.standard
+        guard let mode = defaults.string(forKey: "debugWhenSheet") else { return done() }
+        let window = app.searchWindow!
+        window.chooseWhen()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            let sheet = window.whenSheet
+            if let day = defaults.string(forKey: "debugWhenThrough").flatMap(SearchFilter.Day.init(_:)),
+               let through = sheet.datePickers.last {
+                pick(day, on: through)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                if let range = sheet.range {
+                    let pickers = sheet.datePickers
+                    let shows = pickers.map(shown).joined(separator: ", ")
+                    let zones = Set(pickers.map(zone)).map(\.identifier).sorted().joined(separator: ", ")
+                    let todays = Set(pickers.map(today)).sorted().joined(separator: ", ")
+                    let here = "the Mac: \(TimeZone.current.identifier), today \(SearchFilter.Day(Date())?.text ?? "-")"
+                    let use = range.when.map { "puts on \($0.text)" } ?? "can't be pressed"
+                    let why = range.problem.map { " (\($0))" } ?? ""
+                    log("debug: custom range: the pickers show \(shows) in \(zones), today there \(todays) (\(here)); "
+                        + "Use \(use)\(why)")
+                }
+                save("custom range sheet", { try sheet.snapshot(to: $0) }, to: snapshotPath("when"))
+                guard mode == "use", let use = sheet.use else { return done() }
+                use()
+                let search = window.search
+                waitUntil({ search.isSettled && search.hasResults }, deadline: Date().addingTimeInterval(30)) {
+                    log("debug: custom range used: \(windowState(app))")
+                    done()
+                }
+            }
+        }
+    }
+
+    /// Picks `day` on `picker` as a click on that day of its calendar would: the picker's moment for it, in its own
+    /// zone, then its action.
+    private static func pick(_ day: SearchFilter.Day, on picker: NSDatePicker) {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone(of: picker)
+        guard let date = calendar.date(from: DateComponents(year: day.year, month: day.month, day: day.day)) else {
+            return
+        }
+        picker.dateValue = date
+        _ = picker.sendAction(picker.action, to: picker.target)
+    }
+
+    /// The zone `picker` shows days in, and so where its calendar marks today.
+    private static func zone(of picker: NSDatePicker) -> TimeZone {
+        picker.timeZone ?? picker.calendar?.timeZone ?? .current
+    }
+
+    /// The day `picker` shows, "2011-12-30", as its own calendar and zone write it.
+    private static func shown(_ picker: NSDatePicker) -> String {
+        written(picker.dateValue, in: zone(of: picker))
+    }
+
+    /// The day `picker`'s calendar marks as today: now, in its zone.
+    private static func today(_ picker: NSDatePicker) -> String {
+        written(Date(), in: zone(of: picker))
+    }
+
+    /// "2011-12-30": the day `date` is on in `zone`.
+    private static func written(_ date: Date, in zone: TimeZone) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let parts = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 
     /// After the search window's snapshot: `-debugSavedMenu` logs the Saved menu's items and draws them into
@@ -1046,6 +1130,7 @@ private struct FiltersMenuDrawing: View {
                     row(title, check: search.matchBy?.contains(part) == true, enabled: enabled)
                         .padding(.leading, indent)
                 case .submenu(let title, _, _): row(title, submenu: true, enabled: true).padding(.leading, indent)
+                case .command(let title, _, _): row(title, enabled: true).padding(.leading, indent)
                 case .section(let title, _, _):
                     // As a menu's section: a line above it, and its heading small and dimmed.
                     VStack(alignment: .leading, spacing: 0) {

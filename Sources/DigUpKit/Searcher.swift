@@ -128,9 +128,9 @@ public struct PhotosHit: Sendable, Equatable {
     public var still: String? = nil
 }
 
-/// What a search keeps besides its kinds: Photos' facts about a library's files, where files were taken, how long
-/// and what shape they are, and which of their parts may match. The parts combine with AND; an empty filter keeps every
-/// file.
+/// What a search keeps besides its kinds: Photos' facts about a library's files, where files were taken, how long and
+/// what shape they are, when they're from, and which of their parts may match. The parts combine with AND; an empty
+/// filter keeps every file.
 public struct SearchFilter: Sendable, Equatable {
     /// People a file must show, every one of them (ids of `IndexStore.photosPeople`). An entry is one person, or the
     /// people who share a name, any of whom counts for it. An empty entry keeps nothing: a saved search's person who
@@ -175,6 +175,10 @@ public struct SearchFilter: Sendable, Equatable {
     public var length: Length?
     /// Only pictures and videos of this shape as they're shown (`media_dimensions.width`, `height`): the Shape filter.
     public var shape: Shape?
+    /// Only files from this time, by their date (`FileDate`): the When filter.
+    public var when: When?
+    /// Only files taken near this place (`digup mcp`'s `near`; beside `area`, both keep what's in both).
+    public var near: Near?
     /// Only these parts of a file may make it match (the Match by filter, approved 2026-10-23): with words, only their
     /// meaning and their words count, a required word's too (`RequiredWords`), and a hit's reason, excerpt and a
     /// recording's moments come from one of them; without words, only the files that have one of them are kept. The
@@ -393,16 +397,16 @@ public struct SearchFilter: Sendable, Equatable {
     public init(people: [Set<Int64>] = [], albums: Set<Int64>? = nil, favorites: Bool = false,
                 origins: Set<String> = [], cameras: Set<String> = [], shotOn: Set<String>? = nil,
                 paths: Set<String>? = nil, area: Area? = nil, length: Length? = nil, shape: Shape? = nil,
-                matchBy: MatchBy? = nil) {
+                when: When? = nil, near: Near? = nil, matchBy: MatchBy? = nil) {
         (self.people, self.albums, self.favorites, self.area) = (people, albums, favorites, area)
         (self.origins, self.cameras, self.shotOn, self.paths) = (origins, cameras, shotOn, paths)
-        (self.length, self.shape, self.matchBy) = (length, shape, matchBy)
+        (self.length, self.shape, self.when, self.near, self.matchBy) = (length, shape, when, near, matchBy)
     }
 
     public var isEmpty: Bool {
         people.isEmpty && albums == nil && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
             && paths == nil && area == nil && photosOnly == nil && sensitive == nil && leavingOutSensitive == nil
-            && length == nil && shape == nil && matchBy == nil
+            && length == nil && shape == nil && when == nil && near == nil && matchBy == nil
     }
 
     /// What of it leaves files out of an AI app's sight (`photosOnly`, `leavingOutSensitive`); empty for DigUp's own
@@ -475,6 +479,10 @@ public struct SearchFilter: Sendable, Equatable {
         if let shape {
             parts.append("SELECT file FROM media_dimensions WHERE \(shape.condition)")   // a recording's has no size
         }
+        for part in [when?.query, near?.query].compactMap({ $0 }) {
+            parts.append(part.sql)
+            values += part.values
+        }
         if let matchBy {
             // Without words, the files that have a chosen part; with them, no other file can match (`Searcher.search`).
             parts.append("SELECT file FROM segments WHERE kind IN \(matchBy.segmentList)")
@@ -528,7 +536,7 @@ public struct SearchFilter: Sendable, Equatable {
 }
 
 /// Any key of a JSON object, to see which keys it has.
-private struct JSONKey: CodingKey {
+struct JSONKey: CodingKey {
     let stringValue: String
     init(stringValue: String) { self.stringValue = stringValue }
     var intValue: Int? { nil }
@@ -976,9 +984,9 @@ public final class Searcher {
         return having ?? []
     }
 
-    /// What a filter keeps, with no words: the newest files it keeps (of `kinds`), by when Photos says a library's
-    /// picture was taken, else by the file's modification date; an empty filter keeps every file (`digup mcp`'s kind
-    /// alone). Each points at its Photos facts, else at its name.
+    /// What a filter keeps, with no words: the newest files it keeps (of `kinds`), by their date (`FileDate`: when
+    /// Photos or the camera says it was taken, else when the file was modified); an empty filter keeps every file
+    /// (`digup mcp`'s kind alone). Each points at its Photos facts, else at its name.
     public func browse(_ filter: SearchFilter, kinds: Set<FileKind>?, limit: Int) throws -> [SearchHit] {
         let kept = filter.query
         let conditions = [kept.map { "f.id IN (\($0.sql))" }, kinds.map { "f.kind IN (\(IndexStore.sqlList($0)))" }]
@@ -986,9 +994,8 @@ public final class Searcher {
         var files: [Int64] = []
         try store.db.query("""
             SELECT f.id FROM files f
-            LEFT JOIN segments s ON s.file = f.id AND s.kind = '\(SegmentKind.photosInfo.rawValue)'
             \(conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND "))
-            ORDER BY coalesce(s.loc, f.mtime) DESC, f.id DESC LIMIT ?
+            ORDER BY \(FileDate.sql(of: "f")) DESC, f.id DESC LIMIT ?
             """, (kept?.values ?? []) + [.int(Int64(limit))]) { files.append($0.int(0)) }
         return try files.map { file in
             let row = try fileRow(file)

@@ -5,7 +5,8 @@ import Foundation
 /// search window's Saved menu, `SavedSearches`) and `digup mcp` reads (`search_files`' `saved`, `list_choices`).
 ///
 /// The file's shape (approved 2026-10-22; `{ "sensitive": true }` with it, the same evening; `{ "length": … }` and
-/// `{ "shape": … }` with the Length and Shape filters; `{ "matchBy": […] }` with Match by, 2026-10-23):
+/// `{ "shape": … }` with the Length and Shape filters; `{ "matchBy": […] }` with Match by and `{ "when": … }` with
+/// When, 2026-10-23):
 ///
 ///     { "version": 1,
 ///       "searches": [ { "id": "<UUID>", "name": "Tati at the beach", "query": "beach", "kind": "images",
@@ -14,14 +15,15 @@ import Foundation
 ///                                    { "photosFavorites": true }, { "digupFavorites": true }, { "from": "mine" },
 ///                                    { "area": { "south": 25.1, "west": -80.9, "north": 26.2, "east": -79.8 } },
 ///                                    { "sensitive": true }, { "length": { "atLeast": 15, "under": 60 } },
-///                                    { "shape": "16:9" }, { "matchBy": ["spoken", "text"] } ],
+///                                    { "shape": "16:9" }, { "matchBy": ["spoken", "text"] },
+///                                    { "when": { "after": "2024-06-01", "before": "2024-09-01" } } ],
 ///                       "saved": "<ISO 8601>" } ] }
 ///
 /// In the user's order, which the menu shows. A file that isn't exactly this shape (a newer version, damaged, a key
 /// anywhere that the shape doesn't have, a filter with two keys or none, two From, two areas, two Sensitive, two
-/// lengths, two shapes or two Match by in one search, a length, a shape or a Match by the filters don't have, a search
-/// without a name, an id twice) isn't read (`searches(in:)` throws): the app leaves it as it is and never writes over
-/// it.
+/// lengths, two shapes, two Match by or two When in one search, a length, a shape, a Match by or a When the filters
+/// don't have, a search without a name, an id twice) isn't read (`searches(in:)` throws): the app leaves it as it is
+/// and never writes over it.
 public struct SavedSearch: Equatable, Identifiable, Sendable {
     /// Made when it's saved; renaming or moving it keeps it.
     public var id: UUID
@@ -58,6 +60,10 @@ public struct SavedSearch: Equatable, Identifiable, Sendable {
         /// Match by: `{ "matchBy": ["spoken", "text"] }`, one or more parts, each once, written in the kit's order and
         /// read in any (approved 2026-10-23; read strictly: `SearchFilter.MatchBy`'s `Codable`).
         case matchBy(SearchFilter.MatchBy)
+        /// The When filter: `{ "when": { "after": "2026-07-01", "before": "2026-08-01" } }` (local days, either left
+        /// out) or `{ "when": { "lastDays": 90 } }`, a window ending when the search runs (approved 2026-10-23; read
+        /// strictly: `SearchFilter.When`'s `Codable`).
+        case when(SearchFilter.When)
     }
 
     /// A person by Photos' ids, one per library that has them (everyone of the name, as the People filter joins
@@ -113,9 +119,9 @@ public struct SavedSearch: Equatable, Identifiable, Sendable {
     }
 
     /// What the file's shape asks of a search beyond its keys: a name, at most one From, one area, one Sensitive, one
-    /// Length, one Shape and one Match by, and an area that's a box.
+    /// Length, one Shape, one Match by and one When, and an area that's a box.
     public var isWellFormed: Bool {
-        var froms = 0, areas = 0, sensitives = 0, lengths = 0, shapes = 0, matchBys = 0
+        var froms = 0, areas = 0, sensitives = 0, lengths = 0, shapes = 0, matchBys = 0, whens = 0
         for filter in filters {
             switch filter {
             case .from: froms += 1
@@ -126,10 +132,11 @@ public struct SavedSearch: Equatable, Identifiable, Sendable {
             case .length: lengths += 1
             case .shape: shapes += 1
             case .matchBy: matchBys += 1
+            case .when: whens += 1
             default: break
             }
         }
-        return !name.isEmpty && [froms, areas, sensitives, lengths, shapes, matchBys].allSatisfy { $0 <= 1 }
+        return !name.isEmpty && [froms, areas, sensitives, lengths, shapes, matchBys, whens].allSatisfy { $0 <= 1 }
     }
 }
 
@@ -147,8 +154,8 @@ extension SavedSearch {
     public enum FileError: Error, Equatable {
         /// Another version than this DigUp's (1).
         case version(Int)
-        /// A search without a name, with two From, two areas, two Sensitive, two lengths, two shapes or two Match by,
-        /// or an area that isn't a box; or an id twice.
+        /// A search without a name, with two From, two areas, two Sensitive, two lengths, two shapes, two Match by or
+        /// two When, or an area that isn't a box; or an id twice.
         case notWellFormed
     }
 
@@ -277,10 +284,10 @@ extension SavedSearch.Area {
     }
 }
 
-/// A filter is an object with exactly one key, one of these ten; anything else isn't this shape.
+/// A filter is an object with exactly one key, one of these eleven; anything else isn't this shape.
 extension SavedSearch.Filter: Codable {
     private enum Key: String, CodingKey, CaseIterable {
-        case person, album, photosFavorites, digupFavorites, from, area, sensitive, length, shape, matchBy
+        case person, album, photosFavorites, digupFavorites, from, area, sensitive, length, shape, matchBy, when
     }
 
     public init(from decoder: any Decoder) throws {
@@ -307,6 +314,7 @@ extension SavedSearch.Filter: Codable {
         case .length: self = .length(try container.decode(SearchFilter.Length.self, forKey: key))
         case .shape: self = .shape(try container.decode(SearchFilter.Shape.self, forKey: key))
         case .matchBy: self = .matchBy(try container.decode(SearchFilter.MatchBy.self, forKey: key))
+        case .when: self = .when(try container.decode(SearchFilter.When.self, forKey: key))
         }
     }
 
@@ -323,6 +331,7 @@ extension SavedSearch.Filter: Codable {
         case .length(let length): try container.encode(length, forKey: .length)
         case .shape(let shape): try container.encode(shape, forKey: .shape)
         case .matchBy(let matchBy): try container.encode(matchBy, forKey: .matchBy)
+        case .when(let when): try container.encode(when, forKey: .when)
         }
     }
 }
@@ -362,7 +371,8 @@ extension SavedSearch {
     /// there: nothing is kept, so the search never widens to everyone); any of its albums among `albums` (one not there
     /// adds nothing); Photos' favorites; From, "Shot on my devices" being `myDevices` now; the map's area; the
     /// Sensitive filter at the position blurring has now (`blurring`, Revealing while it's off); its length and shape;
-    /// its Match by; DigUp's favorites, the files `favorites` gives (asked for only when it has them).
+    /// its Match by; its When (the last so many days counted back from today); DigUp's favorites, the files
+    /// `favorites` gives (asked for only when it has them).
     public func searchFilter(narrowing base: SearchFilter = SearchFilter(), people: [IndexStore.PhotosPerson],
                              albums: [IndexStore.PhotosAlbum], myDevices: [String], blurring: SensitivePosition,
                              favorites: () throws -> Set<String>) rethrows -> SearchFilter {
@@ -380,6 +390,7 @@ extension SavedSearch {
             case .length(let length): filter.length = length
             case .shape(let shape): filter.shape = shape
             case .matchBy(let matchBy): filter.matchBy = matchBy
+            case .when(let when): filter.when = when
             }
         }
         return filter
@@ -388,14 +399,15 @@ extension SavedSearch {
     /// What it uses that the user can keep from AI apps (Settings → AI apps, `AIAccess.allows`): Photos, for its
     /// people, albums, Photos' favorites and From; pictures rated sensitive, for the Sensitive filter; code, for a
     /// search of code. A code search's other filters count too, though none applies to it: its summary line names them.
-    /// Match by keeps to parts of what the app sees, as `search_files`' `match_by` does: no switch of its own.
+    /// Match by keeps to parts of what the app sees, as `search_files`' `match_by` does, and When to when what it sees
+    /// is from, as `when` does: no switch of their own.
     public var aiUses: Set<AIAccess.Use> {
         var uses: Set<AIAccess.Use> = isCode ? [.code] : []
         for element in filters {
             switch element {
             case .person, .album, .photosFavorites, .from: uses.insert(.photos)
             case .sensitive: uses.insert(.sensitive)
-            case .digupFavorites, .area, .length, .shape, .matchBy: break
+            case .digupFavorites, .area, .length, .shape, .matchBy, .when: break
             }
         }
         return uses
@@ -463,6 +475,7 @@ extension SavedSearch.Filter {
         case .length(let length): length.title
         case .shape(let shape): shape.title
         case .matchBy(let matchBy): matchBy.title
+        case .when(let when): when.title
         }
     }
 }
