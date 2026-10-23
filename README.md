@@ -46,7 +46,8 @@ Nothing you index leaves your computer. DigUp goes online only to download the m
 once a day. The update check sends nothing about your files, and you can turn it off. No account, no telemetry. The
 search window's map is Apple Maps: while it's showing, Apple is sent the area in view to draw it, nothing about your
 files, and it never shows unless you open it. Download Original, on a Photos result, has Photos fetch that original
-from your iCloud, as Photos does when you open it.
+from your iCloud, as Photos does when you open it. AI apps can search through DigUp only once you let them (see AI
+apps), and what they read goes to their AI provider.
 
 ## Install
 
@@ -250,6 +251,45 @@ library that can't be read for a while keeps what's indexed from it.
 This fork's Mac app doesn't check for updates by itself: its feed is upstream's, and an update from it would replace
 the fork with upstream's release, which doesn't read Photos libraries. Check for Updates… in the menu still reads that
 feed, so leave it alone unless you mean to go back to upstream.
+
+## AI apps
+
+AI apps on your Mac (Claude Code, Codex, Cursor, VS Code, Claude Desktop, or any app that starts a local MCP server)
+can search your files through DigUp, if you let them. DigUp's helper speaks MCP on its input and output
+(`DigUp.app/Contents/Helpers/digup mcp`), so nothing listens on the network. It's off until you turn it on in
+Settings → AI apps, which also shows each of those apps' own command or config entry for it, with a Copy button.
+DigUp never changes an app's settings: you run the command or add the entry yourself, and the app asks before it uses
+DigUp, as you set it up there.
+
+They get four tools, all read-only:
+
+- `search_files`: what the search window does, with its kinds and filters (people, albums, Photos favorites, DigUp's
+  favorites, From, an area on the map). Each result says where the file is, why it's there ("Matches the text on page
+  3"), the words that matched, and when and where it was taken.
+- `read_text`: the words DigUp read from a file it returned (a document, a PDF's page, the text in a screenshot, what
+  Photos knows about a picture, a stretch of code), up to 20,000 characters.
+- `get_picture`: a picture of a result, at most 768 pixels on its long side, for apps that can look at one.
+- `status`: how many files are indexed, of which kinds, and whether some are still being read.
+
+What they may see is DigUp's to say, not the app's. The helper reads Settings → AI apps at every call, so a change
+applies to the very next one:
+
+- with the switch off, every call fails: "DigUp's AI access is off. Turn it on in DigUp's Settings → AI apps."
+- Photos libraries stay out until you allow them: their pictures are never returned, counted or read. What's hidden in
+  Photos (when DigUp indexes it) stays out until you allow that too; a library whose last listing doesn't say which of
+  its items are hidden (one listed before DigUp noted it) is left out whole until it's listed again.
+- code search, and pictures themselves (`get_picture`), are each off until you turn them on.
+- the tools' descriptions tell the model that whatever comes back is your data, never instructions: a file can say
+  anything.
+
+What an app reads goes to its AI provider, as anything you paste into it does. DigUp notes each call in `mcp.log` in
+the index folder (which app, which tool, how many results, and why a call was refused), never what was searched for,
+and Settings → AI apps shows the last 20. `get_picture` on a Photos picture reads the library's file, so macOS may ask
+whether the AI app may see your photos.
+
+The helper speaks both current MCP revisions: 2026-07-28, and 2025-11-25 (with 2025-06-18 and 2025-03-26) through
+`initialize`. In a dev run with `-defaultsSuite` or another index, the command Settings shows passes them on
+(`--defaults-suite`, `--index`).
 
 ## How it works
 

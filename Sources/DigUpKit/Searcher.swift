@@ -97,6 +97,13 @@ public struct SearchFilter: Sendable, Equatable {
     public var paths: Set<String>?
     /// Only files taken inside this box (`IndexStore.locations`).
     public var area: Area?
+    /// What an AI app may not see (`digup mcp`, `AIAccess`), left out before anything is matched, counted or cut to
+    /// the best, so it's never in a result or a count. False: no file of a Photos library.
+    public var photosLibraries = true
+    /// No file under these folders (a Photos library whose hidden items can't be told apart from the others).
+    public var withoutFolders: [String] = []
+    /// Not these files (Photos' hidden items).
+    public var withoutPaths: Set<String> = []
 
     /// A box on the map, in degrees: south to north, west to east.
     public struct Area: Sendable, Equatable {
@@ -117,7 +124,7 @@ public struct SearchFilter: Sendable, Equatable {
 
     public var isEmpty: Bool {
         people.isEmpty && albums == nil && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
-            && paths == nil && area == nil
+            && paths == nil && area == nil && photosLibraries && withoutFolders.isEmpty && withoutPaths.isEmpty
     }
 
     /// A part of the query that keeps no file (`IN ()` isn't SQL).
@@ -167,6 +174,20 @@ public struct SearchFilter: Sendable, Equatable {
             parts.append("SELECT file FROM locations WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?")
             values += [.double(area.latitudes.lowerBound), .double(area.latitudes.upperBound),
                        .double(area.longitudes.lowerBound), .double(area.longitudes.upperBound)]
+        }
+        if !photosLibraries {
+            parts.append("SELECT id FROM files WHERE path NOT LIKE ?")   // as `PhotosLibrary.library(containing:)`
+            values.append(.text("%." + PhotosLibrary.fileExtension + "/%"))
+        }
+        for folder in withoutFolders {
+            let ranges = IndexStore.pathRanges(under: folder)
+            parts.append("SELECT id FROM files WHERE NOT ("
+                         + ranges.map { _ in "(path >= ? AND path < ?)" }.joined(separator: " OR ") + ")")
+            values += ranges.flatMap { [SQLValue.text($0.from), .text($0.to)] }
+        }
+        if !withoutPaths.isEmpty {
+            parts.append("SELECT id FROM files WHERE path NOT IN (\(placeholders(withoutPaths)))")
+            values += withoutPaths.map { .text($0) }
         }
         return parts.isEmpty ? nil : (parts.joined(separator: " INTERSECT "), values)
     }

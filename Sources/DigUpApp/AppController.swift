@@ -250,6 +250,16 @@ final class AppController {
         searchWindow.search.myDevicesChanged()
     }
 
+    /// What AI apps may see through `digup mcp` (Settings → AI apps): the helper reads it at its next call, so a change
+    /// applies at once, mid-conversation.
+    func setAIAccess(_ access: AIAccess) {
+        AppSettings.save(aiAccess: access)
+        model.settings.aiAccess = access
+        log("ai apps: access \(access.on ? "on" : "off"); Photos \(access.photos ? "on" : "off"), hidden items "
+            + "\(access.hiddenPhotos ? "on" : "off"), code \(access.code ? "on" : "off"), pictures "
+            + (access.pictures ? "on" : "off"))
+    }
+
     /// "Index only at set hours": on or off, and the hours (kept while it's off).
     func setIndexHours(on: Bool, hours: IndexHours) {
         AppSettings.save(indexHoursOn: on, hours: hours)

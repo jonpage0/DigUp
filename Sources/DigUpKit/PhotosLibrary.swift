@@ -180,16 +180,19 @@ public enum PhotosLibrary {
         public let originApp: String?
         /// The device that took it, from the EXIF Photos kept ("iPhone 15 Pro"); nil when there's none.
         public let camera: String?
+        /// Hidden in Photos (its Hidden album: listed only with `IndexOptions.includeHiddenPhotos`); nil in a listing
+        /// kept from before DigUp recorded it. What AI apps don't see until they're allowed (`hiddenAssets`).
+        public let hidden: Bool?
 
         public init(uuid: String, path: String, movie: Bool, screenshot: Bool, title: String, date: Double,
                     words: [String], favorite: Bool = false, latitude: Double? = nil, longitude: Double? = nil,
                     place: String? = nil, people: [String] = [], albums: [String] = [], reading: Reading = .original,
-                    importedBy: Int? = nil, originApp: String? = nil, camera: String? = nil) {
+                    importedBy: Int? = nil, originApp: String? = nil, camera: String? = nil, hidden: Bool? = false) {
             (self.uuid, self.path, self.reading, self.movie, self.screenshot) = (uuid, path, reading, movie, screenshot)
             (self.title, self.date, self.words) = (title, date, words)
             (self.favorite, self.latitude, self.longitude, self.place) = (favorite, latitude, longitude, place)
             (self.people, self.albums) = (people, albums)
-            (self.importedBy, self.originApp, self.camera) = (importedBy, originApp, camera)
+            (self.importedBy, self.originApp, self.camera, self.hidden) = (importedBy, originApp, camera, hidden)
         }
 
         /// A video stays one, whichever file of it is read (`reading`).
@@ -384,12 +387,34 @@ public enum PhotosLibrary {
         public let skipped: [String: Int]
     }
 
+    /// Where a library's last listing is kept in the index folder (`osxphotosReader`).
+    public static func keptListing(of library: String, keptIn index: URL) -> URL {
+        index.appendingPathComponent("photos").appendingPathComponent(keptName(of: library))
+    }
+
     public static func lastListing(of library: String, keptIn index: URL) -> ListingSummary? {
-        let file = index.appendingPathComponent("photos").appendingPathComponent(keptName(of: library))
+        let file = keptListing(of: library, keptIn: index)
         guard let data = try? Data(contentsOf: file), let kept = try? JSONDecoder().decode(Kept.self, from: data),
               kept.library == library else { return nil }
         return ListingSummary(listedAt: Date(timeIntervalSince1970: kept.listedAt), assets: kept.listing.assets.count,
                               skipped: kept.listing.skipped)
+    }
+
+    /// The assets hidden in Photos among a library's last listing (kept in the index folder), by uuid: none when it was
+    /// listed without them. Nil when no kept listing says: none is kept, or it's from before DigUp recorded which are
+    /// hidden (a listing from the script before is made again at the next sync, `Kept.isCurrent`). `digup mcp` keeps
+    /// these from AI apps until they're allowed, and a library it can't tell about altogether.
+    public static func hiddenAssets(of library: String, keptIn index: URL) -> Set<String>? {
+        let file = keptListing(of: library, keptIn: index)
+        guard let data = try? Data(contentsOf: file), let kept = try? JSONDecoder().decode(Kept.self, from: data),
+              kept.library == library else { return nil }
+        guard kept.hidden else { return [] }
+        var hidden = Set<String>()
+        for asset in kept.listing.assets {
+            guard let flag = asset.hidden else { return nil }
+            if flag { hidden.insert(asset.uuid) }
+        }
+        return hidden
     }
 
     /// A listing is used again while the library's pictures are as they were, and while it's younger than this when the
@@ -708,6 +733,7 @@ public enum PhotosLibrary {
                     "importedBy": numbers.get(photo.uuid),
                     "originApp": origin_app(photo),
                     "camera": camera(photo),
+                    "hidden": bool(photo.hidden),
                 })
             people = [{"uuid": p.uuid, "name": named(p.name)}
                       for p in quietly(lambda: db.person_info) if named(p.name)]

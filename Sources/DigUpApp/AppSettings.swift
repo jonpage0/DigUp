@@ -49,6 +49,9 @@ nonisolated struct AppSettings: Sendable {
     /// phone join by itself while a device taken off stays off.
     var myDevicesAdded: [String]
     var myDevicesRemoved: [String]
+    /// What AI apps may see through `digup mcp` (Settings → AI apps), all off at first. The helper reads it from these
+    /// settings at every call.
+    var aiAccess: AIAccess
 
     static let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/DigUp")
@@ -61,8 +64,7 @@ nonisolated struct AppSettings: Sendable {
 
     /// Where settings are saved. Reads see launch arguments first either way. (UserDefaults is thread-safe.)
     nonisolated(unsafe) static let defaults: UserDefaults = {
-        guard let suite = UserDefaults.standard.string(forKey: "defaultsSuite"), !suite.isEmpty,
-              let defaults = UserDefaults(suiteName: suite) else { return .standard }
+        guard let suite, let defaults = UserDefaults(suiteName: suite) else { return .standard }
         return defaults
     }()
 
@@ -74,7 +76,7 @@ nonisolated struct AppSettings: Sendable {
             excludedTypes: (defaults.stringArray(forKey: "excludedTypes")
                 ?? defaults.string(forKey: "excludedTypes").map { [$0] } ?? [])
                 .flatMap { IndexOptions.extensions($0) }.sorted(),
-            indexDirectory: defaults.string(forKey: "indexDir").map(folderURL) ?? defaultIndexDirectory,
+            indexDirectory: defaults.string(forKey: AppDefaults.indexFolder).map(folderURL) ?? defaultIndexDirectory,
             modelsDirectory: defaults.string(forKey: "modelsDir").map(folderURL) ?? ModelFiles.installed,
             hotkey: defaults.string(forKey: "hotkey") ?? defaultHotkey,
             indexOnBattery: defaults.object(forKey: "indexOnBattery") == nil || defaults.bool(forKey: "indexOnBattery"),
@@ -93,8 +95,9 @@ nonisolated struct AppSettings: Sendable {
             codeQuietSeconds: defaults.object(forKey: "codeQuietSeconds") == nil
                 ? 60 : max(1, defaults.double(forKey: "codeQuietSeconds")),
             includeHiddenPhotos: defaults.bool(forKey: "includeHiddenPhotos"),
-            myDevicesAdded: defaults.stringArray(forKey: "myDevicesAdded") ?? [],
-            myDevicesRemoved: defaults.stringArray(forKey: "myDevicesRemoved") ?? [])
+            myDevicesAdded: defaults.stringArray(forKey: AppDefaults.myDevicesAdded) ?? [],
+            myDevicesRemoved: defaults.stringArray(forKey: AppDefaults.myDevicesRemoved) ?? [],
+            aiAccess: AIAccess(defaults))
     }
 
     /// A list of folders: a plist array, or paths joined with ":" (the form launch arguments use).
@@ -155,8 +158,18 @@ nonisolated struct AppSettings: Sendable {
     }
 
     static func save(myDevicesAdded: [String], removed: [String]) {
-        defaults.set(myDevicesAdded, forKey: "myDevicesAdded")
-        defaults.set(removed, forKey: "myDevicesRemoved")
+        defaults.set(myDevicesAdded, forKey: AppDefaults.myDevicesAdded)
+        defaults.set(removed, forKey: AppDefaults.myDevicesRemoved)
+    }
+
+    static func save(aiAccess: AIAccess) {
+        aiAccess.save(to: defaults)
+    }
+
+    /// The defaults suite this run keeps its settings in (`-defaultsSuite`), nil for the app's own domain: an AI app's
+    /// `digup mcp` has to be told it to read the same settings.
+    static var suite: String? {
+        UserDefaults.standard.string(forKey: "defaultsSuite").flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// Expands "~" and resolves symlinks, so crawled paths match the paths FSEvents reports.

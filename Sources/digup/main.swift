@@ -34,6 +34,9 @@ let usage = """
                                               see SearchService): for shells that can't link DigUpKit
       digup download-model [--to DIR]         the model files, from the Hugging Face cache or downloaded with
                                               resume, checked (JSON lines: see DownloadModel)
+      digup mcp [--defaults-suite NAME]       DigUp for AI apps: an MCP server on stdin and stdout (see MCPServer),
+                                              answering only as far as Settings → AI apps allows (in the app's
+                                              settings, or the suite a dev run of the app was started with)
 
     Options:
       --index DIR          index folder (default: DigUp's Application Support folder; see `digup status`)
@@ -85,7 +88,8 @@ struct Arguments {
     var flags: Set<String> = []
     static let valued: Set<String> = ["--index", "--limit", "--kind", "-n", "--zgate", "--word-weight", "--new-limit",
                                       "--linger", "--shot-tokens", "--code-stretch", "--encoder-idle", "--to",
-                                      "--memory-limit", "--time-limit", "--tries", "--when-quiet", "--within"]
+                                      "--memory-limit", "--time-limit", "--tries", "--when-quiet", "--within",
+                                      "--defaults-suite"]
     static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude", "--with",
                                         "--album", "--origin", "--camera", "--shot-on"]
 
@@ -257,16 +261,11 @@ func duration(_ seconds: Double) -> String {
     }
 }
 
-func clock(_ seconds: Double) -> String {
-    let total = Int(seconds)
-    return total >= 3600 ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
-                         : String(format: "%d:%02d", total / 60, total % 60)
-}
-
 func location(_ hit: SearchHit) -> String {
     switch hit.segment {
     case .page, .pageImage: hit.loc.map { "p. \(Int($0))" } ?? ""
-    case .audio, .frame: hit.loc.map { "at \(clock($0))" + (hit.segment == .audio ? " (sound)" : "") } ?? ""
+    case .audio, .frame:
+        hit.loc.map { "at \(MatchDescription.clock($0))" + (hit.segment == .audio ? " (sound)" : "") } ?? ""
     case .chunk: hit.loc.map { "part \(Int($0))" } ?? ""
     case .lines: hit.loc.map { "lines \(Int($0))–\(Int(hit.locEnd ?? $0))" + (hit.focus.map { ", opens at \(Int($0))" } ?? "") } ?? ""
     case .cells: hit.loc.map { $0 == hit.locEnd ? "cell \(Int($0))" : "cells \(Int($0))–\(Int(hit.locEnd ?? $0))" } ?? ""
@@ -439,17 +438,25 @@ func statesLine(_ states: [String: Int]) -> String {
     states.sorted { $0.key < $1.key }.map { "\($0.value) \($0.key)" }.joined(separator: " · ")
 }
 
-/// Embeds queries with the text model alone (0.3B params, ~0.25 GB): the query encoder. `prompt`: the search's
-/// (`Prompts.query`, or `Prompts.codeQuery` for the code index).
+/// Embeds queries with a running query encoder (`makeEmbedder(textOnly: true…)`: the text model alone, 0.3B params,
+/// ~0.25 GB). `prompt`: the search's (`Prompts.query`, or `Prompts.codeQuery` for the code index). Vectors of another
+/// model or runtime than the index's can't be compared with it: that's an error.
+func queryVectors(_ queries: [String], searcher: Searcher, encoder: any Embedder,
+                  prompt: (String) -> String = Prompts.query) throws -> [[Float]] {
+    if let source = searcher.vectorSource, source != encoder.info.vectorSource {
+        throw CLIError("index vectors come from \(source) but the query encoder is \(encoder.info.vectorSource)")
+    }
+    return try encoder.embedTexts(queries.map(prompt))
+}
+
+/// `queryVectors` with an encoder started for these queries alone (`digup search`, `digup eval`); nil when the index
+/// has no vectors to compare them with.
 func queryVectors(_ queries: [String], store: IndexStore, searcher: Searcher,
                   prompt: (String) -> String = Prompts.query) throws -> [[Float]]? {
     guard searcher.vectorCount > 0, !queries.isEmpty else { return nil }
-    let worker = try makeEmbedder(textOnly: true, log: store.directory.appendingPathComponent("worker-query.log"))
-    defer { worker.close() }
-    if let source = searcher.vectorSource, source != worker.info.vectorSource {
-        throw CLIError("index vectors come from \(source) but the query encoder is \(worker.info.vectorSource)")
-    }
-    return try worker.embedTexts(queries.map(prompt))
+    let encoder = try makeEmbedder(textOnly: true, log: store.directory.appendingPathComponent("worker-query.log"))
+    defer { encoder.close() }
+    return try queryVectors(queries, searcher: searcher, encoder: encoder, prompt: prompt)
 }
 
 func search(_ args: Arguments) throws {
@@ -817,7 +824,7 @@ do {
     #if !os(macOS)
     // Queries are a few words: the processor encodes one in hundredths of a second, and starts sooner than a GPU (an RTX
     // 4050 laptop: a search from scratch 1.8 s on its i7, 3.0 s on the GPU under Vulkan). Indexing keeps the GPU.
-    if command == "search-service" {
+    if command == "search-service" || command == "mcp" {
         LlamaEmbedder.cpuOnly = true
     }
     #endif
@@ -840,6 +847,7 @@ do {
     case "worker": exit(workerService(args))
     case "search-service": exit(try searchService(args))
     case "download-model": exit(try downloadModel(args))
+    case "mcp": exit(mcpServer(args))
     default:
         print(usage)
         exit(2)

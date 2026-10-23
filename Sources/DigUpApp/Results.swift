@@ -120,15 +120,7 @@ struct ResultRow: Identifiable, Equatable {
     }
 
     /// The lines (or a notebook's cells) of code that matched: "lines 12–40", "cell 3".
-    var span: String? {
-        guard let loc else { return nil }
-        let (first, last) = (Int(loc), Int(locEnd ?? loc))
-        switch segment {
-        case .lines: return first == last ? "line \(first)" : "lines \(first)–\(last)"
-        case .cells: return first == last ? "cell \(first)" : "cells \(first)–\(last)"
-        default: return nil
-        }
-    }
+    var span: String? { MatchDescription.span(segment, loc: loc, locEnd: locEnd) }
 
     /// What the preview shows: the moment, page or still that matched, else the file.
     var previewKey: String { "\(id)|\(loc.map { "\($0)" } ?? "")|\(photos?.still ?? "")" }
@@ -137,30 +129,8 @@ struct ResultRow: Identifiable, Equatable {
 
     /// Why it's here, in a few words: "Matches the picture", "Matches the frame at 0:06".
     var reason: String {
-        guard matchedMeaning else {
-            // Photos' words: a person's name, a place, a keyword or an album.
-            if matchedWords, segment == .photosInfo { return "Has your words in Photos" }
-            if matchedWords { return "Has your words" }
-            return listed ? "Fits your filters" : "Matches its name"
-        }
-        let place = loc.map(Self.clock) ?? ""
-        let page = loc.map { "page \(Int($0))" } ?? "a page"
-        switch segment {
-        case .image: return kind == .screenshot ? "Matches what's on screen" : "Matches the picture"
-        case .ocr: return "Matches the text in it"
-        case .frame:
-            if kind == .image { return "Matches a frame of the animation" }
-            if photos?.reading == .stills { return "Matches one of Photos' stills of it" }
-            if photos?.reading == .poster { return "Matches its poster" }
-            return "Matches the frame at \(place)"
-        case .audio: return kind == .video ? "Matches the sound at \(place)" : "Matches what's heard at \(place)"
-        case .page: return "Matches the text on \(page)"
-        case .pageImage: return "Matches \(page)"
-        case .chunk: return "Matches its text"
-        case .name: return "Matches its name"
-        case .photosInfo: return "Matches what Photos knows about it"
-        case .lines, .cells: return "Matches \(span ?? "the code")"
-        }
+        MatchDescription.reason(segment, kind: kind, loc: loc, locEnd: locEnd, meaning: matchedMeaning,
+                                words: matchedWords, listed: listed, reading: photos?.reading)
     }
 
     /// "Screenshot · Oct 1, 2026 · 1440 × 900 · 2.1 MB", "PDF · … · 463 pages, 120 read so far · 23 MB",
@@ -199,11 +169,8 @@ struct ResultRow: Identifiable, Equatable {
         return parts.joined(separator: " · ")
     }
 
-    static func clock(_ seconds: Double) -> String {
-        let total = Int(seconds)
-        return total >= 3600 ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
-                             : String(format: "%d:%02d", total / 60, total % 60)
-    }
+    /// A time into a recording ("0:06"), as the kit writes it for `digup mcp` too.
+    static func clock(_ seconds: Double) -> String { MatchDescription.clock(seconds) }
 }
 
 /// How results are grouped in the panel, and the kind filters in the window. A saved search keeps its kind by these

@@ -4,12 +4,13 @@ import Observation
 import SwiftUI
 
 enum SettingsTab: String, CaseIterable {
-    case general, shortcuts, folders, photos, code, storage
+    case general, shortcuts, ai, folders, photos, code, storage
 
     var title: String {
         switch self {
         case .general: "General"
         case .shortcuts: "Shortcuts"
+        case .ai: "AI apps"
         case .folders: "Folders"
         case .photos: "Photos"
         case .code: "Code"
@@ -21,6 +22,7 @@ enum SettingsTab: String, CaseIterable {
         switch self {
         case .general: "gearshape"
         case .shortcuts: "command"
+        case .ai: "sparkles"
         case .folders: "folder"
         case .photos: "photo.on.rectangle.angled"
         case .code: "chevron.left.forwardslash.chevron.right"
@@ -131,6 +133,8 @@ final class SettingsState {
     var launchAtLogin = false
     var loginProblem: String?
     var checksForUpdates = false
+    /// The last calls AI apps made through `digup mcp` (AI apps), oldest first.
+    private(set) var aiCalls: [AICall] = []
     @ObservationIgnored let app: AppController
     @ObservationIgnored var selectTab: (SettingsTab) -> Void = { _ in }
     @ObservationIgnored var addFolders: () -> Void = {}
@@ -150,6 +154,7 @@ final class SettingsState {
         launchAtLogin = app.launchesAtLogin
         checksForUpdates = app.updates.automaticallyChecks
         indexSize = app.engine.indexSize
+        refreshAICalls()
         codeIndexSize = app.engine.codeIndexSize
         codeSummaries = await app.engine.rootSummaries(code: true)
         summaries = await app.engine.rootSummaries()
@@ -174,6 +179,13 @@ final class SettingsState {
 
     /// Ready to be drawn (debug snapshots wait for this).
     var isLoaded: Bool { summaries != nil }
+
+    /// How many of AI apps' last calls the AI apps tab shows.
+    static let aiCallsShown = 20
+
+    func refreshAICalls() {
+        aiCalls = AICall.last(Self.aiCallsShown, in: model.settings.indexDirectory)
+    }
 
     // MARK: Photos
 
@@ -211,7 +223,7 @@ final class SettingsState {
     }
 
     func isMine(_ camera: IndexStore.PhotosCamera) -> Bool {
-        PhotosChoices.isMine(camera, added: model.settings.myDevicesAdded, removed: model.settings.myDevicesRemoved)
+        camera.isMine(added: model.settings.myDevicesAdded, removed: model.settings.myDevicesRemoved)
     }
     @ObservationIgnored private var estimating: [Process] = []
 
@@ -272,6 +284,7 @@ private struct SettingsPane: View {
                 switch tab {
                 case .general: GeneralSettings(state: state)
                 case .shortcuts: ShortcutsSettings(state: state)
+                case .ai: AIAppsSettings(state: state)
                 case .folders: FolderSettings(state: state)
                 case .photos: PhotosSettings(state: state)
                 case .code: CodeSettings(state: state)

@@ -75,6 +75,21 @@ public final class IndexStore {
         try migrateForkFacts()
     }
 
+    /// Opens an index only to read it (`digup mcp`): nothing is created, migrated or written. An index that isn't
+    /// there, or that the app hasn't brought up to this DigUp's schema yet (it does when it opens it), is refused, not
+    /// changed.
+    public init(readingOnly directory: URL, file name: String = IndexStore.mainFile) throws {
+        self.directory = directory
+        file = directory.appendingPathComponent(name)
+        db = try Database(readingOnly: file.path)
+        var version: Int64 = 0
+        try db.query("PRAGMA user_version") { version = $0.int(0) }
+        guard version == Self.schemaVersion, try forkFactsStepped() >= Self.forkFactsVersion else {
+            throw Database.Failure(message: "\(file.path) isn't an index this DigUp can read as it is (open DigUp to "
+                                   + "bring it up to date)")
+        }
+    }
+
     /// Bytes on disk: the database and its write-ahead log.
     public static func size(of file: URL) -> Int64 {
         [file.path, file.path + "-wal"].reduce(0) { total, path in
@@ -357,6 +372,65 @@ public final class IndexStore {
             }
         }
         return out
+    }
+
+    /// The indexed file at `path` when the filter keeps it (`digup mcp`: one an AI app may see), else nil, as for a
+    /// file the index doesn't have.
+    public func file(at path: String, keptBy filter: SearchFilter) throws -> FileRecord? {
+        let kept = filter.query
+        var found: FileRecord?
+        try db.query("SELECT \(Self.fileColumns) FROM files WHERE path = ?" + (kept.map { " AND id IN (\($0.sql))" } ?? ""),
+                     [.text(path)] + (kept?.values ?? [])) { found = Self.record($0) }
+        return found
+    }
+
+    /// One part of a file's words as indexing read them: a page, a passage, the text in a picture, what Photos knows
+    /// about it, a stretch of code.
+    public struct Words: Sendable, Equatable {
+        public let segment: SegmentKind
+        /// The page, the passage's number, or a stretch of code's first line (or cell); nil for a picture's text and
+        /// Photos' words.
+        public let loc: Double?
+        public let locEnd: Double?
+        public let text: String
+    }
+
+    /// The segments that hold a file's words, as an SQL list.
+    private static let wordSegments = [SegmentKind.page, .pageImage, .chunk, .ocr, .photosInfo, .lines, .cells]
+        .map { "'\($0.rawValue)'" }.joined(separator: ",")
+
+    /// The words read from the file at `path`, in order, when the filter keeps it (`digup mcp`'s `read_text`); nil for
+    /// a file the index doesn't have or the filter leaves out.
+    public func words(of path: String, keptBy filter: SearchFilter) throws -> [Words]? {
+        guard let file = try file(at: path, keptBy: filter) else { return nil }
+        var words: [Words] = []
+        try db.query("""
+            SELECT s.kind, s.loc, s.loc_end, coalesce(fts.original, fts.body) FROM segments s JOIN fts ON fts.rowid = s.id
+            WHERE s.file = ? AND s.kind IN (\(Self.wordSegments))
+            ORDER BY s.kind != '\(SegmentKind.photosInfo.rawValue)', s.loc IS NOT NULL, s.loc, s.id
+            """, [.int(file.id)]) { row in
+            guard let segment = SegmentKind(rawValue: row.text(0) ?? ""), let text = row.text(3), !text.isEmpty else {
+                return
+            }
+            // Photos' words keep the date taken as their loc: not a place in the file.
+            let placed = segment != .photosInfo
+            words.append(Words(segment: segment, loc: placed && !row.isNull(1) ? row.double(1) : nil,
+                               locEnd: placed && !row.isNull(2) ? row.double(2) : nil, text: text))
+        }
+        return words
+    }
+
+    /// The indexed files a filter keeps, by kind and state ("done", "pending"…): what `digup mcp` says of the index,
+    /// only what AI apps may see.
+    public func counts(keeping filter: SearchFilter) throws -> [FileKind: [String: Int]] {
+        let kept = filter.query
+        var counts: [FileKind: [String: Int]] = [:]
+        try db.query("SELECT kind, state, COUNT(*) FROM files" + (kept.map { " WHERE id IN (\($0.sql))" } ?? "")
+                     + " GROUP BY kind, state", kept?.values ?? []) { row in
+            guard let kind = FileKind(rawValue: row.text(0) ?? "") else { return }
+            counts[kind, default: [:]][row.text(1) ?? "", default: 0] += Int(row.int(2))
+        }
+        return counts
     }
 
     /// Adds a file (pending) and returns its id.
@@ -915,6 +989,21 @@ public final class IndexStore {
             self.fromCamera = fromCamera
             self.unknownOrigin = unknownOrigin
         }
+
+        /// The rule behind "Shot on my devices" (approved 2026-10-22): a device whose camera saved something is the
+        /// user's unless they took it off (the app's `myDevicesRemoved`); any other is theirs only if they added it
+        /// (`myDevicesAdded`).
+        public func isMine(added: [String], removed: [String]) -> Bool {
+            (fromCamera > 0 || added.contains(model)) && !removed.contains(model)
+        }
+
+        /// The user's devices by that rule (what `SearchFilter.shotOn` takes), most files first; one they added that no
+        /// indexed picture names (yet, or any more) is on it too, last. Keeping their changes rather than the list lets
+        /// next year's phone join by itself.
+        public static func mine(of cameras: [PhotosCamera], added: [String], removed: [String]) -> [String] {
+            cameras.filter { $0.isMine(added: added, removed: removed) }.map(\.model)
+                + added.filter { name in !removed.contains(name) && !cameras.contains { $0.model == name } }
+        }
     }
 
     /// The devices that took the indexed libraries' pictures and videos, the one with most files first.
@@ -943,6 +1032,17 @@ public final class IndexStore {
             paths[asset.uuid] = path
         }
         return paths
+    }
+
+    /// The indexed files of the Photos libraries, by library (as the files spell it): each one's path and the asset it
+    /// shows.
+    public func photosFiles() throws -> [String: [(path: String, uuid: String)]] {
+        var files: [String: [(path: String, uuid: String)]] = [:]
+        try db.query("SELECT f.path FROM photos_assets a JOIN files f ON f.id = a.file") { row in
+            guard let path = row.text(0), let asset = PhotosLibrary.asset(ofFile: path) else { return }
+            files[asset.library, default: []].append((path, asset.uuid))
+        }
+        return files
     }
 
     /// The library videos read from what Photos keeps of them while their originals are in iCloud, with what that is

@@ -42,7 +42,7 @@ import SwiftUI
 ///                             -debugMenuViewAfter seconds
 ///     -debugReshow N          after the query's final results, hide and show the panel N times (logs show times)
 ///     -debugWindow PAGE       open a window instead of the panel and snapshot it: search (with -debugQuery),
-///                             settings:general|shortcuts|folders|photos|code|storage, settings:add (Folders with Add Folders open),
+///                             settings:general|shortcuts|ai|folders|photos|code|storage, settings:add (Folders with Add Folders open),
 ///                             settings:addcode (Code with its folders' sheet open),
 ///                             onboarding:welcome|folders|code|shortcut|ready
 ///                             (-debugCloseWindow YES closes it afterwards, to measure what closing gives back;

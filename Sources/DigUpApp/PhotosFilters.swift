@@ -8,18 +8,10 @@ struct PhotosChoices: Sendable, Equatable {
     /// The devices that took the libraries' pictures (`IndexStore.photosCameras`), most files first.
     var cameras: [IndexStore.PhotosCamera] = []
 
-    /// "Shot on my devices": every device a camera saved something from into a library, plus the ones the user added,
-    /// minus the ones they took off (`AppSettings.myDevicesAdded`, `myDevicesRemoved`), most files first; an added one
-    /// no indexed picture names (yet, or any more) is on it too, last.
+    /// "Shot on my devices" with Settings → Photos → My devices' changes (`AppSettings.myDevicesAdded`,
+    /// `myDevicesRemoved`), by the kit's rule (`IndexStore.PhotosCamera.mine`).
     func devices(added: [String], removed: [String]) -> [String] {
-        let known = cameras.filter { Self.isMine($0, added: added, removed: removed) }.map(\.model)
-        return known + added.filter { name in !removed.contains(name) && !cameras.contains { $0.model == name } }
-    }
-
-    /// The rule behind the list (approved 2026-10-22): a device whose camera saved something is the user's unless
-    /// they took it off; any other is theirs only if they added it.
-    static func isMine(_ camera: IndexStore.PhotosCamera, added: [String], removed: [String]) -> Bool {
-        (camera.fromCamera > 0 || added.contains(camera.model)) && !removed.contains(camera.model)
+        IndexStore.PhotosCamera.mine(of: cameras, added: added, removed: removed)
     }
 
     /// The devices worth a switch in Settings: one whose camera saved something, or that took older pictures with
