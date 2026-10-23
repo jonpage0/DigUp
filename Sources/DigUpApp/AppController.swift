@@ -92,7 +92,9 @@ final class AppController {
         }
 
         Previews.shared.passage = { [engine] id, code in await engine.text(ofSegment: id, code: code) }
-        Previews.shared.moments = { [engine] path, text in await engine.moments(of: path, matching: text) }
+        Previews.shared.moments = { [engine] path, text, matchBy in
+            await engine.moments(of: path, matching: text, matchBy: matchBy)
+        }
         CodeEditor.current = CodeEditor.chosen(model.settings.codeEditor)
         SensitiveBlur.shared.position = model.settings.blurSensitive
         download.onReady = { [weak self] in self?.engine.modelArrived() }

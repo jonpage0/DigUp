@@ -499,7 +499,7 @@ private struct ShortcutsSettings: View {
             action: "Only screenshots, images, documents, video or audio"),
         Key(caps: ["⌘", "7"], spoken: "Command 7", action: "Code (when code search is on)"),
         Key(caps: ["Tab"], spoken: "Tab", action: "Take the suggested filter (a person, an album) for the words you typed"),
-        Key(caps: ["⌫"], spoken: "Delete", action: "With nothing typed, take the last must-have word or filter off"),
+        Key(caps: ["⌫"], spoken: "Delete", action: "With nothing typed, take the last filter off"),
         Key(caps: ["⌘", "S"], spoken: "Command S",
             action: "Save this search, with its filters (the Saved menu, the bookmark beside the field, opens it again)"),
         Key(caps: ["⌘", ","], spoken: "Command comma", action: "Settings"),
@@ -510,7 +510,6 @@ private struct ShortcutsSettings: View {
         Key(caps: ["Tab"], spoken: "Tab",
             action: "Open the saved search whose name you're typing in the search window (↩ too, before you've "
                 + "arrowed to a result)"),
-        Key(caps: ["⌫"], spoken: "Delete", action: "With nothing typed, take the last must-have word off"),
     ]
 
     /// What the search field reads besides words: a required word or phrase (`RequiredWords`).
@@ -552,8 +551,8 @@ private struct ShortcutsSettings: View {
             } header: {
                 Text("Search syntax")
             } footer: {
-                Text("A word that must be there shows as “must have” in the search field (its × takes it off). To make "
-                     + "one required, you can also select it in the field and right-click: Require.")
+                Text("In the search field a required word is highlighted; delete its + and it's an ordinary word "
+                     + "again. You can also right-click a word (or select several) and choose Require.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.leading)

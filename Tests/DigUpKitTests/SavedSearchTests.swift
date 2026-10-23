@@ -20,7 +20,8 @@ import Testing
         Data(#"{ "version": 1, "searches": [\#(entries.joined(separator: ", "))] }"#.utf8)
     }
 
-    /// The approved example (PHOTOS-FACTS-SCHEMA.md, "saved searches"), with every element added since.
+    /// The approved example (PHOTOS-FACTS-SCHEMA.md, "saved searches"), with every element added since: Match by
+    /// written by hand, out of its order.
     static let tati = """
         { "id": "5D0C2E8A-6A3B-4C55-9B0E-2F7F7C1E4A10", "name": "Tati at the beach", "query": "+beach",
           "kind": "images",
@@ -30,7 +31,8 @@ import Testing
                          "photos": [ { "library": "\(library)", "uuid": "A-FLORIDA" } ] } },
             { "photosFavorites": true }, { "digupFavorites": true }, { "from": "mine" },
             { "area": { "south": 25.10, "west": -80.90, "north": 26.20, "east": -79.80 } },
-            { "sensitive": true }, { "length": { "atLeast": 15, "under": 60 } }, { "shape": "16:9" } ],
+            { "sensitive": true }, { "length": { "atLeast": 15, "under": 60 } }, { "shape": "16:9" },
+            { "matchBy": ["text", "visual"] } ],
           "saved": "2026-10-22T19:55:00Z" }
         """
 
@@ -42,21 +44,28 @@ import Testing
     @Test func aFileIsReadOnlyInTheApprovedShape() throws {
         let searches = try SavedSearch.searches(in: Self.file(Self.entry(), Self.tati))
         #expect(searches.map(\.name) == ["a search", "Tati at the beach"])
-        #expect(searches[1].kind == .images && searches[1].filters.count == 9)
+        #expect(searches[1].kind == .images && searches[1].filters.count == 10)
         #expect(searches[1].filters[4] == .from(.mine) && searches[1].filters[6] == .sensitive)
-        // Written back, it reads the same.
-        #expect(try SavedSearch.searches(in: SavedSearch.data(searches)) == searches)
+        #expect(searches[1].filters[9] == .matchBy(try #require(SearchFilter.MatchBy([.visual, .text]))))
+        // Written back, it reads the same, Match by in its order.
+        let written = try SavedSearch.data(searches)
+        #expect(try SavedSearch.searches(in: written) == searches)
+        let file = try #require(try JSONSerialization.jsonObject(with: written) as? [String: Any])
+        let filters = try #require(((file["searches"] as? [[String: Any]])?[1])?["filters"] as? [[String: Any]])
+        #expect(filters.last?["matchBy"] as? [String] == ["visual", "text"])
         // Any other shape isn't read, so the app leaves the file alone.
         let newer = String(decoding: Self.file(Self.entry()), as: UTF8.self)
             .replacingOccurrences(of: #""version": 1"#, with: #""version": 2"#)
         #expect(throws: SavedSearch.FileError.version(2)) { try SavedSearch.searches(in: Data(newer.utf8)) }
         let id = UUID().uuidString
         for notWellFormed in [Self.file(Self.entry(#"{ "from": "mine" }, { "from": "saved" }"#)),
+                              Self.file(Self.entry(#"{ "matchBy": ["text"] }, { "matchBy": ["spoken"] }"#)),
                               Self.file(Self.entry(name: "")), Self.file(Self.entry(id: id), Self.entry(id: id))] {
             #expect(throws: SavedSearch.FileError.notWellFormed) { try SavedSearch.searches(in: notWellFormed) }
         }
         for filters in [#"{ "photosFavorites": true, "digupFavorites": true }"#, #"{ "photosFavorites": false }"#,
-                        #"{ "smile": true }"#, #"{ "shape": "16:0" }"#] {
+                        #"{ "smile": true }"#, #"{ "shape": "16:0" }"#, #"{ "matchBy": [] }"#,
+                        #"{ "matchBy": ["text", "text"] }"#] {
             #expect(throws: DecodingError.self) { try SavedSearch.searches(in: Self.file(Self.entry(filters))) }
         }
     }
@@ -83,7 +92,10 @@ import Testing
         #expect(filter.sensitive == .revealing)
         #expect(filter.length == SearchFilter.Length(atLeast: 15, under: 60))
         #expect(filter.shape == .ratio(width: 16, height: 9))
+        #expect(filter.matchBy == SearchFilter.MatchBy([.visual, .text]))
         #expect(saved.kinds == [.image] && !saved.isCode)
+        // Match by keeps to parts of what an AI app sees: no switch keeps it from one.
+        #expect(Self.search([.matchBy(try #require(SearchFilter.MatchBy([.spoken])))]).aiUses.isEmpty)
         // Gone from Photos: the person keeps nothing (never everyone), and the album adds nothing.
         let gone = saved.searchFilter(people: [], albums: [], myDevices: [], blurring: .nudityOnly, favorites: { [] })
         #expect(gone.people == [[]] && gone.albums == [] && gone.sensitive == .nudityOnly && gone.shotOn == [])
@@ -103,7 +115,7 @@ import Testing
                                              folders: ["Trips"], files: 9)]
         // Its people and albums as Photos has them now; the others as their tokens say.
         let rest = "Photos Favorites · Favorites · Shot on my devices · In the map's area · Sensitive · "
-            + "15 s – 1 min · 16:9"
+            + "15 s – 1 min · 16:9 · Match: Visual + Text"
         #expect(saved.summary(people: people, albums: albums) == "“+beach” · Images · Tati · Florida 2024 · " + rest)
         // As saved, when they aren't there now.
         #expect(saved.summary(people: [], albums: []) == "“+beach” · Images · Tatiana Rotari · Florida · " + rest)

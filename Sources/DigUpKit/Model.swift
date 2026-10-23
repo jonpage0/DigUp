@@ -57,8 +57,8 @@ public enum ResultGroupKind: String, CaseIterable, Codable, Sendable {
     }
 }
 
-/// One searchable piece of a file.
-public enum SegmentKind: String, Sendable {
+/// One searchable piece of a file. Each is a part Match by can choose (`SearchFilter.Part`).
+public enum SegmentKind: String, Sendable, CaseIterable {
     case name             // file name + folder names (keyword search only)
     case image            // the image itself
     case ocr              // the words in a picture: Apple Vision's reading of a screenshot, or what Photos read in one

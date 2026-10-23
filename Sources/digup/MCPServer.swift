@@ -465,7 +465,7 @@ final class MCPServer {
     private func searchFiles(_ arguments: [String: Any], access: AIAccess) throws -> Outcome {
         let input = try Input(arguments, allowed: ["query", "kind", "people", "albums", "photos_favorites",
                                                    "digup_favorites", "from", "taken_within", "length", "shape",
-                                                   "sensitive", "saved", "limit"])
+                                                   "sensitive", "match_by", "saved", "limit"])
         let limit = try input.integer("limit", in: 1...Self.maxLimit) ?? Self.defaultLimit
         if let name = try input.string("saved") {
             let beside = input.given.subtracting(["saved", "limit"])
@@ -485,13 +485,15 @@ final class MCPServer {
         let area = try input.area("taken_within")
         let length = try input.length("length"), shape = try input.shape("shape")
         let sensitive = try input.bool("sensitive") ?? false
+        let matchBy = try input.matchBy("match_by")
 
         let codeWords = CodeQuery.text(of: query)
         if kind == Self.kindNames[.code] || codeWords != nil {
             guard access.code else { return .refused(.code) }
             guard people == nil, albums == nil, !photosFavorites, !digupFavorites, from == nil, area == nil,
-                  length == nil, shape == nil, !sensitive else {
-                throw InputError("Code search takes no Photos, favorites, map, length, shape or sensitive filters.")
+                  length == nil, shape == nil, !sensitive, matchBy == nil else {
+                throw InputError("Code search takes no Photos, favorites, map, length, shape, sensitive or match_by "
+                                 + "filters.")
             }
             query = codeWords ?? query   // none ("code:" alone, or the kind alone): the newest code files
             guard let code = try codeIndex() else {
@@ -505,7 +507,7 @@ final class MCPServer {
         if photosOnly, !access.photos { return .refused(.photos) }
         if sensitive, !access.allows(.sensitive) { return .refused(.sensitiveFilter) }
         guard !query.isEmpty || photosOnly || digupFavorites || area != nil || length != nil || shape != nil
-                || sensitive || kind != nil else {
+                || sensitive || matchBy != nil || kind != nil else {
             throw InputError("Say what to look for (query), or give a kind or a filter to list what it keeps.")
         }
         let main = try mainIndex()
@@ -542,7 +544,7 @@ final class MCPServer {
         }
         if digupFavorites { filter.paths = try favoritePaths(in: store) }
         filter.area = area
-        (filter.length, filter.shape) = (length, shape)
+        (filter.length, filter.shape, filter.matchBy) = (length, shape, matchBy)
         if sensitive { filter.sensitive = SensitivePosition(settings).filterPosition }
         let kinds = kind.flatMap { name in Self.kindNames.first { $0.value == name }?.key }.map { Set([$0]) }
         return try search(query, in: main, kinds: kinds, filter: filter, limit: limit, prompt: Prompts.query)
@@ -1027,6 +1029,17 @@ final class MCPServer {
             }
             return shape
         }
+
+        /// Parts of a file by name (`SearchFilter.MatchBy(choosing:)`): at least one, each once, in any order.
+        func matchBy(_ key: String) throws -> SearchFilter.MatchBy? {
+            guard let value = value(key) else { return nil }
+            guard let names = value as? [String], let matchBy = SearchFilter.MatchBy(choosing: names) else {
+                throw InputError("\(key) is a list of "
+                                 + SearchFilter.Part.allCases.map(\.rawValue).joined(separator: ", ")
+                                 + ": at least one, each once.")
+            }
+            return matchBy
+        }
     }
 
     // MARK: The tools' descriptions
@@ -1095,6 +1108,17 @@ final class MCPServer {
                       "description": "Only pictures and videos of this shape as they're shown: portrait, landscape, "
                         + "square (sides within 5 %), wide (2:1 or wider: panoramas, cinema), or an exact ratio W:H "
                         + "matched within 2 %, its orientation included (16:9 landscape, 9:16 portrait, 4:3, 3:2)."],
+            "match_by": ["type": "array", "minItems": 1, "uniqueItems": true,
+                         "items": ["type": "string", "enum": SearchFilter.Part.allCases.map(\.rawValue)],
+                         "description": "Only these parts of a file may make it match, by what they mean or by their "
+                            + "words (a +word in the query must be in one of them too), and why it matched and the "
+                            + "words quoted come from one of them: "
+                            + "visual (pictures, video frames, PDF pages seen as pictures), audio (sound, a video's "
+                            + "soundtrack), spoken (what's said in recordings and videos), text (documents, PDF text, "
+                            + "words read in pictures and screenshots, file and folder names), tags (what Photos says "
+                            + "of an item: its labels, keywords, title, caption, people, albums and places). Without "
+                            + "a query, lists the files that have one of them (spoken alone: recordings with speech). "
+                            + "Left out: every part."],
             "saved": ["type": "string",
                       "description": "Runs one of the user's saved searches by its name (list_choices names them) "
                         + "with its own words, kind and filters, as DigUp's window runs it now. Only limit goes "
@@ -1117,7 +1141,8 @@ final class MCPServer {
                     + "that match ({where, why}, best first). Look at one with get_picture, read it with read_text. "
                     + "Without words, a kind or the filters list what they keep, newest first. A + before a word or a "
                     + "quoted phrase in the query (+beach, +\"red car\") keeps only results that have it, in their "
-                    + "words or by what they show.",
+                    + "words or by what they show. match_by keeps the search to what's seen, heard, said, written, or "
+                    + "tagged in Photos.",
                  properties: searchProperties),
             tool("read_text", title: "Read a file's words",
                  description: "The words DigUp read from one file search_files returned: a document's text, a PDF's "

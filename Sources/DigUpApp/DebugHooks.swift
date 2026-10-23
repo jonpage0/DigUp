@@ -9,8 +9,7 @@ import SwiftUI
 ///     -debugOffscreen YES     build and draw windows and the panel but never show them or activate the app, so
 ///                             snapshot runs don't take the keyboard from whoever is at the Mac (no key tests then)
 ///     -debugMenu YES          log the menu once the index is open, then run Pause and Resume and log it again
-///     -debugQuery "<text>"    open the panel and search for <text>, as if it had been typed ("": the empty panel; a
-///                             `+word ` in it becomes a must-have token, as typed)
+///     -debugQuery "<text>"    open the panel and search for <text>, as if it had been typed ("": the empty panel)
 ///     -debugSnapshot <png>    once the final results and their pictures are showing, draw the panel into <png>
 ///     -debugKeys "down,space,esc,cmd+c"   then press these keys (posted through the app's own event queue, so
 ///                             no Accessibility permission is needed) and log what each one did. ⌘C goes to a
@@ -54,15 +53,21 @@ import SwiftUI
 ///                             checkbox) or click:NAME/SUB (a subfolder's), add:PATH and skip:PATH (as picked in the
 ///                             open panel), unskip:PATH, types:heic,txt. NAME is the end of a listed folder's path.
 ///     -debugAdd YES           after the snapshot, press Add Folders' Add (or the code sheet's) and log what it applied
-///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot
+///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot,
+///                             after its words, as after typing them
 ///     -debugMap YES           with -debugWindow search: the map shows above the results
 ///     -debugArea "lat1,lon1,lat2,lon2"   with -debugWindow search: results kept to that box of the map
-///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup|sensitive|length:15..60|shape:16:9"   with
-///                             -debugWindow search: these filters on (a Photos library's people and albums, by name;
-///                             Photos' favorites; DigUp's own; the Sensitive filter; a Length, in seconds as `digup
-///                             search --length` takes it; a Shape, as `--shape`)
+///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup|sensitive|length:15..60|shape:16:9|matchBy:text"
+///                             with -debugWindow search: these filters on (a Photos library's people and albums, by
+///                             name; Photos' favorites; DigUp's own; the Sensitive filter; a Length, in seconds as
+///                             `digup search --length` takes it; a Shape, as `--shape`; Match by, as `--match-by`
+///                             takes it: matchBy:spoken,text)
 ///     -debugSaved "<name>"    with -debugWindow search: then open the saved search of that name, as the Saved menu
 ///                             would
+///     -debugSavedNext "<name>"   with -debugWindow search: after the snapshot (and -debugMoment's pick), open the
+///                             saved search of that name in the same window, log what the selected result shows, and
+///                             draw the window into <snapshot>-next.png: what was found or picked for a result under
+///                             one search (another query, or another Match by) mustn't show under the next
 ///     -debugSavedMenu YES     with -debugWindow search: after the snapshot, log the Saved menu's items and draw them
 ///                             into <snapshot>-savedmenu.png (an open menu can't be drawn offscreen, so this draws
 ///                             the items the menu is made from)
@@ -269,7 +274,7 @@ enum DebugHooks {
             }
         }
         panel.show()
-        panel.typed(text)
+        panel.query = text
     }
 
     /// `-debugPlay`: plays `row` from its moment, muted, and logs where playback is 1.5 s later.
@@ -375,8 +380,15 @@ enum DebugHooks {
             default:
                 app.showSearchWindow(query: defaults.string(forKey: "debugQuery") ?? "")
                 let search = app.searchWindow.search
-                // The field with the cursor, as on screen (an offscreen window doesn't take it by itself).
-                if defaults.bool(forKey: "debugFocus") { DispatchQueue.main.async { search.focusField() } }
+                // The field with the cursor, as on screen (an offscreen window doesn't take it by itself), after its
+                // words, as after typing them.
+                if defaults.bool(forKey: "debugFocus") {
+                    DispatchQueue.main.async {
+                        search.focusField()
+                        let editor = search.field?.currentEditor()
+                        editor?.selectedRange = NSRange(location: (editor?.string as NSString? ?? "").length, length: 0)
+                    }
+                }
                 search.showsMap = defaults.bool(forKey: "debugMap")
                 let box = (defaults.string(forKey: "debugArea") ?? "").split(separator: ",").compactMap { Double($0) }
                 if box.count == 4 {
@@ -406,6 +418,8 @@ enum DebugHooks {
                                 search.set(.length(length), on: true)
                             } else if kind == "shape", let shape = SearchFilter.Shape(String(name)) {
                                 search.set(.shape(shape), on: true)
+                            } else if kind == "matchBy", let matchBy = SearchFilter.MatchBy(String(name)) {
+                                search.set(.matchBy(matchBy), on: true)
                             } else {
                                 log("debug: no filter \"\(part)\"")
                             }
@@ -451,13 +465,15 @@ enum DebugHooks {
                             }
                             filtersMenuStep(app)
                             savedSearchSteps(app) {
-                                requireSteps(app) {
-                                    press(keys, app, describe: { windowState(app) }) {
-                                        if defaults.bool(forKey: "debugCloseWindow") {
-                                            close()
-                                            log("window: closed")
+                                savedNextStep(app) {
+                                    requireSteps(app) {
+                                        press(keys, app, describe: { windowState(app) }) {
+                                            if defaults.bool(forKey: "debugCloseWindow") {
+                                                close()
+                                                log("window: closed")
+                                            }
+                                            if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                                         }
-                                        if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                                     }
                                 }
                             }
@@ -479,7 +495,10 @@ enum DebugHooks {
                 switch item {
                 case .toggle(let title, let token, let enabled):
                     (search.has(token) ? "✓ " : "") + title + (enabled ? "" : " (disabled)")
+                case .part(let title, let part, let enabled):
+                    (search.matchBy?.contains(part) == true ? "✓ " : "") + title + (enabled ? "" : " (disabled)")
                 case .submenu(let title, _, let items): "\(title) ▸ [\(described(items))]"
+                case .section(let title, _, let items): "— \(title): [\(described(items))]"
                 case .note(let text): "\(text) (disabled)"
                 case .divider: "—"
                 }
@@ -530,6 +549,34 @@ enum DebugHooks {
                 log("debug: saved as \"\(name)\"; the menu has \(app.savedSearches.searches.map(\.name))")
             }
             done()
+        }
+    }
+
+    /// `-debugSavedNext NAME`: the saved search of that name opened in the window that's showing (its selection kept, as
+    /// a click in the Saved menu keeps it), and once it has searched and the preview has looked for the result's moments
+    /// again, what the selected result shows logged and the window drawn into <snapshot>-next.png.
+    private static func savedNextStep(_ app: AppController, then done: @escaping () -> Void) {
+        guard let name = UserDefaults.standard.string(forKey: "debugSavedNext") else { return done() }
+        guard let saved = app.savedSearches.searches.first(where: { $0.name == name }) else {
+            log("debug: no saved search \"\(name)\"")
+            return done()
+        }
+        let search = app.searchWindow.search
+        Task {
+            await search.open(saved)
+            waitUntil({ search.isSettled && search.hasResults }, deadline: Date().addingTimeInterval(30)) {
+                // The preview looks for the moments of the result it shows when it shows it.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    whenPicturesSettle {
+                        if let row = search.selectedRow {
+                            log("debug: opened \"\(name)\": \(row.name) shows "
+                                + "\"\(PreviewPlayback.shared.placed(row).reason)\"")
+                        }
+                        save("search", { try app.searchWindow.snapshot(to: $0) }, to: snapshotPath("next"))
+                        done()
+                    }
+                }
+            }
         }
     }
 
@@ -596,7 +643,7 @@ enum DebugHooks {
             return report("still \(number) of \(filmstrip.count)")
         }
         Task {
-            let moments = await app.engine.moments(of: row.id, matching: row.query)
+            let moments = await app.engine.moments(of: row.id, matching: row.query, matchBy: row.matchBy)
             guard moments.indices.contains(number - 1) else {
                 log("debug: \(row.name) has \(moments.count) moments, no moment \(number)")
                 return done()
@@ -803,7 +850,7 @@ enum DebugHooks {
         return "cell \(index) of \(rows.count) (\(search.selectedRow?.name ?? "none")) · columns \(search.columns) · "
             + "filter \(search.filter?.title ?? "All") · query \"\(search.query)\" · "
             + "tokens \(search.shownTokens.map { $0.title + ($0.isMissing ? " (not in Photos now)" : "") }) · "
-            + "must have \(search.required) · Quick Look \(previewing ? "open" : "closed")"
+            + "Quick Look \(previewing ? "open" : "closed")"
     }
 
     /// Selects the field's text (⌘A) and types `queries[0]` a key at a time, waits for its final results, then the rest.
@@ -964,13 +1011,13 @@ private struct SavedMenuDrawing: View {
 }
 
 /// The Filters menu's items as a menu shows them, for `-debugFiltersMenu` (an open menu can't be drawn offscreen): a
-/// check by each filter that's on, a submenu's title with ▸ and its items under it, indented, what can't be chosen
-/// dimmed.
+/// check by each filter that's on, a submenu's title with ▸ and its items under it, indented, a section's heading over
+/// its items, what can't be chosen dimmed.
 private struct FiltersMenuDrawing: View {
     let items: [FilterMenuItem]
     let search: SearchModel
 
-    /// Each item with how deep in submenus it is, a submenu's items right after it.
+    /// Each item with how deep in submenus it is, a submenu's items right after it, a section's after its heading.
     private struct Line: Identifiable {
         let id: String
         let depth: Int
@@ -980,8 +1027,11 @@ private struct FiltersMenuDrawing: View {
     private static func lines(_ items: [FilterMenuItem], depth: Int = 0, under parent: String = "") -> [Line] {
         items.flatMap { item -> [Line] in
             let line = Line(id: parent + "/" + item.id, depth: depth, item: item)
-            guard case .submenu(_, _, let inner) = item else { return [line] }
-            return [line] + lines(inner, depth: depth + 1, under: line.id)
+            switch item {
+            case .submenu(_, _, let inner): return [line] + lines(inner, depth: depth + 1, under: line.id)
+            case .section(_, _, let inner): return [line] + lines(inner, depth: depth, under: line.id)
+            default: return [line]
+            }
         }
     }
 
@@ -992,7 +1042,20 @@ private struct FiltersMenuDrawing: View {
                 switch line.item {
                 case .toggle(let title, let token, let enabled):
                     row(title, check: search.has(token), enabled: enabled).padding(.leading, indent)
+                case .part(let title, let part, let enabled):
+                    row(title, check: search.matchBy?.contains(part) == true, enabled: enabled)
+                        .padding(.leading, indent)
                 case .submenu(let title, _, _): row(title, submenu: true, enabled: true).padding(.leading, indent)
+                case .section(let title, _, _):
+                    // As a menu's section: a line above it, and its heading small and dimmed.
+                    VStack(alignment: .leading, spacing: 0) {
+                        Divider().padding(.vertical, 5).padding(.leading, 10 + indent).padding(.trailing, 10)
+                        Text(title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 10 + indent)
+                            .frame(height: 20)
+                    }
                 case .note(let text): row(text, enabled: false).padding(.leading, indent)
                 case .divider: Divider().padding(.vertical, 5).padding(.leading, 10 + indent).padding(.trailing, 10)
                 }

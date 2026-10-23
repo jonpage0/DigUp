@@ -17,7 +17,7 @@ let usage = """
                                               before faces were, then the rest of long PDFs and documents
       digup search [<words>...] [--kind K,K] [--with NAME]... [--album TITLE]... [--favorites] [--origin O]...
                    [--camera NAME]... [--shot-on NAME]... [--within LAT,LON,LAT,LON] [--sensitive] [--length S..S]
-                   [--shape SHAPE] [-n 10] [--json]
+                   [--shape SHAPE] [--match-by PART,PART] [-n 10] [--json]
                                               "code: <words>" searches the code index; with filters and no
                                               words, the newest files they keep; +word or +"a phrase" keeps
                                               only results that have it (in their words, or by what it means)
@@ -74,6 +74,10 @@ let usage = """
                            second; either may be left out (..15: under 15 s; 300..: 5 min or longer)
       --shape SHAPE        only pictures and videos of this shape as they're shown: portrait, landscape, square (sides
                            within 5 %), wide (2:1 or wider), or an exact ratio W:H within 2 % (16:9, 9:16, 4:3…)
+      --match-by PART,PART only these parts of a file may make it match, by what they mean or by their words (a
+                           +word must be in one of them too): visual (pictures, video frames, PDF pages as pictures),
+                           audio (sound), spoken (what's said), text (documents, PDF text, words in pictures, names,
+                           code), tags (what Photos says of an item); with no words, the files that have one of them
       --include-code       also index loose source code and data files as documents (outside code projects)
       --include-datasets   don't skip folders that look like datasets
       --include-hidden-photos
@@ -111,7 +115,8 @@ struct Arguments {
     static let valued: Set<String> = ["--index", "--limit", "--kind", "-n", "--zgate", "--word-weight", "--new-limit",
                                       "--linger", "--shot-tokens", "--code-stretch", "--encoder-idle", "--to",
                                       "--memory-limit", "--time-limit", "--tries", "--when-quiet", "--within",
-                                      "--defaults-suite", "--length", "--shape", "--library", "--catalog", "--engine"]
+                                      "--defaults-suite", "--length", "--shape", "--match-by", "--library", "--catalog",
+                                      "--engine"]
     static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude", "--with",
                                         "--album", "--origin", "--camera", "--shot-on"]
 
@@ -215,12 +220,13 @@ struct Arguments {
         lists["--with"] != nil || lists["--album"] != nil || flags.contains("--favorites") || values["--within"] != nil
             || lists["--origin"] != nil || lists["--camera"] != nil || lists["--shot-on"] != nil
             || flags.contains("--sensitive") || values["--length"] != nil || values["--shape"] != nil
+            || values["--match-by"] != nil
     }
 
     /// The search's filter: --with NAME (every one in it; a name that several people in Photos share means any of
     /// them), --album TITLE (in any of them), --favorites, --origin O, --camera NAME and --shot-on NAME (any of them
     /// each), --within LAT,LON,LAT,LON (two corners of a box), --sensitive (as the app's filter keeps them with
-    /// blurring off), --length S..S and --shape SHAPE.
+    /// blurring off), --length S..S, --shape SHAPE and --match-by PART,PART.
     func filter(in store: IndexStore) throws -> SearchFilter {
         var filter = SearchFilter(favorites: flags.contains("--favorites"))
         if let names = lists["--with"] {
@@ -287,6 +293,14 @@ struct Arguments {
                                + "(16:9, 9:16)")
             }
             filter.shape = shape
+        }
+        if let text = values["--match-by"] {
+            guard let matchBy = SearchFilter.MatchBy(text) else {
+                throw CLIError("--match-by takes one or more of "
+                               + SearchFilter.Part.allCases.map(\.rawValue).joined(separator: ", ")
+                               + ", each once, a comma between them (spoken,text)")
+            }
+            filter.matchBy = matchBy
         }
         return filter
     }
@@ -605,8 +619,9 @@ func search(_ args: Arguments) throws {
     if let code { query = code }
     guard code == nil || !query.isEmpty else { throw CLIError("search the code for what?") }
     let store = try IndexStore(directory: args.indexFolder, file: code == nil ? IndexStore.mainFile : IndexStore.codeFile)
-    // Photos' people, albums, favorites, origins and cameras, a box on the map, a length and a shape: the main index's.
-    // With no words, the search lists what they keep.
+    // Photos' people, albums, favorites, origins and cameras, a box on the map, a length, a shape and the parts Match
+    // by keeps to: the main index's (a search of code takes none of them). With no words, the search lists what they
+    // keep.
     let filter = code == nil ? try args.filter(in: store) : SearchFilter()
     let searcher = try Searcher(store: store, loadVectors: !query.isEmpty)
     let started = Date()

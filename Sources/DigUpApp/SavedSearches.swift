@@ -76,8 +76,8 @@ final class SavedSearches {
         } catch SavedSearch.FileError.notWellFormed {
             unreadable = true
             log("saved searches: \(url.lastPathComponent) has a search without a name, with two From, two areas, "
-                + "two Sensitive, two lengths or two shapes, an area that isn't a box, or an id twice; it's left as "
-                + "it is")
+                + "two Sensitive, two lengths, two shapes or two Match by, an area that isn't a box, or an id "
+                + "twice; it's left as it is")
         } catch {
             unreadable = true
             log("saved searches: \(url.lastPathComponent) can't be read (\(error)); it's left as it is")

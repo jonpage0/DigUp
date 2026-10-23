@@ -452,8 +452,9 @@ final class PreviewPlayback {
 
     func isCurrent(_ row: ResultRow) -> Bool { playingKey == row.previewKey }
 
-    /// A result and its query: what a pick is kept under (a new search may find the file matching elsewhere).
-    private static func pickKey(_ row: ResultRow) -> String { "\(row.previewKey)|\(row.query)" }
+    /// A result and its search (`ResultRow.searched`): what a pick is kept under (a new search may find the file
+    /// matching elsewhere, or in other parts of it).
+    private static func pickKey(_ row: ResultRow) -> String { "\(row.previewKey)|\(row.searched)" }
 
     /// Picks `moment` of `row`, as a click under the preview does: `row` is at it from then on (until another is
     /// picked), and plays from there. A still is in `filmstrip`, the video's stills in order.
