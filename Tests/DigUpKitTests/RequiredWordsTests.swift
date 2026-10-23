@@ -202,6 +202,37 @@ import Testing
         #expect(try found(SearchFilter()).isEmpty)
     }
 
+    /// Cold review R1: what an AI app can find with a required word doesn't depend on files it may not see. A note with
+    /// "atlas" and "beach" is found among 100 notes full of "beach", and still is after 2,000 Photos pictures it can't
+    /// see, full of "atlas", are added: matched over the whole index, they made "atlas" common, put the 100 notes ahead
+    /// of it, and the best 100 matches left it out.
+    @Test func whatAnAIAppFindsWithARequiredWordDoesntDependOnFilesItCantSee() throws {
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        let target = "/notes/atlas.txt"
+        try store.db.transaction {
+            try add(store, target, "atlas beach one two three four five six seven eight nine ten")
+            for number in 0..<100 {
+                try add(store, "/notes/beach \(number).txt", String(repeating: "beach ", count: 20))
+            }
+        }
+        var hidden = SearchFilter()
+        hidden.photosOnly = []
+        func found() throws -> [String] {
+            try Searcher(store: store, loadVectors: false).search("atlas +beach", queryVector: nil, filter: hidden,
+                                                                limit: 200).map(\.path)
+        }
+        #expect(try found().contains(target))
+        try store.db.transaction {
+            for number in 0..<2_000 {
+                try add(store, "/L.photoslibrary/originals/A/U\(number).jpeg", String(repeating: "atlas ", count: 20),
+                        kind: .image, segment: .ocr)
+            }
+        }
+        let after = try found()
+        #expect(after.contains(target))
+        #expect(!after.contains { $0.contains(".photoslibrary/") })
+    }
+
     /// In a search of code, `+` is literal.
     @Test func codeTakesPlusAsWritten() throws {
         let store = try IndexStore(directory: folder.appendingPathComponent("index"), file: IndexStore.codeFile)
