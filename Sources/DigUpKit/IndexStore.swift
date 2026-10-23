@@ -1278,7 +1278,9 @@ public final class IndexStore {
     }
 
     /// `rebuildFaceMatches`, when what `face_matches` was made from changed: the named faces (a sync took some away, or a
-    /// picture's were read), or the corrections (the app saved them). Returns whether it was made again.
+    /// picture's were read), the faces outside Photos you said are someone, which are compared against too (their
+    /// picture indexed, read again, or gone), or the corrections (the app saved them). Returns whether it was made
+    /// again.
     @discardableResult
     public func rebuildFaceMatchesIfChanged() throws -> Bool {
         guard try meta(Self.facesMatchedKey) != facesMark() else { return false }
@@ -1288,7 +1290,7 @@ public final class IndexStore {
 
     /// What `face_matches` is made from, as a mark that changes with it: the named faces (how many there are and the
     /// sum of their ids; writing named faces forgets the mark kept, `setFaces`, since a new one can take a deleted one's
-    /// id), and when the corrections were last saved and how long their file is.
+    /// id), when the corrections were last saved and how long their file is, and the faces they teach (`taughtMark`).
     private func facesMark() throws -> String {
         var named = ""
         try db.query("SELECT COUNT(*), coalesce(SUM(id), 0) FROM faces WHERE person IS NOT NULL") {
@@ -1296,7 +1298,27 @@ public final class IndexStore {
         }
         let file = try? FileManager.default.attributesOfItem(atPath: FaceCorrections.url(beside: directory).path)
         let saved = (file?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        return "\(named) \(saved) \((file?[.size] as? NSNumber)?.intValue ?? 0)"
+        return "\(named) \(saved) \((file?[.size] as? NSNumber)?.intValue ?? 0) \(try taughtMark())"
+    }
+
+    /// The faces outside Photos you said are someone, as the index has them now (each one's row, file, people and
+    /// print), as a number: it changes when one's picture is indexed, read again or gone. 0 for none.
+    private func taughtMark() throws -> String {
+        let rulings = try faceRulings()
+        let ruled = try outsideFaces(ofFiles: Set(rulings.keys))
+        let taught = FaceMatching.said(of: ruled, rulings).compactMap { place, said in
+            said.is.map { (face: ruled[place], people: $0.sorted()) }
+        }.sorted { $0.face.id < $1.face.id }
+        // FNV-1a: the same every run (Swift's own hashing isn't).
+        var mark: UInt64 = taught.isEmpty ? 0 : 0xcbf2_9ce4_8422_2325
+        func add(_ bytes: some Sequence<UInt8>) {
+            for byte in bytes { mark = (mark ^ UInt64(byte)) &* 0x100_0000_01b3 }
+        }
+        for (face, people) in taught {
+            for number in [face.id, face.file] + people { withUnsafeBytes(of: number) { add($0) } }
+            add(Faces.bytes(of: face.print))
+        }
+        return String(mark, radix: 16)
     }
 
     /// The faces outside Photos matched with only the named faces and the corrections of files `filter` keeps, at the
@@ -1393,15 +1415,19 @@ public final class IndexStore {
         return found
     }
 
-    /// The people of the named faces the index has, by file (each file's sorted): what the faces pass compares with the
-    /// faces Photos names now.
-    func namedFacePeople() throws -> [Int64: [Int64]] {
-        var people: [Int64: [Int64]] = [:]
+    /// The named faces the index has, by file: each one's person and box. What the faces pass compares with the faces
+    /// Photos names now (`Indexer.NamedFace.areKept`).
+    func namedFaces() throws -> [Int64: [(person: Int64, box: Faces.Box)]] {
+        var faces: [Int64: [(person: Int64, box: Faces.Box)]] = [:]
         try db.query("""
-            SELECT s.file, f.person FROM faces f JOIN segments s ON s.id = f.segment WHERE f.person IS NOT NULL
-            ORDER BY s.file, f.person
-            """) { people[$0.int(0), default: []].append($0.int(1)) }
-        return people
+            SELECT s.file, f.person, f.x, f.y, f.width, f.height FROM faces f JOIN segments s ON s.id = f.segment
+            WHERE f.person IS NOT NULL
+            """) { row in
+            guard let box = Faces.Box(x: row.double(2), y: row.double(3), width: row.double(4), height: row.double(5))
+            else { return }
+            faces[row.int(0), default: []].append((row.int(1), box))
+        }
+        return faces
     }
 
     /// The pictures among `files` that were read, with their picture segment, in the order of their ids.

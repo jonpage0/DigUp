@@ -49,9 +49,9 @@ public final class Indexer {
     /// row: what reading the picture prints, and what the faces pass holds the index's named faces to (`readFaces`).
     /// Every file of a library the sync listed has an entry, empty when Photos names no face in it.
     private var namedFaces: [Int64: [NamedFace]] = [:]
-    /// The library pictures the faces pass read in this process, with the people it read them for: one whose named faces
-    /// couldn't all be read waits for the next helper, or for Photos to name others in it.
-    private var triedNamed: [Int64: [Int64]] = [:]
+    /// The library pictures the faces pass read in this process, with the named faces it read them for: one whose named
+    /// faces couldn't all be read waits for the next helper, or for Photos to name them otherwise.
+    private var triedNamed: [Int64: [NamedFace]] = [:]
     /// The pictures outside Photos the faces pass found away in this process: they wait for the next helper.
     private var triedAway = Set<Int64>()
     /// How faces just read outside Photos are matched (`IndexStore.faceMatching`: the named faces and the corrections),
@@ -402,9 +402,27 @@ public final class Indexer {
     }
 
     /// A face Photos named in a library picture: its person's row, and where it is.
-    struct NamedFace: Sendable {
+    struct NamedFace: Sendable, Equatable {
         let person: Int64
         let box: PhotosLibrary.FaceBox
+
+        /// The index has these faces as Photos names them now: as many, and each one's person on the face where Photos
+        /// puts it (a face kept whose box holds its center; one face apiece). So Photos naming someone else in a
+        /// picture, or the same people on each other's faces, reads it again.
+        static func areKept(_ named: [NamedFace], in kept: [(person: Int64, box: Faces.Box)]) -> Bool {
+            guard named.count == kept.count else { return false }
+            var left = kept
+            for face in named {
+                // Photos' center is from the bottom-left; the index's boxes are from the top-left.
+                let (x, y) = (face.box.x, 1 - face.box.y)
+                guard let found = left.firstIndex(where: {
+                    $0.person == face.person && (($0.box.x)...($0.box.x + $0.box.width)).contains(x)
+                        && (($0.box.y)...($0.box.y + $0.box.height)).contains(y)
+                }) else { return false }
+                left.remove(at: found)
+            }
+            return true
+        }
     }
 
     /// Images and screenshots go to the model 8 at a time; other files one by one.
@@ -999,16 +1017,15 @@ public final class Indexer {
     }
 
     /// What the faces pass has to read: the library pictures whose named faces in the index aren't the ones Photos
-    /// names now (as the last sync listed them), unless it read them for those people in this process already; and the
-    /// pictures outside Photos it hasn't come to, or that were away when it did (`IndexStore.FacesRead`), unless it
-    /// found them away in this process. Nil without a face reader.
+    /// names now (as the last sync listed them: who, and on which face), unless it read them for those in this process
+    /// already; and the pictures outside Photos it hasn't come to, or that were away when it did
+    /// (`IndexStore.FacesRead`), unless it found them away in this process. Nil without a face reader.
     private func facesToRead() throws
         -> (named: [IndexStore.FacesToRead], outside: [IndexStore.FacesToRead], read: IndexStore.FacesRead)? {
         guard faces != nil else { return nil }
-        let stored = try store.namedFacePeople()
+        let stored = try store.namedFaces()
         let differ = namedFaces.compactMap { file, named -> Int64? in
-            let people = named.map(\.person).sorted()
-            return people != stored[file, default: []] && triedNamed[file] != people ? file : nil
+            !NamedFace.areKept(named, in: stored[file] ?? []) && triedNamed[file] != named ? file : nil
         }
         let read = try store.facesRead()
         let outside = try store.picturesOutsideWithoutFaces(read).filter { !triedAway.contains($0.file.id) }
@@ -1023,11 +1040,12 @@ public final class Indexer {
 
     /// The faces pass: the faces of pictures read before DigUp kept faces, or before the recognizer changed (which took
     /// them all), read again from the pictures with nothing embedded. First the library pictures whose named faces
-    /// aren't the ones Photos names now (the last sync's listing: someone named in Photos since, or no longer), then
-    /// `face_matches` made again if they changed, then the pictures outside Photos it hasn't come to, each matched as
-    /// it's read. A picture that's away (gone, on a drive that's unplugged, or only in iCloud, where reading it would
-    /// download it) waits for a later pass. Each picture is one transaction, so stopping between them (`shouldStop`)
-    /// loses nothing. Returns how many pictures it read.
+    /// aren't the ones Photos names now (the last sync's listing: someone named in Photos since, or no longer, or on
+    /// another face), then `face_matches` made again if they changed, then the pictures outside Photos it hasn't come
+    /// to, each matched as it's read, and `face_matches` made again at the end if a face you said is someone was among
+    /// them (it teaches: the faces read before it weren't compared with it). A picture that's away (gone, on a drive
+    /// that's unplugged, or only in iCloud, where reading it would download it) waits for a later pass. Each picture is
+    /// one transaction, so stopping between them (`shouldStop`) loses nothing. Returns how many pictures it read.
     @discardableResult
     public func readFaces(shouldStop: () -> Bool = { false }, onStep: (FacesStep) -> Void = { _ in }) throws -> Int {
         guard let reader = faces, let work = try facesToRead() else { return 0 }
@@ -1042,7 +1060,7 @@ public final class Indexer {
         for picture in work.named {
             guard !shouldStop() else { break }
             let named = namedFaces[picture.file.id] ?? []
-            triedNamed[picture.file.id] = named.map(\.person).sorted()
+            triedNamed[picture.file.id] = named
             let started = Date()
             let rows = Self.facesHere(of: picture.file, named: named, with: reader)
             if let rows { try store.db.transaction { try store.setFaces(rows, ofSegment: picture.segment) } }
@@ -1080,6 +1098,7 @@ public final class Indexer {
             read.after = read.to
             try store.setFacesRead(read)
         }
+        try store.rebuildFaceMatchesIfChanged()
         return count
     }
 }

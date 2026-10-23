@@ -399,7 +399,8 @@ final class FakeFaceReader: FaceReader, @unchecked Sendable {
         let reader = reader()
         let indexer = try indexed.indexer(reader)
         _ = try indexer.sync([indexed.library, indexed.downloads])
-        let (waiting, stored) = (try indexer.facesWaiting(), try indexed.store.namedFacePeople())
+        let waiting = try indexer.facesWaiting()
+        let stored = try indexed.store.namedFaces().mapValues { $0.map(\.person) }
         #expect(waiting == 2, "\(waiting) waiting; stored \(stored)")
         #expect(try indexer.readFaces() == 2)
         #expect(reader.read == [(indexed.pictures[1] as NSString).lastPathComponent], "\(reader.read)")
@@ -529,6 +530,80 @@ final class FakeFaceReader: FaceReader, @unchecked Sendable {
         #expect(Set(try indexed.kept([[katie]], filter).map(\.path))
                 == [indexed.pictures[0], indexed.path("katie-95.jpg"), indexed.path("katie-and-sam.jpg")])
         #expect(try indexed.kept([[katie]]).contains { $0.path == indexed.path("like-katie-85.jpg") })
+    }
+
+    /// A picture you said is Katie teaches only while it's indexed, and indexing alone keeps it so: when it leaves the
+    /// folders, the faces it taught go back to DigUp's guesses; when it's back, or every face is read again (another
+    /// recognizer, the pupil before the teacher), they're taught again.
+    @Test func teachingFollowsThePictureThatTeaches() throws {
+        let more: [String: [[Float]]] = ["like-katie-85.jpg": [[0.7, 0, 0, 0.714]]]
+        let indexed = try indexed(by: reader(more: more), more: more)
+        let katie = try indexed.person("P-KATIE")
+        let roots = [indexed.library, indexed.downloads]
+        let (teacher, pupil) = (indexed.path("katie-85.jpg"), indexed.path("like-katie-85.jpg"))
+        func taught() throws -> Bool { try indexed.kept([[katie]]).contains { $0.path == pupil } }
+        try correct(indexed, [("katie-85.jpg", 0, Self.katie, "is")])
+        _ = try indexed.indexer(reader(more: more)).sync(roots)   // the next sync reads what was saved
+        #expect(try taught())
+        // The teacher leaves the folders DigUp searches.
+        let away = folder.appendingPathComponent("away.jpg").path
+        try FileManager.default.moveItem(atPath: teacher, toPath: away)
+        _ = try indexed.indexer(reader(more: more)).sync(roots)
+        #expect(!(try taught()))
+        // It's back, and read with its faces.
+        try FileManager.default.moveItem(atPath: away, toPath: teacher)
+        let back = try indexed.indexer(reader(more: more))
+        _ = try back.sync(roots)
+        #expect(try back.run()["done"] == 1)
+        #expect(try taught())
+        // Another recognizer: the pass reads every face again, the pupil first (the teacher's file is newer).
+        let other = try indexed.indexer(reader("fake 2", more: more))
+        _ = try other.sync(roots)
+        #expect(try other.readFaces() == 10)   // three in Photos, seven outside
+        #expect(try taught())
+        #expect(try indexed.count("face_matches", "confirmed = 1") == 1)
+    }
+
+    /// Photos says which face is whom: the same two people in a picture, their faces swapped, is read again, in the
+    /// same process as before.
+    @Test func facesSwappedBetweenPeopleInPhotosAreReadAgain() throws {
+        let indexed = try indexed(by: reader())
+        final class Listed: @unchecked Sendable {
+            var listing: PhotosLibrary.Listing
+            init(_ listing: PhotosLibrary.Listing) { self.listing = listing }
+        }
+        let listed = Listed(indexed.listing)
+        let old = indexed.listing.assets[1]
+        func named(_ left: PhotosLibrary.Person, _ right: PhotosLibrary.Person) {
+            listed.listing.assets[1] = PhotosLibrary.Asset(
+                uuid: old.uuid, path: old.path, movie: false, screenshot: false, title: old.title, date: old.date,
+                words: [], people: [left.uuid, right.uuid],
+                faces: [PhotosLibrary.FaceBox(person: left, x: 0.3, y: 0.5, size: 0.2),
+                        PhotosLibrary.FaceBox(person: right, x: 0.7, y: 0.5, size: 0.2)])
+        }
+        var options = IndexOptions()
+        options.photos = PhotosLibrary.Reader { _, _ in listed.listing }
+        let reader = reader()
+        let indexer = try Indexer(store: indexed.store, options: options, faces: reader,
+                                  makeEmbedder: { FakeEmbedder() })
+        func leftToRight() throws -> [String] {
+            var names: [String] = []
+            try indexed.store.db.query("""
+                SELECT p.name FROM faces f JOIN segments s ON s.id = f.segment JOIN files fi ON fi.id = s.file
+                JOIN photos_people p ON p.id = f.person WHERE fi.path = ? ORDER BY f.x
+                """, [.text(old.path)]) { names.append($0.text(0) ?? "") }
+            return names
+        }
+        named(Self.sam, Self.katie)
+        _ = try indexer.sync([indexed.library, indexed.downloads])
+        #expect(try indexer.readFaces() == 1)
+        #expect(try leftToRight() == ["Sam", "Katie"])
+        named(Self.katie, Self.sam)
+        _ = try indexer.sync([indexed.library, indexed.downloads])
+        #expect(try indexer.facesWaiting() == 1)
+        #expect(try indexer.readFaces() == 1)
+        #expect(try leftToRight() == ["Katie", "Sam"])
+        #expect(try indexer.facesWaiting() == 0)
     }
 }
 #endif
