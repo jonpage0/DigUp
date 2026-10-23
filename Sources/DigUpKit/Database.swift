@@ -133,6 +133,45 @@ public final class Database {
 
     public var lastInsertID: Int64 { sqlite3_last_insert_rowid(handle) }
     var errorMessage: String { String(cString: sqlite3_errmsg(handle)) }
+
+    /// Makes `name` a function the SQL run on this connection can call with `arguments` arguments: `body` gets them as
+    /// SQL passed them and returns its value. `deterministic`: the same arguments always give the same value, so SQLite
+    /// may compute it once (`SQLITE_DETERMINISTIC`).
+    func define(_ name: String, arguments: Int32, deterministic: Bool,
+                _ body: @escaping ([FunctionArgument]) -> SQLValue) throws {
+        let function = Unmanaged.passRetained(SQLFunction(body)).toOpaque()
+        let status = sqlite3_create_function_v2(handle, name, arguments,
+                                                SQLITE_UTF8 | (deterministic ? SQLITE_DETERMINISTIC : 0), function,
+                                                { context, count, values in
+            let function = Unmanaged<SQLFunction>.fromOpaque(sqlite3_user_data(context)).takeUnretainedValue()
+            let arguments = (0..<Int(count)).map { FunctionArgument(value: values?[$0]) }
+            switch function.body(arguments) {
+            case .int(let number): sqlite3_result_int64(context, number)
+            case .double(let number): sqlite3_result_double(context, number)
+            case .text(let text): sqlite3_result_text(context, text, -1, transient)
+            case .blob(let data):
+                data.withUnsafeBytes { sqlite3_result_blob(context, $0.baseAddress, Int32($0.count), transient) }
+            case .null: sqlite3_result_null(context)
+            }
+        }, nil, nil, { Unmanaged<SQLFunction>.fromOpaque($0!).release() })
+        // One SQLite can't define is released by SQLite (it calls the destructor then too), not here.
+        guard status == SQLITE_OK else { throw Failure(message: "can't define \(name): \(errorMessage)") }
+    }
+}
+
+/// A function SQL calls (`Database.define`), kept alive by SQLite until the connection closes.
+private final class SQLFunction {
+    let body: ([FunctionArgument]) -> SQLValue
+    init(_ body: @escaping ([FunctionArgument]) -> SQLValue) { self.body = body }
+}
+
+/// One argument SQL passed to a function `Database.define` made.
+struct FunctionArgument {
+    fileprivate let value: OpaquePointer?
+
+    var isNull: Bool { sqlite3_value_type(value) == SQLITE_NULL }
+    var double: Double { sqlite3_value_double(value) }
+    var text: String? { sqlite3_value_text(value).map { String(cString: $0) } }
 }
 
 public enum SQLValue {

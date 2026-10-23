@@ -113,6 +113,10 @@ On a Mac, the search window keeps All, the kinds and ♥ Favorites as chips unde
 one Filters menu beside them, which says how many are on ("Filters · 2"): a library's people, albums, Photos favorites
 and From (see [Apple Photos](#apple-photos)), Sensitive (see [Sensitive pictures](#sensitive-pictures)), and:
 
+- When: the past week, month, 3 months or year, or a Custom Range… of days (either end left open). A file's date is
+  when Photos or the camera says it was taken, else when it was last changed (a screenshot: when it was made); with no
+  words, what a When keeps is listed newest first by that date, as any filter's is. Its days are this Mac's, and the
+  past week is the seven days up to the moment the search runs, so a saved "Past 3 months" stays the past 3 months
 - Length, for videos and recordings: under 15 s, 15 s to 1 min, 1 to 5 min, or over 5 min
 - Shape, for pictures and videos as they're shown: Portrait, Landscape, Square (sides within 5 %), Wide (2:1 or wider:
   panoramas and cinema), or an exact ratio, 16:9, 9:16, 4:3, 3:4, 3:2 or 2:3, within 2 % (16:9 is landscape, 9:16
@@ -120,16 +124,17 @@ and From (see [Apple Photos](#apple-photos)), Sensitive (see [Sensitive pictures
 
 Each filter that's on is a token in the search field too (its × takes it off, as ⌫ does in an empty field). A Photos
 picture's size and a Photos video's length are Photos' own, so a video that's only in iCloud has its length too; any
-other file's are read from the file. `digup search --length 15..60 --shape 16:9` does the same in the CLI (seconds,
-either end left out: `..15`, `300..`).
+other file's are read from the file. `digup search --length 15..60 --shape 16:9 --when 2026-07-01..2026-08-01` does
+the same in the CLI (seconds, either end left out: `..15`, `300..`; days `FROM..BEFORE`, the second not kept, either
+left out, or `last:90` for the past 90 days).
 
 On a Mac, the search window's Saved menu (the bookmark beside the field) keeps the searches you come back to. Save This
-Search… (⌘S) keeps the words, the kind and the filters (people, albums, favorites, From, the map's area, Sensitive,
-Length, Shape) under a name, and choosing it searches again, so new files show up; Edit Saved Searches… renames,
-reorders and deletes them. Typing the start of one's name in the panel offers it, and Tab opens it in the window.
-They're kept in `saved-searches.json` beside the index, so rebuilding the index keeps them, with Photos' people and
-albums by Photos' own ids: someone renamed in Photos is still found, and someone who's gone from Photos shows struck
-through, and the search keeps nothing for them rather than everyone.
+Search… (⌘S) keeps the words, the kind and the filters (people, albums, favorites, From, the map's area, When,
+Sensitive, Length, Shape) under a name, and choosing it searches again, so new files show up; Edit Saved Searches…
+renames, reorders and deletes them. Typing the start of one's name in the panel offers it, and Tab opens it in the
+window. They're kept in `saved-searches.json` beside the index, so rebuilding the index keeps them, with Photos'
+people and albums by Photos' own ids: someone renamed in Photos is still found, and someone who's gone from Photos
+shows struck through, and the search keeps nothing for them rather than everyone.
 
 DigUp lives in the menu bar on a Mac and in the tray on Windows and Linux, where you can see how indexing is going,
 pause it, or open Settings. Opening it from the Start menu or your app list shows the search window.
@@ -371,9 +376,10 @@ opens the index read-only, first making SQLite's log and shared-memory files bes
 They get four tools, all read-only:
 
 - `search_files`: what the search window does, with its kinds and filters (people, albums, Photos favorites, DigUp's
-  favorites, From, an area on the map, a length, a shape) and its required words (`+beach`); with no words, a kind or
-  a filter lists what it keeps, newest first. Each result says where the file is, why it's there ("Matches the text on
-  page 3"), the words that matched, and when and where it was taken.
+  favorites, From, an area on the map, a length, a shape, when: `{after, before}` days or `{last_days}`) and its
+  required words (`+beach`). With no words, a kind or a filter lists what it keeps, newest first, so "screenshots
+  from June" is a kind and a when. Each result says where the file is, why it's there ("Matches the text on page
+  3"), the words that matched, and when and where it was taken.
 - `read_text`: the words DigUp read from a file it returned (a document, a PDF's page, the text in a screenshot, what
   Photos knows about a picture, a stretch of code, what's said in a recording; with a `moment`, what's said within
   30 seconds of it), up to 20,000 characters.

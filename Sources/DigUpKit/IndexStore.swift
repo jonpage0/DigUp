@@ -71,6 +71,7 @@ public final class IndexStore {
         self.directory = directory
         file = directory.appendingPathComponent(name)
         db = try Database(path: file.path)
+        try defineFunctions()
         try migrate()
         try migrateForkFacts()
     }
@@ -83,11 +84,20 @@ public final class IndexStore {
         self.directory = directory
         file = directory.appendingPathComponent(name)
         db = try Database.reader(of: file.path)
+        try defineFunctions()
         var version: Int64 = 0
         try db.query("PRAGMA user_version") { version = $0.int(0) }
         guard version == Self.schemaVersion, try forkFactsStepped() >= Self.forkFactsVersion else {
             throw Database.Failure(message: "\(file.path) isn't an index this DigUp can read as it is (open DigUp to "
                                    + "bring it up to date)")
+        }
+    }
+
+    /// The functions the filters' SQL calls, which SQLite doesn't have: a camera's date read in this Mac's time zone
+    /// (`FileDate`).
+    private func defineFunctions() throws {
+        try db.define(FileDate.exifFunction, arguments: 1, deterministic: false) { arguments in
+            arguments[0].text.flatMap { FileDate.seconds(exif: $0) }.map { .double($0) } ?? .null
         }
     }
 

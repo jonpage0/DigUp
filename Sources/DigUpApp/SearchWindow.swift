@@ -12,6 +12,8 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
     let search: SearchModel
     /// Save This Search… and Edit Saved Searches… (the Saved menu).
     let savedSheet: SavedSearchSheet
+    /// When's Custom Range… (the Filters menu).
+    let whenSheet: CustomWhenSheet
     private unowned let app: AppController
     private var window: QuickLookWindow?
     private var keyMonitor: Any?
@@ -22,8 +24,10 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         search = SearchModel(engine: app.engine, favorites: app.favorites, faceCorrections: app.faceCorrections,
                              model: app.model)
         savedSheet = SavedSearchSheet(app: app)
+        whenSheet = CustomWhenSheet(app: app)
         super.init()
         search.selected = { [weak self] in self?.selectionChanged() }
+        search.chooseWhen = { [weak self] in self?.chooseWhen() }
     }
 
     var isVisible: Bool { window?.isVisible == true }
@@ -63,6 +67,12 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         savedSheet.beginEdit(on: window)
     }
 
+    /// When's Custom Range…: asks for the days, the range on now filled in; Use puts it on in place of the When on.
+    func chooseWhen() {
+        let on = search.tokens.lazy.compactMap { if case .when(let when) = $0 { when } else { nil } }.first
+        whenSheet.begin(from: on, on: window) { [weak self] when in self?.search.set(.when(when), on: true) }
+    }
+
     private func makeWindow() -> QuickLookWindow {
         let window = QuickLookWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 700),
                                      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -92,6 +102,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             QLPreviewPanel.shared().orderOut(nil)
         }
         savedSheet.end()
+        whenSheet.end()
         removeKeyMonitor()
         PreviewPlayback.shared.stop()
         window?.contentView = nil
@@ -269,7 +280,7 @@ final class SearchModel {
         didSet { if area != oldValue { run() } }
     }
     /// The filters on besides the kind and the map's area, in the order they were put on: Photos' people (each one in
-    /// the picture), albums (in any of them), favorites and From, DigUp's favorites, Sensitive, Length and Shape.
+    /// the picture), albums (in any of them), favorites and From, DigUp's favorites, When, Sensitive, Length and Shape.
     var tokens: [FilterToken] = [] {
         didSet { if tokens != oldValue { run() } }
     }
@@ -306,6 +317,8 @@ final class SearchModel {
     @ObservationIgnored private var runsHeld = false
     /// A result was clicked, or another moment of it picked under the preview (Quick Look, when it's open, follows).
     @ObservationIgnored var selected: () -> Void = {}
+    /// Custom Range… in the Filters menu's When: asks for the days (the window's `CustomWhenSheet`).
+    @ObservationIgnored var chooseWhen: () -> Void = {}
 
     init(engine: Engine, favorites: Favorites, faceCorrections: FaceCorrectionsFile, model: AppModel) {
         self.engine = engine
@@ -349,6 +362,7 @@ final class SearchModel {
             case .sensitive: filter.sensitive = model.settings.blurSensitive.filterPosition
             case .length(let length): filter.length = length
             case .shape(let shape): filter.shape = shape
+            case .when(let when): filter.when = when
             }
         }
         return filter
@@ -429,7 +443,7 @@ final class SearchModel {
             if !on { area = nil }
         } else if on {
             guard !has(token) else { return }
-            // One From, one Length and one Shape at a time: the one picked replaces the other.
+            // One From, one Length, one Shape and one When at a time: the one picked replaces the other.
             tokens = tokens.filter { $0.choice == nil || $0.choice != token.choice } + [token]
         } else {
             tokens.removeAll { $0.id == token.id }
@@ -530,6 +544,7 @@ final class SearchModel {
         case .sensitive: .sensitive
         case .length(let length): .length(length)
         case .shape(let shape): .shape(shape)
+        case .when(let when): .when(when)
         }
     }
 
@@ -576,6 +591,7 @@ final class SearchModel {
             case .sensitive: tokens.append(.sensitive)
             case .length(let length): tokens.append(.length(length))
             case .shape(let shape): tokens.append(.shape(shape))
+            case .when(let when): tokens.append(.when(when))
             }
         }
         runsHeld = true

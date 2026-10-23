@@ -17,7 +17,7 @@ let usage = """
                                               before faces were, then the rest of long PDFs and documents
       digup search [<words>...] [--kind K,K] [--with NAME]... [--album TITLE]... [--favorites] [--origin O]...
                    [--camera NAME]... [--shot-on NAME]... [--within LAT,LON,LAT,LON] [--sensitive] [--length S..S]
-                   [--shape SHAPE] [-n 10] [--json]
+                   [--shape SHAPE] [--when FROM..BEFORE|last:N] [-n 10] [--json]
                                               "code: <words>" searches the code index; with filters and no
                                               words, the newest files they keep; +word or +"a phrase" keeps
                                               only results that have it (in their words, or by what it means)
@@ -74,6 +74,10 @@ let usage = """
                            second; either may be left out (..15: under 15 s; 300..: 5 min or longer)
       --shape SHAPE        only pictures and videos of this shape as they're shown: portrait, landscape, square (sides
                            within 5 %), wide (2:1 or wider), or an exact ratio W:H within 2 % (16:9, 9:16, 4:3…)
+      --when FROM..BEFORE  only files from these days here: on or after the first (YYYY-MM-DD) and before the second,
+                           either left out (2026-07-01..2026-08-01 is July; ..2026-01-01: before 2026); or last:N,
+                           the last N days up to now (last:90). A file's date is when Photos or its camera says it
+                           was taken, else when it was last modified
       --include-code       also index loose source code and data files as documents (outside code projects)
       --include-datasets   don't skip folders that look like datasets
       --include-hidden-photos
@@ -111,7 +115,8 @@ struct Arguments {
     static let valued: Set<String> = ["--index", "--limit", "--kind", "-n", "--zgate", "--word-weight", "--new-limit",
                                       "--linger", "--shot-tokens", "--code-stretch", "--encoder-idle", "--to",
                                       "--memory-limit", "--time-limit", "--tries", "--when-quiet", "--within",
-                                      "--defaults-suite", "--length", "--shape", "--library", "--catalog", "--engine"]
+                                      "--defaults-suite", "--length", "--shape", "--when", "--library", "--catalog",
+                                      "--engine"]
     static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude", "--with",
                                         "--album", "--origin", "--camera", "--shot-on"]
 
@@ -215,12 +220,13 @@ struct Arguments {
         lists["--with"] != nil || lists["--album"] != nil || flags.contains("--favorites") || values["--within"] != nil
             || lists["--origin"] != nil || lists["--camera"] != nil || lists["--shot-on"] != nil
             || flags.contains("--sensitive") || values["--length"] != nil || values["--shape"] != nil
+            || values["--when"] != nil
     }
 
     /// The search's filter: --with NAME (every one in it; a name that several people in Photos share means any of
     /// them), --album TITLE (in any of them), --favorites, --origin O, --camera NAME and --shot-on NAME (any of them
     /// each), --within LAT,LON,LAT,LON (two corners of a box), --sensitive (as the app's filter keeps them with
-    /// blurring off), --length S..S and --shape SHAPE.
+    /// blurring off), --length S..S, --shape SHAPE and --when FROM..BEFORE or last:N.
     func filter(in store: IndexStore) throws -> SearchFilter {
         var filter = SearchFilter(favorites: flags.contains("--favorites"))
         if let names = lists["--with"] {
@@ -287,6 +293,14 @@ struct Arguments {
                                + "(16:9, 9:16)")
             }
             filter.shape = shape
+        }
+        if let text = values["--when"] {
+            guard let when = SearchFilter.When(text) else {
+                throw CLIError("--when takes days as FROM..BEFORE (YYYY-MM-DD, the first before the second, either "
+                               + "left out: 2026-07-01..2026-08-01, 2026-07-01.., ..2026-08-01) or last:N, from 1 to "
+                               + "\(SearchFilter.When.mostDays) days (last:90)")
+            }
+            filter.when = when
         }
         return filter
     }
@@ -605,8 +619,8 @@ func search(_ args: Arguments) throws {
     if let code { query = code }
     guard code == nil || !query.isEmpty else { throw CLIError("search the code for what?") }
     let store = try IndexStore(directory: args.indexFolder, file: code == nil ? IndexStore.mainFile : IndexStore.codeFile)
-    // Photos' people, albums, favorites, origins and cameras, a box on the map, a length and a shape: the main index's.
-    // With no words, the search lists what they keep.
+    // Photos' people, albums, favorites, origins and cameras, a box on the map, a length, a shape and when: the main
+    // index's. With no words, the search lists what they keep, newest first.
     let filter = code == nil ? try args.filter(in: store) : SearchFilter()
     let searcher = try Searcher(store: store, loadVectors: !query.isEmpty)
     let started = Date()

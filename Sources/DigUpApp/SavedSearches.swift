@@ -34,6 +34,10 @@ struct SavedSearch: Equatable, Identifiable {
         case length(SearchFilter.Length)
         /// The Shape filter: `{ "shape": "portrait" }`, or an exact ratio, `{ "shape": "16:9" }` (approved 2026-10-22).
         case shape(SearchFilter.Shape)
+        /// The When filter: `{ "when": { "after": "2026-07-01", "before": "2026-08-01" } }` (local days, either left
+        /// out) or `{ "when": { "lastDays": 90 } }`, a window ending when the search runs (approved 2026-10-23; the kit
+        /// reads it strictly: `SearchFilter.When`'s `Codable`).
+        case when(SearchFilter.When)
     }
 
     /// A person by Photos' ids, one per library that has them (everyone of the name, as the People filter joins
@@ -77,9 +81,9 @@ struct SavedSearch: Equatable, Identifiable {
     }
 
     /// What the file's shape asks of a search beyond its keys: a name, at most one From, one area, one Sensitive, one
-    /// Length and one Shape, and an area that's a box.
+    /// Length, one Shape and one When, and an area that's a box.
     var isWellFormed: Bool {
-        var froms = 0, areas = 0, sensitives = 0, lengths = 0, shapes = 0
+        var froms = 0, areas = 0, sensitives = 0, lengths = 0, shapes = 0, whens = 0
         for filter in filters {
             switch filter {
             case .from: froms += 1
@@ -89,10 +93,11 @@ struct SavedSearch: Equatable, Identifiable {
             case .sensitive: sensitives += 1
             case .length: lengths += 1
             case .shape: shapes += 1
+            case .when: whens += 1
             default: break
             }
         }
-        return !name.isEmpty && [froms, areas, sensitives, lengths, shapes].allSatisfy { $0 <= 1 }
+        return !name.isEmpty && [froms, areas, sensitives, lengths, shapes, whens].allSatisfy { $0 <= 1 }
     }
 }
 
@@ -166,10 +171,10 @@ extension SavedSearch.Area {
     }
 }
 
-/// A filter is an object with exactly one key, one of these nine; anything else isn't this shape.
+/// A filter is an object with exactly one key, one of these ten; anything else isn't this shape.
 extension SavedSearch.Filter: Codable {
     private enum Key: String, CodingKey, CaseIterable {
-        case person, album, photosFavorites, digupFavorites, from, area, sensitive, length, shape
+        case person, album, photosFavorites, digupFavorites, from, area, sensitive, length, shape, when
     }
 
     init(from decoder: any Decoder) throws {
@@ -195,6 +200,7 @@ extension SavedSearch.Filter: Codable {
         case .area: self = .area(try container.decode(SavedSearch.Area.self, forKey: key))
         case .length: self = .length(try container.decode(SearchFilter.Length.self, forKey: key))
         case .shape: self = .shape(try container.decode(SearchFilter.Shape.self, forKey: key))
+        case .when: self = .when(try container.decode(SearchFilter.When.self, forKey: key))
         }
     }
 
@@ -210,6 +216,7 @@ extension SavedSearch.Filter: Codable {
         case .sensitive: try container.encode(true, forKey: .sensitive)
         case .length(let length): try container.encode(length, forKey: .length)
         case .shape(let shape): try container.encode(shape, forKey: .shape)
+        case .when(let when): try container.encode(when, forKey: .when)
         }
     }
 }
@@ -220,7 +227,7 @@ extension SavedSearch.Filter: Codable {
 /// one).
 ///
 /// The shape (approved 2026-10-22; `{ "sensitive": true }` with it, the same evening; `{ "length": … }` and
-/// `{ "shape": … }` with the Length and Shape filters):
+/// `{ "shape": … }` with the Length and Shape filters; `{ "when": … }` with When, 2026-10-23):
 ///
 ///     { "version": 1,
 ///       "searches": [ { "id": "<UUID>", "name": "Tati at the beach", "query": "beach", "kind": "images",
@@ -229,13 +236,13 @@ extension SavedSearch.Filter: Codable {
 ///                                    { "photosFavorites": true }, { "digupFavorites": true }, { "from": "mine" },
 ///                                    { "area": { "south": 25.1, "west": -80.9, "north": 26.2, "east": -79.8 } },
 ///                                    { "sensitive": true }, { "length": { "atLeast": 15, "under": 60 } },
-///                                    { "shape": "16:9" } ],
+///                                    { "shape": "16:9" }, { "when": { "lastDays": 90 } } ],
 ///                       "saved": "<ISO 8601>" } ] }
 ///
 /// In the user's order, which the menu shows. A file DigUp can't read as exactly this shape (a newer version, damaged,
 /// a key anywhere that the shape doesn't have, a filter with two keys or none, two From, two areas, two Sensitive, two
-/// lengths or two shapes in one search, a length or a shape the filters don't have) is left as it is and never written
-/// over: nothing can be saved, renamed or deleted until it's fixed.
+/// lengths, two shapes or two Whens in one search, a length, a shape or a When the filters don't have) is left as it is
+/// and never written over: nothing can be saved, renamed or deleted until it's fixed.
 @MainActor @Observable
 final class SavedSearches {
     private struct Stored: Codable {
@@ -344,8 +351,8 @@ final class SavedSearches {
                   Set(stored.searches.map(\.id)).count == stored.searches.count else {
                 unreadable = true
                 log("saved searches: \(url.lastPathComponent) has a search without a name, with two From, two areas, "
-                    + "two Sensitive, two lengths or two shapes, an area that isn't a box, or an id twice; it's left as "
-                    + "it is")
+                    + "two Sensitive, two lengths, two shapes or two Whens, an area that isn't a box, or an id twice; "
+                    + "it's left as it is")
                 return
             }
             searches = stored.searches

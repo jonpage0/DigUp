@@ -57,10 +57,10 @@ import SwiftUI
 ///     -debugFocus YES         with -debugWindow search: the field has the cursor (its ring shows) in the snapshot
 ///     -debugMap YES           with -debugWindow search: the map shows above the results
 ///     -debugArea "lat1,lon1,lat2,lon2"   with -debugWindow search: results kept to that box of the map
-///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup|sensitive|length:15..60|shape:16:9"   with
-///                             -debugWindow search: these filters on (a Photos library's people and albums, by name;
-///                             Photos' favorites; DigUp's own; the Sensitive filter; a Length, in seconds as `digup
-///                             search --length` takes it; a Shape, as `--shape`)
+///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup|sensitive|length:15..60|shape:16:9|when:last:90"
+///                             with -debugWindow search: these filters on (a Photos library's people and albums, by
+///                             name; Photos' favorites; DigUp's own; the Sensitive filter; a Length, in seconds as
+///                             `digup search --length` takes it; a Shape, as `--shape`; a When, as `--when`)
 ///     -debugSaved "<name>"    with -debugWindow search: then open the saved search of that name, as the Saved menu
 ///                             would
 ///     -debugSavedMenu YES     with -debugWindow search: after the snapshot, log the Saved menu's items and draw them
@@ -71,6 +71,9 @@ import SwiftUI
 ///                             items, choose "Require “WORD”", and draw the window into <snapshot>-required.png
 ///     -debugFiltersMenu YES   with -debugWindow search: after the snapshot, log the Filters menu's items and draw them
 ///                             into <snapshot>-filtersmenu.png, each submenu's under it (as -debugSavedMenu does)
+///     -debugWhenSheet YES|use   with -debugWindow search: after the snapshot, open When's Custom Range… (the range
+///                             on, or the past month) and draw it into <snapshot>-when.png; `use` then presses Use and
+///                             logs the tokens
 ///     -debugSavedSheet save|edit   with -debugWindow search: then open Save This Search… (its name suggested) or
 ///                             Edit Saved Searches…, and draw it into <snapshot>-saved.png; -debugSaveAs NAME
 ///                             then presses Save with that name
@@ -406,6 +409,8 @@ enum DebugHooks {
                                 search.set(.length(length), on: true)
                             } else if kind == "shape", let shape = SearchFilter.Shape(String(name)) {
                                 search.set(.shape(shape), on: true)
+                            } else if kind == "when", let when = SearchFilter.When(String(name)) {
+                                search.set(.when(when), on: true)
                             } else {
                                 log("debug: no filter \"\(part)\"")
                             }
@@ -450,14 +455,16 @@ enum DebugHooks {
                                     + "skipping \(settings.codeExcluded.map { tildePath($0.path) })")
                             }
                             filtersMenuStep(app)
-                            savedSearchSteps(app) {
-                                requireSteps(app) {
-                                    press(keys, app, describe: { windowState(app) }) {
-                                        if defaults.bool(forKey: "debugCloseWindow") {
-                                            close()
-                                            log("window: closed")
+                            whenSheetStep(app) {
+                                savedSearchSteps(app) {
+                                    requireSteps(app) {
+                                        press(keys, app, describe: { windowState(app) }) {
+                                            if defaults.bool(forKey: "debugCloseWindow") {
+                                                close()
+                                                log("window: closed")
+                                            }
+                                            if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                                         }
-                                        if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                                     }
                                 }
                             }
@@ -480,6 +487,7 @@ enum DebugHooks {
                 case .toggle(let title, let token, let enabled):
                     (search.has(token) ? "✓ " : "") + title + (enabled ? "" : " (disabled)")
                 case .submenu(let title, _, let items): "\(title) ▸ [\(described(items))]"
+                case .command(let title, _, _): title
                 case .note(let text): "\(text) (disabled)"
                 case .divider: "—"
                 }
@@ -493,6 +501,24 @@ enum DebugHooks {
             drawing.contentView = view
             try Snapshot.write(drawing, to: url, cornerRadius: 6)
         }, to: snapshotPath("filtersmenu"))
+    }
+
+    /// After the search window's snapshot: `-debugWhenSheet YES|use` opens When's Custom Range… and draws it into
+    /// <snapshot>-when.png; `use` then presses Use and logs the tokens.
+    private static func whenSheetStep(_ app: AppController, then done: @escaping () -> Void) {
+        guard let mode = UserDefaults.standard.string(forKey: "debugWhenSheet") else { return done() }
+        let window = app.searchWindow!
+        window.chooseWhen()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            save("custom range sheet", { try window.whenSheet.snapshot(to: $0) }, to: snapshotPath("when"))
+            guard mode == "use", let use = window.whenSheet.use else { return done() }
+            use()
+            let search = window.search
+            waitUntil({ search.isSettled && search.hasResults }, deadline: Date().addingTimeInterval(30)) {
+                log("debug: custom range used: \(windowState(app))")
+                done()
+            }
+        }
     }
 
     /// After the search window's snapshot: `-debugSavedMenu` logs the Saved menu's items and draws them into
@@ -993,6 +1019,7 @@ private struct FiltersMenuDrawing: View {
                 case .toggle(let title, let token, let enabled):
                     row(title, check: search.has(token), enabled: enabled).padding(.leading, indent)
                 case .submenu(let title, _, _): row(title, submenu: true, enabled: true).padding(.leading, indent)
+                case .command(let title, _, _): row(title, enabled: true).padding(.leading, indent)
                 case .note(let text): row(text, enabled: false).padding(.leading, indent)
                 case .divider: Divider().padding(.vertical, 5).padding(.leading, 10 + indent).padding(.trailing, 10)
                 }
