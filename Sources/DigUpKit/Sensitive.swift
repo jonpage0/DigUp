@@ -159,7 +159,8 @@ public enum SensitiveModel {
 
 /// What the detector said of a file's pictures, as the index keeps them: its `image` segment, and its `frame`
 /// segments in the order they were written (a video's keyframes by time, Photos' stills of a video in iCloud in their
-/// filmstrip's order, a GIF's later frames). Levels are nil for a picture not rated yet.
+/// filmstrip's order, a GIF's later frames), of the file at `path` as it was read at `read`. Levels are nil for a
+/// picture not rated yet.
 public struct SensitivePictures: Sendable, Equatable {
     public struct Picture: Sendable, Equatable {
         public let segment: Int64
@@ -168,11 +169,15 @@ public struct SensitivePictures: Sendable, Equatable {
         public let levels: SensitiveLevels?
     }
 
+    public let path: String
+    /// When the file was read (`files.indexed_at`): another reading of it is other pictures, whatever their segments'
+    /// ids (SQLite gives a segment written later the id of one deleted before).
+    public let read: Double
     public var image: Picture?
     public var frames: [Picture]
 
-    public init(image: Picture? = nil, frames: [Picture] = []) {
-        (self.image, self.frames) = (image, frames)
+    public init(path: String, read: Double, image: Picture? = nil, frames: [Picture] = []) {
+        (self.path, self.read, self.image, self.frames) = (path, read, image, frames)
     }
 
     /// The picture of this segment.
@@ -190,32 +195,35 @@ public struct SensitivePictures: Sendable, Equatable {
     public func frame(at seconds: Double) -> Picture? {
         frames.last { ($0.loc ?? 0) <= seconds } ?? frames.first
     }
+
+    /// `picture`, one of these, as blurring goes by it (nil: there's none to blur).
+    public func shown(_ picture: Picture?) -> SensitiveReveal.Shown? {
+        picture.map { SensitiveReveal.Shown(key: .init(path: path, read: read, segment: $0.segment), levels: $0.levels) }
+    }
+
+    /// Quick Look's picture of the video, which could be any of its frames: it goes by the most revealing one
+    /// (`SensitiveLevels.most`), and showing it shows none of them.
+    public var anyFrame: SensitiveReveal.Shown {
+        SensitiveReveal.Shown(key: .init(path: path, read: read, segment: nil),
+                              levels: SensitiveLevels.most(of: frames.compactMap(\.levels)))
+    }
 }
 
 /// The blurred pictures clicked to show ("Blur sensitive pictures"; the app keeps one for as long as it runs): a click
-/// shows the picture clicked, never another of its file's, so a video's other frames and stills stay blurred.
+/// shows the picture clicked, never another of its file's, so a video's other frames and stills stay blurred, nor a
+/// picture read later (another file's, or this one's read again).
 public struct SensitiveReveal: Sendable, Equatable {
-    /// What a place in the results shows, as blurring goes by it.
+    /// What a place in the results shows, as blurring goes by it (`SensitivePictures.shown`, `anyFrame`).
     public struct Shown: Sendable, Equatable {
-        /// What a click shows it by.
-        enum Key: Hashable, Sendable {
-            case segment(Int64)
-            /// Quick Look's picture of the file at this path, which could be any of its frames.
-            case anyFrame(String)
+        /// What a click shows it by: the picture's segment, of the file as it was read; nil, Quick Look's picture of
+        /// it, which could be any of its frames.
+        struct Key: Hashable, Sendable {
+            let path: String
+            let read: Double
+            let segment: Int64?
         }
         let key: Key
         let levels: SensitiveLevels?
-
-        /// One picture of a file (nil: there's none to blur).
-        public static func picture(_ picture: SensitivePictures.Picture?) -> Shown? {
-            picture.map { Shown(key: .segment($0.segment), levels: $0.levels) }
-        }
-
-        /// Quick Look's picture of the video at `path`, which could be any of its frames: it goes by the most revealing
-        /// one (`SensitiveLevels.most`), and showing it shows none of them.
-        public static func anyFrame(of path: String, _ pictures: SensitivePictures) -> Shown {
-            Shown(key: .anyFrame(path), levels: SensitiveLevels.most(of: pictures.frames.compactMap(\.levels)))
-        }
     }
 
     private var shown: Set<Shown.Key> = []

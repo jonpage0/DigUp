@@ -1179,9 +1179,13 @@ public final class IndexStore {
         return counts
     }
 
-    /// What the detector said of each picture of the file `file`.
+    /// What the detector said of each picture of the file `file`, as it was read last.
     func sensitivePictures(ofFile file: Int64) throws -> SensitivePictures {
-        var pictures = SensitivePictures()
+        var (path, read) = ("", 0.0)
+        try db.query("SELECT path, coalesce(indexed_at, 0) FROM files WHERE id = ?", [.int(file)]) {
+            (path, read) = ($0.text(0) ?? "", $0.double(1))
+        }
+        var pictures = SensitivePictures(path: path, read: read)
         try db.query("""
             SELECT s.id, s.kind, s.loc, r.segment IS NOT NULL, r.low, r.medium, r.high FROM segments s
             LEFT JOIN sensitive_scores r ON r.segment = s.id

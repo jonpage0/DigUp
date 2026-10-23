@@ -84,17 +84,18 @@ extension ResultRow {
     /// most revealing one. Nil when there's none.
     var shownPicture: SensitiveReveal.Shown? {
         guard let pictures else { return nil }
-        if let stillIndex { return .picture(pictures.frame(atPlace: stillIndex)) }
+        if let stillIndex { return pictures.shown(pictures.frame(atPlace: stillIndex)) }
         switch kind {
         case .video where photos?.still != nil:
             // Photos' stills or poster of a video in iCloud: the one that matched, else the first.
-            return .picture(segment == .frame ? pictures.picture(ofSegment: segmentID) : pictures.frames.first)
+            return pictures.shown(segment == .frame ? pictures.picture(ofSegment: segmentID) : pictures.frames.first)
         case .video:
-            guard let loc else { return .anyFrame(of: id, pictures) }
-            return .picture(segment == .frame ? pictures.picture(ofSegment: segmentID) : pictures.frame(at: loc))
+            guard let loc else { return pictures.anyFrame }
+            return pictures.shown(segment == .frame ? pictures.picture(ofSegment: segmentID) : pictures.frame(at: loc))
         default:
             // A GIF's later frame that matched, else the picture.
-            return .picture(segment == .frame && loc != nil ? pictures.picture(ofSegment: segmentID) : pictures.image)
+            return pictures.shown(segment == .frame && loc != nil ? pictures.picture(ofSegment: segmentID)
+                                                                  : pictures.image)
         }
     }
 
@@ -103,8 +104,8 @@ extension ResultRow {
     /// goes by its most revealing one.
     var filePicture: SensitiveReveal.Shown? {
         guard let pictures else { return nil }
-        guard kind == .video else { return .picture(pictures.image) }
-        return photos?.reading?.isStandIn == true ? .picture(pictures.frame(atPlace: 0)) : .anyFrame(of: id, pictures)
+        guard kind == .video else { return pictures.shown(pictures.image) }
+        return photos?.reading?.isStandIn == true ? pictures.shown(pictures.frame(atPlace: 0)) : pictures.anyFrame
     }
 }
 

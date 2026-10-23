@@ -567,7 +567,8 @@ struct MomentsSection: View {
                     StillsStrip(filmstrip: filmstrip, matched: Set(moments.compactMap(\.still)),
                                 showing: shown.photos?.still, width: width,
                                 hidden: { index in
-                                    SensitiveBlur.shared.hides(.picture(row.pictures?.frame(atPlace: index)))
+                                    SensitiveBlur.shared.hides(
+                                        row.pictures.flatMap { $0.shown($0.frame(atPlace: index)) })
                                 }, pick: pick(still:))
                 }
             } else if let duration {
@@ -715,7 +716,8 @@ struct MomentStrip: View {
                 ZStack {
                     Color.black.opacity(0.85)
                     if let frame {
-                        let hidden = SensitiveBlur.shared.hides(.picture(row.pictures?.frame(at: pointer.seconds)))
+                        let hidden = SensitiveBlur.shared.hides(
+                            row.pictures.flatMap { $0.shown($0.frame(at: pointer.seconds)) })
                         Image(nsImage: frame.veiled(hidden)).resizable().interpolation(.high)
                             .aspectRatio(contentMode: .fit)
                             .sensitiveCover(hidden, iconSize: 14)

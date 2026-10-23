@@ -211,13 +211,12 @@ final class FakeRater: PictureRater {
         let revealing = SensitivePictures.Picture(segment: 2, loc: nil,
                                                   levels: SensitiveLevels(low: 0.6, medium: 0, high: 0))
         let unrated = SensitivePictures.Picture(segment: 3, loc: nil, levels: nil)
-        let video = SensitivePictures(frames: [ordinary, revealing, unrated])
-        let (still, other, thumbnail) = (try #require(SensitiveReveal.Shown.picture(ordinary)),
-                                         try #require(SensitiveReveal.Shown.picture(revealing)),
-                                         SensitiveReveal.Shown.anyFrame(of: "/v/clip.mov", video))
+        let video = SensitivePictures(path: "/v/clip.mov", read: 1, frames: [ordinary, revealing, unrated])
+        let (still, other, thumbnail) = (try #require(video.shown(ordinary)), try #require(video.shown(revealing)),
+                                         video.anyFrame)
         var reveal = SensitiveReveal()
         #expect(!reveal.hides(still, at: .revealing) && reveal.hides(other, at: .revealing))
-        #expect(!reveal.hides(try #require(SensitiveReveal.Shown.picture(unrated)), at: .revealing))
+        #expect(!reveal.hides(try #require(video.shown(unrated)), at: .revealing))
         // Quick Look's picture of it could be either still: blurred, as the revealing one is.
         #expect(reveal.hides(thumbnail, at: .revealing))
         // Clicking the ordinary still, or Quick Look's picture, shows the revealing still no more than before.
@@ -229,6 +228,47 @@ final class FakeRater: PictureRater {
         #expect(shown && !reveal.hides(other, at: .revealing))
         // Off, nothing is blurred.
         #expect(!SensitiveReveal().hides(other, at: .off))
+    }
+
+    @Test func aClickShowsNoOtherPictureThatGetsTheSameSegmentLater() throws {
+        // SQLite gives a segment of a picture read later the id of one deleted before (segments' ids are rowids).
+        let store = try IndexStore(directory: index)
+        let indexer = try makeIndexer(store, rater: FakeRater(levels: Self.revealing))
+        func ratings(of path: String) throws -> SensitivePictures {
+            try store.sensitivePictures(ofFile: #require(try store.file(at: path, keptBy: SearchFilter())).id)
+        }
+        func image(_ path: String) throws -> SensitivePictures.Picture { try #require(try ratings(of: path).image) }
+        func shown(_ path: String) throws -> SensitiveReveal.Shown {
+            let read = try ratings(of: path)
+            return try #require(read.shown(read.image))
+        }
+        let first = try makePictures(["a.jpg"])[0]
+        _ = try indexer.sync([pictures])
+        try indexer.run()
+        var reveal = SensitiveReveal()
+        let clicked = try image(first).segment
+        #expect(reveal.reveal(try shown(first), at: .revealing))
+        // That file goes; another one, rated sensitive too, gets its picture's segment id: it's still blurred.
+        try FileManager.default.removeItem(atPath: first)
+        _ = try indexer.sync([pictures])
+        let other = try makePictures(["b.jpg"])[0]
+        _ = try indexer.sync([pictures])
+        try indexer.run()
+        #expect(try image(other).segment == clicked)
+        #expect(reveal.hides(try shown(other), at: .revealing))
+        // The same file read again (it changed) is another reading: it's blurred again until it's clicked.
+        let again = try makePictures(["c.jpg"])[0]
+        _ = try indexer.sync([pictures])
+        try indexer.run()
+        let read = try image(again).segment
+        #expect(reveal.reveal(try shown(again), at: .revealing))
+        try FileManager.default.removeItem(atPath: again)
+        try FileManager.default.copyItem(at: ImageTests.pictures.appendingPathComponent("pattern-o6.heic"),
+                                         to: URL(fileURLWithPath: again))
+        _ = try indexer.sync([pictures])
+        try indexer.run()
+        #expect(try image(again).segment == read)
+        #expect(reveal.hides(try shown(again), at: .revealing))
     }
 
     @Test func aiAppsSeeNoPictureRatedSensitiveNorOneNotRatedYet() throws {
