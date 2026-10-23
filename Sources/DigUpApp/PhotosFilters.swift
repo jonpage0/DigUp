@@ -8,6 +8,10 @@ nonisolated struct PhotosChoices: Sendable, Equatable {
     var albums: [Album] = []
     /// The devices that took the libraries' pictures (`IndexStore.photosCameras`), most files first.
     var cameras: [IndexStore.PhotosCamera] = []
+    /// The index's rows they're made of: what a saved search's people and albums are found among
+    /// (`SavedSearch.Person.found(in:)`, as `digup mcp` finds them).
+    private var personRows: [IndexStore.PhotosPerson] = []
+    private var albumRows: [IndexStore.PhotosAlbum] = []
 
     /// "Shot on my devices" with Settings → Photos → My devices' changes (`AppSettings.myDevicesAdded`,
     /// `myDevicesRemoved`), by the kit's rule (`IndexStore.PhotosCamera.mine`).
@@ -61,6 +65,7 @@ nonisolated struct PhotosChoices: Sendable, Equatable {
     /// Only people and albums with an indexed file: the others would filter to nothing.
     init(people: [IndexStore.PhotosPerson], albums: [IndexStore.PhotosAlbum], cameras: [IndexStore.PhotosCamera]) {
         self.cameras = cameras
+        (personRows, albumRows) = (people, albums)
         var byName: [String: (photos: [Int64: PhotosID], files: Int)] = [:]
         var names: [String] = []
         for person in people where person.files > 0 {
@@ -89,35 +94,21 @@ nonisolated struct PhotosChoices: Sendable, Equatable {
         photos.sorted { $0.key < $1.key }.map(\.value)
     }
 
-    /// A saved search's person, as the indexed libraries have them now: every row of one of their Photos uuids (a
-    /// rename in Photos follows, and the token shows the name it has now). Found nowhere (deleted in Photos, or the
-    /// library isn't searched any more), the token keeps the saved name and keeps nothing (`FilterToken.isMissing`).
-    /// The token keeps the saved ids, so saving it again keeps who it was.
+    /// A saved search's person, as the indexed libraries have them now (`SavedSearch.Person.found(in:)`): every row of
+    /// one of their Photos uuids (a rename in Photos follows, and the token shows the name it has now). Found nowhere
+    /// (deleted in Photos, or the library isn't searched any more), the token keeps the saved name and keeps nothing
+    /// (`FilterToken.isMissing`). The token keeps the saved ids, so saving it again keeps who it was.
     func token(for saved: SavedSearch.Person) -> FilterToken {
-        let uuids = Set(saved.photos.map(\.uuid))
-        var name: String?, ids = Set<Int64>()
-        for person in people {
-            let found = person.photos.filter { uuids.contains($0.value.uuid) }
-            guard !found.isEmpty else { continue }
-            name = name ?? person.name
-            ids.formUnion(found.keys)
-        }
-        return .person(name: name ?? saved.name, ids: ids, photos: saved.photos)
+        let found = saved.found(in: personRows)
+        return .person(name: found?.name ?? saved.name, ids: found?.ids ?? [], photos: saved.photos)
     }
 
     /// A saved search's album, found by Photos' uuid as `token(for:)` finds a person (a rename or a move to another
     /// folder follows).
     func token(for saved: SavedSearch.Album) -> FilterToken {
-        let uuids = Set(saved.photos.map(\.uuid))
-        var place: (title: String, folders: [String])?, ids = Set<Int64>()
-        for album in albums {
-            let found = album.photos.filter { uuids.contains($0.value.uuid) }
-            guard !found.isEmpty else { continue }
-            place = place ?? (album.title, album.folders)
-            ids.formUnion(found.keys)
-        }
-        return .album(title: place?.title ?? saved.title, folders: place?.folders ?? saved.folders, ids: ids,
-                      photos: saved.photos)
+        let found = saved.found(in: albumRows)
+        return .album(title: found?.title ?? saved.title, folders: found?.folders ?? saved.folders,
+                      ids: found?.ids ?? [], photos: saved.photos)
     }
 
     /// Filters the words being typed could name: people and albums with a name or a word of it that starts with the
@@ -253,16 +244,18 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
         }
     }
 
+    /// What the token says: as a saved search's element of it says it (`SavedSearch.Filter.title`, which the Saved
+    /// summary line and `digup mcp`'s `list_choices` show too).
     var title: String {
         switch self {
         case .person(let name, _, _): name
         case .album(let title, _, _, _): title
-        case .photosFavorites: "Photos Favorites"
-        case .digupFavorites: "Favorites"
-        case .shotOnMyDevices: "Shot on my devices"
-        case .origin(let origin): origin == .imported ? "Imported into Photos" : "Saved from other apps"
-        case .area: "In the map's area"
-        case .sensitive: "Sensitive"
+        case .photosFavorites: SavedSearch.Filter.photosFavorites.title
+        case .digupFavorites: SavedSearch.Filter.digupFavorites.title
+        case .shotOnMyDevices: SavedSearch.From.mine.title
+        case .origin(let origin): (origin == .imported ? SavedSearch.From.imported : .saved).title
+        case .area: SavedSearch.Area.title
+        case .sensitive: SavedSearch.Filter.sensitive.title
         case .length(let length): length.title
         case .shape(let shape): shape.title
         case .matchBy(let matchBy): matchBy.title
@@ -314,57 +307,8 @@ nonisolated enum FilterToken: Equatable, Identifiable, Sendable {
     }
 }
 
-/// What the Length menu and a Length token say of a length.
-nonisolated extension SearchFilter.Length {
-    /// The menu's buckets as they're named ("Under 15 s", "15 s – 1 min", "1 – 5 min", "Over 5 min"), any other
-    /// length (a saved search's, made by hand) by its bounds the same way.
-    var title: String {
-        switch (atLeast, under) {
-        case (let atLeast?, let under?):
-            Self.minutes(atLeast).flatMap { from in Self.minutes(under).map { "\(from) – \($0) min" } }
-                ?? "\(Self.spoken(atLeast)) – \(Self.spoken(under))"
-        case (let atLeast?, nil): "Over \(Self.spoken(atLeast))"
-        case (nil, let under?): "Under \(Self.spoken(under))"
-        case (nil, nil): ""   // not a length (`init` turns it down)
-        }
-    }
-
-    /// "shorter than 15 s", "at least 15 s long and shorter than 1 min", "5 min long or longer".
-    var phrase: String {
-        switch (atLeast, under) {
-        case (let atLeast?, let under?): "at least \(Self.spoken(atLeast)) long and shorter than \(Self.spoken(under))"
-        case (let atLeast?, nil): "\(Self.spoken(atLeast)) long or longer"
-        case (nil, let under?): "shorter than \(Self.spoken(under))"
-        case (nil, nil): ""
-        }
-    }
-
-    /// "15 s", "1 min", "1 min 30 s".
-    private static func spoken(_ seconds: Double) -> String {
-        if let whole = minutes(seconds) { return "\(whole) min" }
-        let over = Int(seconds) / 60
-        let rest = "\((seconds - Double(over * 60)).formatted(.number.precision(.fractionLength(0...1)))) s"
-        return over > 0 ? "\(over) min \(rest)" : rest
-    }
-
-    /// Whole minutes, from 1 up; nil for any other number of seconds.
-    private static func minutes(_ seconds: Double) -> Int? {
-        seconds >= 60 && seconds.truncatingRemainder(dividingBy: 60) == 0 ? Int(seconds / 60) : nil
-    }
-}
-
-/// What the Shape menu and a Shape token say of a shape.
+/// What the Shape menu and a Shape token say of a shape, besides its title (the kit's `SearchFilter.Shape.title`).
 nonisolated extension SearchFilter.Shape {
-    var title: String {
-        switch self {
-        case .portrait: "Portrait"
-        case .landscape: "Landscape"
-        case .square: "Square"
-        case .wide: "Wide"
-        case .ratio: text
-        }
-    }
-
     /// The Shape menu's item: its title, and for square and wide what they take in.
     var menuTitle: String {
         switch self {

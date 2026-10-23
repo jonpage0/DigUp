@@ -369,4 +369,190 @@ import Testing
         #expect(reason(.name, .image, meaning: false, listed: true) == "Fits your filters")
         #expect(reason(.name, .doc, meaning: false) == "Matches its name")
     }
+
+    /// A saved search an AI app may not run (`digup mcp`'s `saved`) isn't listed to it either (`list_choices`): one
+    /// that uses what the user keeps from AI apps, each by its switch, or names someone or an album it doesn't see,
+    /// since its name is made from them. The Sensitive filter is refused by the switch `search_files` asks too.
+    @Test func aSavedSearchUsingWhatsKeptFromAIAppsIsntTheirs() throws {
+        let suzy = SavedSearch.Person(name: "Suzy", photos: [PhotosID(library: "/L.photoslibrary", uuid: "P-SUZY")])
+        let seen = [IndexStore.PhotosPerson(id: 1, library: "/L.photoslibrary", uuid: "P-SUZY", name: "Suzy", files: 1)]
+        let photos = AIAccess(on: true, photos: true)
+        func withheld(_ search: SavedSearch, _ access: AIAccess) -> SavedSearch.Withheld? {
+            search.withheld(from: access, people: seen, albums: [])
+        }
+        typealias Search = SavedSearchTests
+        // Photos for its people, albums, Photos' favorites and From; pictures rated sensitive; code.
+        for filters: [SavedSearch.Filter] in [[.person(suzy)], [.photosFavorites], [.from(.mine)], [.from(.imported)]] {
+            #expect(withheld(Search.search(filters), AIAccess(on: true)) == .use(.photos))
+            #expect(withheld(Search.search(filters), photos) == nil)
+        }
+        #expect(withheld(Search.search([.sensitive]), photos) == .use(.sensitive) && !photos.allows(.sensitive))
+        let sensitive = AIAccess(on: true, sensitive: true)
+        #expect(withheld(Search.search([.sensitive]), sensitive) == nil && sensitive.allows(.sensitive))
+        #expect(withheld(Search.search(query: "code: retry"), photos) == .use(.code))
+        #expect(withheld(Search.search(query: "", kind: .code), photos) == .use(.code))
+        #expect(withheld(Search.search(query: "", kind: .code), AIAccess(on: true, code: true)) == nil)
+        // Nothing kept from it: its own.
+        let short = try #require(SearchFilter.Length(under: 15))
+        #expect(withheld(Search.search([.digupFavorites, .length(short), .shape(.wide)]), AIAccess(on: true)) == nil)
+    }
+
+    /// `list_choices`: the people, albums and devices an AI app is told of are only those of what it sees, counted by
+    /// what it sees; a saved search naming someone or an album it doesn't see isn't its own.
+    @Test func anAIAppIsToldOnlyOfThePeopleAlbumsAndDevicesOfWhatItSees() throws {
+        // A library of two pictures shot on two phones: the first of Suzy, in the album Trip and in a second album of
+        // that title; the second, hidden, of Suzy and Katie, in the album Secret and in the second Trip.
+        let library = folder.appendingPathComponent("Photos Library.photoslibrary")
+        let originals = library.appendingPathComponent("originals/F")
+        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+        let uuids = (0..<2).map { _ in UUID().uuidString }   // a library's file is named for its asset's uuid
+        let paths = uuids.map { originals.appendingPathComponent($0 + ".jpeg").path }
+        for path in paths { try Data(path.utf8).write(to: URL(fileURLWithPath: path)) }
+        let suzy = PhotosLibrary.Person(uuid: "P-SUZY", name: "Suzy")
+        let katie = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katie")
+        let trip = PhotosLibrary.Album(uuid: "A-TRIP", title: "Trip")
+        let otherTrip = PhotosLibrary.Album(uuid: "A-TRIP-2", title: "Trip")
+        let secret = PhotosLibrary.Album(uuid: "A-SECRET", title: "Secret")
+        let assets = [PhotosLibrary.Asset(uuid: uuids[0], path: paths[0], movie: false, screenshot: false,
+                                          title: "IMG_0.JPG", date: 1_700_000_000, words: [], people: [suzy.uuid],
+                                          albums: [trip.uuid, otherTrip.uuid], importedBy: 1, camera: "iPhone 15 Pro"),
+                      PhotosLibrary.Asset(uuid: uuids[1], path: paths[1], movie: false, screenshot: false,
+                                          title: "IMG_1.JPG", date: 1_700_000_001, words: [],
+                                          people: [suzy.uuid, katie.uuid], albums: [secret.uuid, otherTrip.uuid],
+                                          importedBy: 1, camera: "iPhone Air", hidden: true)]
+        let store = try IndexStore(directory: index)
+        var options = IndexOptions()
+        options.photos = PhotosLibrary.Reader { _, _ in
+            PhotosLibrary.Listing(assets: assets, people: [suzy, katie], albums: [trip, otherTrip, secret])
+        }
+        _ = try Indexer(store: store, options: options, makeEmbedder: { throw WorkerError.notFound("not needed") })
+            .sync([library])
+        try keep([(uuids[0], false), (uuids[1], true)], of: library.path, hidden: true)
+        var seen = SearchFilter()
+        seen.photosOnly = try store.photosFiles { PhotosLibrary.visibleAssets(of: $0, keptIn: index) }
+        #expect(seen.photosOnly == [paths[0]])
+
+        // People: Suzy alone, in the one picture it sees. DigUp's window has Katie too, and Suzy in both.
+        func named(_ filter: SearchFilter) throws -> [String] {
+            try store.photosNames(keptBy: filter).map { "\($0.name) \($0.files)" }
+        }
+        #expect(try named(seen) == ["Suzy 1"])
+        #expect(try named(SearchFilter()) == ["Katie 1", "Suzy 2"])
+        // Albums: Trip alone, one choice for both albums of the title, its picture in both counted once. DigUp's window
+        // has Secret too, and Trip's two pictures.
+        func albumed(_ filter: SearchFilter) throws -> [String] {
+            try store.photosAlbumChoices(keptBy: filter).map { "\($0.title) \($0.folders) \($0.files)" }
+        }
+        #expect(try albumed(seen) == ["Trip [] 1"])
+        #expect(try albumed(SearchFilter()) == ["Secret [] 1", "Trip [] 2"])
+        let albums = try store.photosAlbums(keptBy: seen)
+        // The devices "mine" covers, by the rule over what it sees: the one whose camera saved what it sees, not the one
+        // that saved only the hidden picture, which "mine" has for DigUp's window. One the user added is theirs whatever
+        // took it: the one that took only the hidden picture as much as one that took nothing indexed, so the hidden
+        // picture shows in nothing it's told.
+        #expect(try store.myDevices(added: [], removed: [], keptBy: seen) == ["iPhone 15 Pro"])
+        #expect(try store.myDevices(added: [], removed: []) == ["iPhone 15 Pro", "iPhone Air"])
+        #expect(try store.myDevices(added: ["iPhone Air", "iPhone 18"], removed: [], keptBy: seen)
+                == ["iPhone 15 Pro", "iPhone Air", "iPhone 18"])
+        // Saved searches: one of Suzy in Trip is its own; one naming Katie, or Secret, isn't.
+        let people = try store.photosPeople(keptBy: seen)
+        func person(_ who: PhotosLibrary.Person) -> SavedSearch.Filter {
+            .person(.init(name: who.name, photos: [PhotosID(library: library.path, uuid: who.uuid)]))
+        }
+        func album(_ which: PhotosLibrary.Album) -> SavedSearch.Filter {
+            .album(.init(title: which.title, folders: [], photos: [PhotosID(library: library.path, uuid: which.uuid)]))
+        }
+        func withheld(_ filters: [SavedSearch.Filter], _ access: AIAccess = AIAccess(on: true, photos: true),
+                      people: [IndexStore.PhotosPerson], albums: [IndexStore.PhotosAlbum]) -> SavedSearch.Withheld? {
+            SavedSearchTests.search(filters).withheld(from: access, people: people, albums: albums)
+        }
+        #expect(withheld([person(suzy), album(trip)], people: people, albums: albums) == nil)
+        #expect(withheld([person(katie)], people: people, albums: albums) == .outOfSight)
+        #expect(withheld([album(trip), album(secret)], people: people, albums: albums) == .outOfSight)
+        // Hidden items allowed, she's in sight.
+        #expect(withheld([person(katie)], AIAccess(on: true, photos: true, hiddenPhotos: true),
+                         people: try store.photosPeople(), albums: try store.photosAlbums()) == nil)
+    }
+
+    #if canImport(ImageIO)
+    /// A person's count for an AI app has their pictures outside Photos, by the faces it may see
+    /// (`IndexStore.photosNames(keptBy:)`, as `search_files`' `people` keeps them).
+    @Test func aPersonsCountForAnAIAppHasTheirFacesOutsidePhotosItSees() throws {
+        let faces = FaceIndexTests()
+        let more: [String: [[Float]]] = ["like-katie-85.jpg": [[0.7, 0, 0, 0.714]]]
+        let indexed = try faces.indexed(by: faces.reader(more: more), more: more)
+        // katie-85.jpg is Katie, the user said, which teaches: the picture like it is hers too.
+        try faces.correct(indexed, [("katie-85.jpg", 0, FaceIndexTests.katie, "is")])
+        try indexed.store.rebuildFaceMatches()
+        func named(_ filter: SearchFilter) throws -> [String] {
+            try indexed.store.photosNames(keptBy: filter).map { "\($0.name) \($0.files)" }
+        }
+        // Katie: her picture in Photos, and four outside, two by her face, one she was said to be and one it taught.
+        // Sam, two people of the name: their pictures in Photos, and two outside with one or the other's face.
+        #expect(try named(SearchFilter()) == ["Katie 5", "Sam 4"])
+        // The picture that teaches kept from it: neither it nor the one it taught is hers to it.
+        let everything = Set(try indexed.store.files(under: [indexed.library.path, indexed.downloads.path]).map(\.path))
+        var seen = SearchFilter()
+        seen.paths = everything.subtracting([indexed.path("katie-85.jpg")])
+        #expect(try named(seen) == ["Katie 3", "Sam 4"])
+        // Sam's picture in Photos kept from it: the other Sam is the name's, and the picture outside that's Sam's by
+        // his face in that picture is no one's to it.
+        seen = SearchFilter()
+        seen.photosOnly = [indexed.pictures[0], indexed.pictures[2]]
+        #expect(try named(seen) == ["Katie 5", "Sam 2"])
+        // No picture in Photos: no one.
+        seen.photosOnly = []
+        #expect(try named(seen).isEmpty)
+    }
+    #endif
+
+    /// A recording's moments for an AI app (`digup mcp`'s `moments`) come only from what it sees: a recording kept
+    /// from it has none, and what's kept from it doesn't move the scale its moments stand out on. The one its result
+    /// is at isn't among the others.
+    @Test func aRecordingsMomentsForAnAIAppComeOnlyFromWhatItSees() throws {
+        let fixture = MomentsTests()
+        let video = "/videos/river.mov"
+        let searcher = try fixture.index(video, .video, [
+            (.frame, 0.5, 3.5, 1), (.frame, 3.5, 6.5, 0), (.frame, 6.5, 9.5, 0.25), (.frame, 9.5, 12.5, 0),
+            (.frame, 12.5, 15.5, 0.9),
+        ])
+        var seen = SearchFilter()
+        seen.photosOnly = []
+        func moments(_ path: String, _ filter: SearchFilter, in searcher: Searcher) throws -> [Moment] {
+            try searcher.moments(of: path, text: MomentsTests.words, queryVector: MomentsTests.query, filter: filter)
+        }
+        let before = try moments(video, seen, in: searcher)
+        #expect(before.map(\.start) == [0.5, 12.5])
+        // Its result is at the best of them; the other is the one left.
+        let hit = try #require(try searcher.search(MomentsTests.words, queryVector: MomentsTests.query, filter: seen)
+            .first { $0.path == video })
+        #expect(before.filter { !$0.holds(hit) }.map(\.start) == [12.5])
+
+        let store = searcher.store
+        var inode: UInt64 = 500
+        func add(_ path: String, _ kind: FileKind, _ segment: SegmentKind, _ vector: [Float]) throws {
+            inode += 1
+            let id = try store.insert(Candidate(path: path, kind: kind, size: 1, mtime: 1, inode: inode, device: 1))
+            try store.addSegment(file: id, kind: segment, modality: .image, loc: kind == .video ? 0 : nil,
+                                 locEnd: kind == .video ? 3 : nil, vector: vector)
+        }
+        // A library's video like the query, which it may not see: no moments, though the window has one.
+        let hidden = "/L.photoslibrary/originals/F/clip.mov"
+        try add(hidden, .video, .frame, MomentsTests.query)
+        let withVideo = try Searcher(store: store)
+        #expect(try moments(hidden, seen, in: withVideo).isEmpty)
+        #expect(try moments(hidden, SearchFilter(), in: withVideo).map(\.start) == [0])
+        // Then 40 of the library's pictures as unlike the query as can be: the same moments, but for the last bits
+        // of the products (rows are multiplied a block at a time).
+        for number in 0..<40 {
+            try add("/L.photoslibrary/originals/F/\(number).jpeg", .image, .image, MomentsTests.query.map { -$0 })
+        }
+        let now = try Searcher(store: store)
+        let after = try moments(video, seen, in: now)
+        #expect(after.map(\.start) == before.map(\.start) && after.map(\.end) == before.map(\.end))
+        #expect(zip(after, before).allSatisfy { abs($0.score - $1.score) < 1e-6 })
+        // DigUp's own preview sees them all, and its scale moves.
+        let window = try #require(try moments(video, SearchFilter(), in: now).first)
+        #expect(abs(window.score - before[0].score) > 1e-3)
+    }
 }

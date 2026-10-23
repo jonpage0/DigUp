@@ -3,271 +3,15 @@ import DigUpKit
 import Observation
 import SwiftUI
 
-/// A search the user saved: its words, kind and filters, run again whenever it's opened (a smart folder: nothing about
-/// its results is kept). One entry of `saved-searches.json` (`SavedSearches`).
-struct SavedSearch: Equatable, Identifiable {
-    /// Made when it's saved; renaming or moving it keeps it.
-    var id: UUID
-    /// What the Saved menu shows: never empty, and two may share one.
-    var name: String
-    /// The words as typed: "" for filters alone, "code: …" for code.
-    var query: String
-    /// The window's kind button; nil for All.
-    var kind: ResultGroupKind?
-    /// The tokens in the search field, in order (the map's area is the last of them there).
-    var filters: [Filter]
-    var saved: Date
-
-    /// One token of the search field.
-    enum Filter: Equatable {
-        case person(Person)
-        case album(Album)
-        case photosFavorites
-        case digupFavorites
-        case from(From)
-        case area(Area)
-        /// The Sensitive filter, at the position "Blur sensitive pictures" has when the search runs (as `from: "mine"`
-        /// is the devices list as it is then, not a copy of it). `{ "sensitive": true }`, approved 2026-10-22.
-        case sensitive
-        /// The Length filter: `{ "length": { "atLeast": 15, "under": 60 } }`, either bound left out (approved
-        /// 2026-10-22; the kit reads it strictly: `SearchFilter.Length`'s `Codable`).
-        case length(SearchFilter.Length)
-        /// The Shape filter: `{ "shape": "portrait" }`, or an exact ratio, `{ "shape": "16:9" }` (approved 2026-10-22).
-        case shape(SearchFilter.Shape)
-        /// Match by: `{ "matchBy": ["spoken", "text"] }`, one or more parts, each once, written in the kit's order and
-        /// read in any (approved 2026-10-23; the kit reads it strictly: `SearchFilter.MatchBy`'s `Codable`).
-        case matchBy(SearchFilter.MatchBy)
-    }
-
-    /// A person by Photos' ids, one per library that has them (everyone of the name, as the People filter joins
-    /// them), with the name they had when it was saved.
-    struct Person: Codable, Equatable {
-        var name: String
-        var photos: [PhotosID]
-    }
-
-    /// An album by Photos' ids (each library's album of that title in those folders), with its title and folders
-    /// when it was saved.
-    struct Album: Codable, Equatable {
-        var title: String
-        var folders: [String]
-        var photos: [PhotosID]
-    }
-
-    /// The window's From. `mine` is "Shot on my devices" as the list is when the search runs (Settings → Photos → My
-    /// devices), not a copy of it.
-    enum From: String, Codable {
-        case mine, saved, imported
-    }
-
-    /// The map's area, in degrees.
-    struct Area: Codable, Equatable {
-        var south: Double
-        var west: Double
-        var north: Double
-        var east: Double
-
-        init(_ area: SearchFilter.Area) {
-            (south, north) = (area.latitudes.lowerBound, area.latitudes.upperBound)
-            (west, east) = (area.longitudes.lowerBound, area.longitudes.upperBound)
-        }
-
-        /// A box on the map: south to north, west to east, within the earth's degrees.
-        var isBox: Bool { -90 <= south && south <= north && north <= 90 && -180 <= west && west <= east && east <= 180 }
-
-        /// Only for a box (`isBox`, which reading the file checks).
-        var searchArea: SearchFilter.Area { SearchFilter.Area(latitudes: south...north, longitudes: west...east) }
-    }
-
-    /// What the file's shape asks of a search beyond its keys: a name, at most one From, one area, one Sensitive, one
-    /// Length, one Shape and one Match by, and an area that's a box.
-    var isWellFormed: Bool {
-        var froms = 0, areas = 0, sensitives = 0, lengths = 0, shapes = 0, matchBys = 0
-        for filter in filters {
-            switch filter {
-            case .from: froms += 1
-            case .area(let area):
-                guard area.isBox else { return false }
-                areas += 1
-            case .sensitive: sensitives += 1
-            case .length: lengths += 1
-            case .shape: shapes += 1
-            case .matchBy: matchBys += 1
-            default: break
-            }
-        }
-        return !name.isEmpty && [froms, areas, sensitives, lengths, shapes, matchBys].allSatisfy { $0 <= 1 }
-    }
-}
-
-extension SavedSearch: Codable {
-    private enum CodingKeys: String, CodingKey, CaseIterable {
-        case id, name, query, kind, filters, saved
-    }
-
-    /// Every key is there, and no other: `kind` too, null for All.
-    init(from decoder: any Decoder) throws {
-        try onlyKeys(CodingKeys.self, in: decoder)
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(UUID.self, forKey: .id)
-        name = try container.decode(String.self, forKey: .name)
-        query = try container.decode(String.self, forKey: .query)
-        kind = try container.decode(ResultGroupKind?.self, forKey: .kind)
-        filters = try container.decode([Filter].self, forKey: .filters)
-        saved = try container.decode(Date.self, forKey: .saved)
-    }
-
-    func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(id, forKey: .id)
-        try container.encode(name, forKey: .name)
-        try container.encode(query, forKey: .query)
-        try container.encode(kind, forKey: .kind)   // null for All, not left out
-        try container.encode(filters, forKey: .filters)
-        try container.encode(saved, forKey: .saved)
-    }
-}
-
-extension SavedSearch.Person {
-    private enum CodingKeys: String, CodingKey, CaseIterable {
-        case name, photos
-    }
-
-    init(from decoder: any Decoder) throws {
-        try onlyKeys(CodingKeys.self, in: decoder)
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        name = try container.decode(String.self, forKey: .name)
-        photos = try container.decode([PhotosID].self, forKey: .photos)
-    }
-}
-
-extension SavedSearch.Album {
-    private enum CodingKeys: String, CodingKey, CaseIterable {
-        case title, folders, photos
-    }
-
-    init(from decoder: any Decoder) throws {
-        try onlyKeys(CodingKeys.self, in: decoder)
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        title = try container.decode(String.self, forKey: .title)
-        folders = try container.decode([String].self, forKey: .folders)
-        photos = try container.decode([PhotosID].self, forKey: .photos)
-    }
-}
-
-extension SavedSearch.Area {
-    private enum CodingKeys: String, CodingKey, CaseIterable {
-        case south, west, north, east
-    }
-
-    init(from decoder: any Decoder) throws {
-        try onlyKeys(CodingKeys.self, in: decoder)
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        south = try container.decode(Double.self, forKey: .south)
-        west = try container.decode(Double.self, forKey: .west)
-        north = try container.decode(Double.self, forKey: .north)
-        east = try container.decode(Double.self, forKey: .east)
-    }
-}
-
-/// A filter is an object with exactly one key, one of these ten; anything else isn't this shape.
-extension SavedSearch.Filter: Codable {
-    private enum Key: String, CodingKey, CaseIterable {
-        case person, album, photosFavorites, digupFavorites, from, area, sensitive, length, shape, matchBy
-    }
-
-    init(from decoder: any Decoder) throws {
-        let keys = try decoder.container(keyedBy: AnyKey.self).allKeys.map(\.stringValue)
-        guard keys.count == 1, let key = Key(stringValue: keys[0]) else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription:
-                "a filter has one key of \(Key.allCases.map(\.rawValue)), not \(keys)"))
-        }
-        let container = try decoder.container(keyedBy: Key.self)
-        switch key {
-        case .person: self = .person(try container.decode(SavedSearch.Person.self, forKey: key))
-        case .album: self = .album(try container.decode(SavedSearch.Album.self, forKey: key))
-        case .photosFavorites, .digupFavorites, .sensitive:
-            guard try container.decode(Bool.self, forKey: key) else {
-                throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: "is always true")
-            }
-            self = switch key {
-            case .photosFavorites: .photosFavorites
-            case .digupFavorites: .digupFavorites
-            default: .sensitive
-            }
-        case .from: self = .from(try container.decode(SavedSearch.From.self, forKey: key))
-        case .area: self = .area(try container.decode(SavedSearch.Area.self, forKey: key))
-        case .length: self = .length(try container.decode(SearchFilter.Length.self, forKey: key))
-        case .shape: self = .shape(try container.decode(SearchFilter.Shape.self, forKey: key))
-        case .matchBy: self = .matchBy(try container.decode(SearchFilter.MatchBy.self, forKey: key))
-        }
-    }
-
-    func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: Key.self)
-        switch self {
-        case .person(let person): try container.encode(person, forKey: .person)
-        case .album(let album): try container.encode(album, forKey: .album)
-        case .photosFavorites: try container.encode(true, forKey: .photosFavorites)
-        case .digupFavorites: try container.encode(true, forKey: .digupFavorites)
-        case .from(let from): try container.encode(from, forKey: .from)
-        case .area(let area): try container.encode(area, forKey: .area)
-        case .sensitive: try container.encode(true, forKey: .sensitive)
-        case .length(let length): try container.encode(length, forKey: .length)
-        case .shape(let shape): try container.encode(shape, forKey: .shape)
-        case .matchBy(let matchBy): try container.encode(matchBy, forKey: .matchBy)
-        }
-    }
-}
-
 /// The searches the user saved (the search window's Saved menu). The user makes these, so they're kept out of the
 /// index, which DigUp rebuilds and Settings → Storage can delete: `saved-searches.json` beside the index folder, as
 /// `favorites.json` is, read once and written whole on each change (to a temporary file, then renamed over the old
-/// one).
+/// one), in the shape the kit reads and writes (`SavedSearch`), which `digup mcp` reads too.
 ///
-/// The shape (approved 2026-10-22; `{ "sensitive": true }` with it, the same evening; `{ "length": … }` and
-/// `{ "shape": … }` with the Length and Shape filters; `{ "matchBy": […] }` with Match by, 2026-10-23):
-///
-///     { "version": 1,
-///       "searches": [ { "id": "<UUID>", "name": "Tati at the beach", "query": "beach", "kind": "images",
-///                       "filters": [ { "person": { "name": "…", "photos": [ { "library": "…", "uuid": "…" } ] } },
-///                                    { "album": { "title": "…", "folders": ["…"], "photos": [ … ] } },
-///                                    { "photosFavorites": true }, { "digupFavorites": true }, { "from": "mine" },
-///                                    { "area": { "south": 25.1, "west": -80.9, "north": 26.2, "east": -79.8 } },
-///                                    { "sensitive": true }, { "length": { "atLeast": 15, "under": 60 } },
-///                                    { "shape": "16:9" }, { "matchBy": ["spoken", "text"] } ],
-///                       "saved": "<ISO 8601>" } ] }
-///
-/// In the user's order, which the menu shows. A file DigUp can't read as exactly this shape (a newer version, damaged,
-/// a key anywhere that the shape doesn't have, a filter with two keys or none, two From, two areas, two Sensitive, two
-/// lengths, two shapes or two Match by in one search, a length, a shape or a Match by the filters don't have) is left
-/// as it is and never written over: nothing can be saved, renamed or deleted until it's fixed.
+/// In the user's order, which the menu shows. A file DigUp can't read as exactly that shape is left as it is and never
+/// written over: nothing can be saved, renamed or deleted until it's fixed.
 @MainActor @Observable
 final class SavedSearches {
-    private struct Stored: Codable {
-        var version: Int
-        var searches: [SavedSearch]
-
-        private enum CodingKeys: String, CodingKey, CaseIterable {
-            case version, searches
-        }
-
-        init(version: Int, searches: [SavedSearch]) {
-            (self.version, self.searches) = (version, searches)
-        }
-
-        init(from decoder: any Decoder) throws {
-            try onlyKeys(CodingKeys.self, in: decoder)
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            version = try container.decode(Int.self, forKey: .version)
-            searches = try container.decode([SavedSearch].self, forKey: .searches)
-        }
-    }
-
-    private struct Version: Decodable {
-        var version: Int
-    }
-
     private(set) var searches: [SavedSearch] = []
     /// The file is there but isn't this shape.
     private(set) var unreadable = false
@@ -275,7 +19,7 @@ final class SavedSearches {
 
     /// Beside the index folder (`~/Library/Application Support/DigUp/saved-searches.json` for the default one).
     convenience init(beside indexDirectory: URL) {
-        self.init(url: indexDirectory.deletingLastPathComponent().appendingPathComponent("saved-searches.json"))
+        self.init(url: SavedSearch.url(beside: indexDirectory))
     }
 
     init(url: URL) {
@@ -320,42 +64,20 @@ final class SavedSearches {
         }
     }
 
-    // MARK: The file
-
-    private static let encoder: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        return encoder
-    }()
-
-    private static let decoder: JSONDecoder = {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
-    }()
-
     private func load() {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         do {
-            let data = try Data(contentsOf: url)
-            let version = try Self.decoder.decode(Version.self, from: data).version
-            guard version == 1 else {
-                unreadable = true
-                log("saved searches: \(url.lastPathComponent) is version \(version); this DigUp reads 1, so it's left alone")
-                return
-            }
-            let stored = try Self.decoder.decode(Stored.self, from: data)
-            guard stored.searches.allSatisfy(\.isWellFormed),
-                  Set(stored.searches.map(\.id)).count == stored.searches.count else {
-                unreadable = true
-                log("saved searches: \(url.lastPathComponent) has a search without a name, with two From, two areas, "
-                    + "two Sensitive, two lengths, two shapes or two Match by, an area that isn't a box, or an id "
-                    + "twice; it's left as it is")
-                return
-            }
-            searches = stored.searches
+            searches = try SavedSearch.searches(in: Data(contentsOf: url))
             log("saved searches: \(searches.count)")
+        } catch SavedSearch.FileError.version(let version) {
+            unreadable = true
+            log("saved searches: \(url.lastPathComponent) is version \(version); this DigUp reads 1, so it's left "
+                + "alone")
+        } catch SavedSearch.FileError.notWellFormed {
+            unreadable = true
+            log("saved searches: \(url.lastPathComponent) has a search without a name, with two From, two areas, "
+                + "two Sensitive, two lengths, two shapes or two Match by, an area that isn't a box, or an id "
+                + "twice; it's left as it is")
         } catch {
             unreadable = true
             log("saved searches: \(url.lastPathComponent) can't be read (\(error)); it's left as it is")
@@ -366,7 +88,7 @@ final class SavedSearches {
         guard !unreadable else { return }
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try Self.encoder.encode(Stored(version: 1, searches: searches)).write(to: url, options: .atomic)
+            try SavedSearch.data(searches).write(to: url, options: .atomic)
         } catch {
             log("saved searches: can't save \(url.lastPathComponent): \(error)")
         }
