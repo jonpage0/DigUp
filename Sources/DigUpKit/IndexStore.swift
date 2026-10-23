@@ -848,6 +848,8 @@ public final class IndexStore {
         public let id: Int64
         /// The library, as the index spells it (`PhotosHit.library`).
         public let library: String
+        /// Photos' id for them, kept through a rename in Photos: what the app's saved searches find them by.
+        public let uuid: String
         public let name: String
         public let files: Int
     }
@@ -856,6 +858,8 @@ public final class IndexStore {
     public struct PhotosAlbum: Sendable, Equatable, Identifiable {
         public let id: Int64
         public let library: String
+        /// Photos' id for it, kept when it's renamed or moved to another folder (`PhotosPerson.uuid`).
+        public let uuid: String
         public let title: String
         /// The folders it's in, outermost first.
         public let folders: [String]
@@ -866,11 +870,11 @@ public final class IndexStore {
     public func photosPeople() throws -> [PhotosPerson] {
         var people: [PhotosPerson] = []
         try db.query("""
-            SELECT p.id, p.library, p.name, COUNT(l.file) FROM photos_people p
+            SELECT p.id, p.library, p.uuid, p.name, COUNT(l.file) FROM photos_people p
             LEFT JOIN photos_person_files l ON l.person = p.id GROUP BY p.id ORDER BY p.name COLLATE NOCASE, p.id
             """) {
-            people.append(PhotosPerson(id: $0.int(0), library: $0.text(1) ?? "", name: $0.text(2) ?? "",
-                                       files: Int($0.int(3))))
+            people.append(PhotosPerson(id: $0.int(0), library: $0.text(1) ?? "", uuid: $0.text(2) ?? "",
+                                       name: $0.text(3) ?? "", files: Int($0.int(4))))
         }
         return people
     }
@@ -880,11 +884,12 @@ public final class IndexStore {
     public func photosAlbums() throws -> [PhotosAlbum] {
         var albums: [PhotosAlbum] = []
         try db.query("""
-            SELECT a.id, a.library, a.title, a.folders, COUNT(l.file) FROM photos_albums a
+            SELECT a.id, a.library, a.uuid, a.title, a.folders, COUNT(l.file) FROM photos_albums a
             LEFT JOIN photos_album_files l ON l.album = a.id GROUP BY a.id ORDER BY a.id
             """) {
-            albums.append(PhotosAlbum(id: $0.int(0), library: $0.text(1) ?? "", title: $0.text(2) ?? "",
-                                      folders: Self.folders(fromJSON: $0.text(3)), files: Int($0.int(4))))
+            albums.append(PhotosAlbum(id: $0.int(0), library: $0.text(1) ?? "", uuid: $0.text(2) ?? "",
+                                      title: $0.text(3) ?? "", folders: Self.folders(fromJSON: $0.text(4)),
+                                      files: Int($0.int(5))))
         }
         return albums.sorted {
             $0.folders != $1.folders ? $0.folders.lexicographicallyPrecedes($1.folders)

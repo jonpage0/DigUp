@@ -38,10 +38,14 @@ struct PhotosChoices: Sendable, Equatable {
     /// either counts (`SearchFilter.people`).
     struct Person: Sendable, Equatable, Identifiable {
         let name: String
-        let ids: Set<Int64>
+        /// Each of them: their row in the index, and who they are in Photos (what a saved search keeps).
+        let photos: [Int64: PhotosID]
         /// Indexed files showing them (one showing both of a name counts twice).
         let files: Int
         var id: String { name }
+        var ids: Set<Int64> { Set(photos.keys) }
+        /// The filter for them.
+        var token: FilterToken { .person(name: name, ids: ids, photos: PhotosChoices.ordered(photos)) }
     }
 
     /// One album title in one folder: two libraries can each have it, and a file in either counts.
@@ -49,9 +53,14 @@ struct PhotosChoices: Sendable, Equatable {
         let title: String
         /// The folders it's in, outermost first.
         let folders: [String]
-        let ids: Set<Int64>
+        /// Each library's album of it: its row in the index, and Photos' id for it.
+        let photos: [Int64: PhotosID]
         let files: Int
         var id: [String] { folders + [title] }
+        var ids: Set<Int64> { Set(photos.keys) }
+        var token: FilterToken {
+            .album(title: title, folders: folders, ids: ids, photos: PhotosChoices.ordered(photos))
+        }
     }
 
     init() {}
@@ -59,25 +68,63 @@ struct PhotosChoices: Sendable, Equatable {
     /// Only people and albums with an indexed file: the others would filter to nothing.
     init(people: [IndexStore.PhotosPerson], albums: [IndexStore.PhotosAlbum], cameras: [IndexStore.PhotosCamera]) {
         self.cameras = cameras
-        var byName: [String: (ids: Set<Int64>, files: Int)] = [:]
+        var byName: [String: (photos: [Int64: PhotosID], files: Int)] = [:]
         var names: [String] = []
         for person in people where person.files > 0 {
             if byName[person.name] == nil { names.append(person.name) }
-            byName[person.name, default: ([], 0)].ids.insert(person.id)
-            byName[person.name, default: ([], 0)].files += person.files
+            byName[person.name, default: ([:], 0)].photos[person.id] = PhotosID(library: person.library,
+                                                                                uuid: person.uuid)
+            byName[person.name, default: ([:], 0)].files += person.files
         }
-        self.people = names.map { Person(name: $0, ids: byName[$0]!.ids, files: byName[$0]!.files) }
-        var byPlace: [[String]: (ids: Set<Int64>, files: Int)] = [:]
+        self.people = names.map { Person(name: $0, photos: byName[$0]!.photos, files: byName[$0]!.files) }
+        var byPlace: [[String]: (photos: [Int64: PhotosID], files: Int)] = [:]
         var places: [[String]] = []
         for album in albums where album.files > 0 {
             let place = album.folders + [album.title]
             if byPlace[place] == nil { places.append(place) }
-            byPlace[place, default: ([], 0)].ids.insert(album.id)
-            byPlace[place, default: ([], 0)].files += album.files
+            byPlace[place, default: ([:], 0)].photos[album.id] = PhotosID(library: album.library, uuid: album.uuid)
+            byPlace[place, default: ([:], 0)].files += album.files
         }
         self.albums = places.map {
-            Album(title: $0.last!, folders: Array($0.dropLast()), ids: byPlace[$0]!.ids, files: byPlace[$0]!.files)
+            Album(title: $0.last!, folders: Array($0.dropLast()), photos: byPlace[$0]!.photos,
+                  files: byPlace[$0]!.files)
         }
+    }
+
+    /// Photos' ids in the order of their rows, so a search saved twice is written the same.
+    static func ordered(_ photos: [Int64: PhotosID]) -> [PhotosID] {
+        photos.sorted { $0.key < $1.key }.map(\.value)
+    }
+
+    /// A saved search's person, as the indexed libraries have them now: every row of one of their Photos uuids (a
+    /// rename in Photos follows, and the token shows the name it has now). Found nowhere (deleted in Photos, or the
+    /// library isn't searched any more), the token keeps the saved name and keeps nothing (`FilterToken.isMissing`).
+    /// The token keeps the saved ids, so saving it again keeps who it was.
+    func token(for saved: SavedSearch.Person) -> FilterToken {
+        let uuids = Set(saved.photos.map(\.uuid))
+        var name: String?, ids = Set<Int64>()
+        for person in people {
+            let found = person.photos.filter { uuids.contains($0.value.uuid) }
+            guard !found.isEmpty else { continue }
+            name = name ?? person.name
+            ids.formUnion(found.keys)
+        }
+        return .person(name: name ?? saved.name, ids: ids, photos: saved.photos)
+    }
+
+    /// A saved search's album, found by Photos' uuid as `token(for:)` finds a person (a rename or a move to another
+    /// folder follows).
+    func token(for saved: SavedSearch.Album) -> FilterToken {
+        let uuids = Set(saved.photos.map(\.uuid))
+        var place: (title: String, folders: [String])?, ids = Set<Int64>()
+        for album in albums {
+            let found = album.photos.filter { uuids.contains($0.value.uuid) }
+            guard !found.isEmpty else { continue }
+            place = place ?? (album.title, album.folders)
+            ids.formUnion(found.keys)
+        }
+        return .album(title: place?.title ?? saved.title, folders: place?.folders ?? saved.folders, ids: ids,
+                      photos: saved.photos)
     }
 
     /// Filters the words being typed could name: people and albums with a name or a word of it that starts with the
@@ -96,10 +143,10 @@ struct PhotosChoices: Sendable, Equatable {
             let tail = String(query[words[words.count - count].startIndex...])
             guard tail.count >= 2 else { continue }
             for person in people where Self.wordStarts(person.name, with: tail) {
-                add(.person(name: person.name, ids: person.ids), for: tail, "person · \(person.files)")
+                add(person.token, for: tail, "person · \(person.files)")
             }
             for album in albums where Self.wordStarts(album.title, with: tail) {
-                add(.album(ids: album.ids, title: album.title), for: tail, "album · \(album.files)")
+                add(album.token, for: tail, "album · \(album.files)")
             }
         }
         if photos, let last = words.last, last.count >= 3,
@@ -125,10 +172,14 @@ struct PhotosChoices: Sendable, Equatable {
 /// A filter the window's search keeps to: a token in the search field (× or ⌫ in an empty field takes it off), and
 /// checked in its menu beside the kinds.
 enum FilterToken: Equatable, Identifiable {
-    /// In the picture (every person chosen must be): the ids of everyone with that name.
-    case person(name: String, ids: Set<Int64>)
-    /// In the album (in any album chosen): the ids of every library's album of that title in those folders.
-    case album(ids: Set<Int64>, title: String)
+    /// In the picture (every person chosen must be): the ids of everyone with that name, and who they are in Photos
+    /// (what a saved search keeps). No ids: a saved search's person who isn't in the indexed libraries now, which
+    /// keeps nothing (`isMissing`).
+    case person(name: String, ids: Set<Int64>, photos: [PhotosID])
+    /// In the album (in any album chosen): the ids of every library's album of that title in those folders, and
+    /// Photos' ids for them. No ids: a saved search's album that isn't indexed now, which adds nothing to the albums
+    /// and alone keeps nothing.
+    case album(title: String, folders: [String], ids: Set<Int64>, photos: [PhotosID])
     /// Marked ♥ in Photos.
     case photosFavorites
     /// Marked ♥ in DigUp (`Favorites`), any file.
@@ -141,10 +192,14 @@ enum FilterToken: Equatable, Identifiable {
     /// Taken in the map's area ("Search This Area"; `SearchModel.area` holds the box).
     case area
 
+    /// A person by their name and an album by its folders and title, as the menus offer them; one that isn't in
+    /// Photos now by the Photos ids it was saved with.
     var id: String {
         switch self {
-        case .person(let name, _): "person:\(name)"
-        case .album(let ids, _): "album:\(ids.sorted())"
+        case .person(let name, let ids, let photos):
+            ids.isEmpty ? "person-missing:\(photos.map(\.uuid).sorted())" : "person:\(name)"
+        case .album(let title, let folders, let ids, let photos):
+            ids.isEmpty ? "album-missing:\(photos.map(\.uuid).sorted())" : "album:\(folders + [title])"
         case .photosFavorites: "photos-favorites"
         case .digupFavorites: "digup-favorites"
         case .shotOnMyDevices: "from:mine"
@@ -157,10 +212,19 @@ enum FilterToken: Equatable, Identifiable {
     /// other, and both together would keep nothing.
     var isFrom: Bool { id.hasPrefix("from:") }
 
+    /// A saved search's person or album that isn't in the indexed libraries now (deleted in Photos, or the library
+    /// isn't searched): its token shows struck through, and it keeps nothing rather than everyone.
+    var isMissing: Bool {
+        switch self {
+        case .person(_, let ids, _), .album(_, _, let ids, _): ids.isEmpty
+        default: false
+        }
+    }
+
     var title: String {
         switch self {
-        case .person(let name, _): name
-        case .album(_, let title): title
+        case .person(let name, _, _): name
+        case .album(let title, _, _, _): title
         case .photosFavorites: "Photos Favorites"
         case .digupFavorites: "Favorites"
         case .shotOnMyDevices: "Shot on my devices"
@@ -183,8 +247,11 @@ enum FilterToken: Equatable, Identifiable {
 
     var help: String {
         switch self {
-        case .person(let name, _): "Only pictures Photos knows \(name) is in"
-        case .album(_, let title): "Only what's in the album “\(title)”"
+        case _ where isMissing:
+            "\(title) isn't in Photos now (deleted there, or its library isn't searched): this search keeps nothing "
+                + "for it"
+        case .person(let name, _, _): "Only pictures Photos knows \(name) is in"
+        case .album(let title, _, _, _): "Only what's in the album “\(title)”"
         case .photosFavorites: "Only what you've marked ♥ in Photos"
         case .digupFavorites: "Only what you've marked ♥ in DigUp"
         case .shotOnMyDevices:
@@ -217,7 +284,13 @@ struct FilterTokenView: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: token.symbol).font(.system(size: 10))
-            Text(token.title).lineLimit(1).truncationMode(.tail).frame(maxWidth: 150)
+            if token.isMissing {
+                // "Katie — not in Photos now": a saved search's person or album that's gone keeps nothing.
+                Text("\(Text(token.title).strikethrough())\(Text(" — not in Photos now").foregroundStyle(.secondary))")
+                    .lineLimit(1).truncationMode(.tail).frame(maxWidth: 220)
+            } else {
+                Text(token.title).lineLimit(1).truncationMode(.tail).frame(maxWidth: 150)
+            }
             Button(action: remove) {
                 Image(systemName: "xmark").font(.system(size: 8.5, weight: .bold)).opacity(0.6)
             }
@@ -232,7 +305,7 @@ struct FilterTokenView: View {
         .fixedSize()
         .help(token.help)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Filter: \(token.title)")
+        .accessibilityLabel("Filter: \(token.title)" + (token.isMissing ? ", not in Photos now" : ""))
     }
 }
 
@@ -280,8 +353,8 @@ struct PhotosFilterMenus: View {
             if !search.choices.people.isEmpty {
                 Menu {
                     ForEach(search.choices.people) { person in
-                        PhotosFilterToggle(title: "\(person.name)  ·  \(person.files)",
-                                           token: .person(name: person.name, ids: person.ids), search: search)
+                        PhotosFilterToggle(title: "\(person.name)  ·  \(person.files)", token: person.token,
+                                           search: search)
                     }
                 } label: {
                     FilterChipLabel(title: title(of: people, none: "People"), symbol: "person.crop.circle",
@@ -338,14 +411,14 @@ struct PhotosFilterMenus: View {
     }
 
     private var people: [String] {
-        search.tokens.compactMap { if case .person(let name, _) = $0 { name } else { nil } }
+        search.tokens.compactMap { if case .person(let name, _, _) = $0 { name } else { nil } }
     }
 
     /// The "From" filter that's on, if one is.
     private var from: FilterToken? { search.tokens.first(where: \.isFrom) }
 
     private var albums: [String] {
-        search.tokens.compactMap { if case .album(_, let title) = $0 { title } else { nil } }
+        search.tokens.compactMap { if case .album(let title, _, _, _) = $0 { title } else { nil } }
     }
 
     /// "People", "Tati", or "Tati + 2".
@@ -369,8 +442,7 @@ private struct AlbumMenuItems: View {
         }
         return Group {
             ForEach(here) { album in
-                PhotosFilterToggle(title: "\(album.title)  ·  \(album.files)",
-                                   token: .album(ids: album.ids, title: album.title), search: search)
+                PhotosFilterToggle(title: "\(album.title)  ·  \(album.files)", token: album.token, search: search)
             }
             ForEach(folders, id: \.self) { folder in
                 Menu(folder) {

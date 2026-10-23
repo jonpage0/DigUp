@@ -17,6 +17,8 @@ final class AppController {
     let updates: Updates
     /// What's marked ♥ in DigUp, beside the index folder (`Favorites`).
     let favorites: Favorites
+    /// The searches saved in the search window's Saved menu, beside the index folder (`SavedSearches`).
+    let savedSearches: SavedSearches
     private let power: PowerPolicy
     private let schedule: IndexSchedule
     private(set) var panel: SearchPanelController!
@@ -57,6 +59,7 @@ final class AppController {
         self.engine = engine
         updates = Updates(model: model)
         favorites = Favorites(beside: settings.indexDirectory)
+        savedSearches = SavedSearches(beside: settings.indexDirectory)
     }
 
     /// `showWindow`: opened by hand (not at login), so the search window comes up once the app is set up.

@@ -10,6 +10,8 @@ import SwiftUI
 /// open, and closing it frees its views (the app goes back to its idle size).
 final class SearchWindowController: NSObject, NSWindowDelegate {
     let search: SearchModel
+    /// Save This Search… and Edit Saved Searches… (the Saved menu).
+    let savedSheet: SavedSearchSheet
     private unowned let app: AppController
     private var window: QuickLookWindow?
     private var keyMonitor: Any?
@@ -18,6 +20,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
     init(app: AppController) {
         self.app = app
         search = SearchModel(engine: app.engine, favorites: app.favorites, model: app.model)
+        savedSheet = SavedSearchSheet(app: app)
         super.init()
         search.selected = { [weak self] in self?.selectionChanged() }
     }
@@ -39,6 +42,24 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
 
     func close() {
         window?.close()
+    }
+
+    // MARK: Saved searches
+
+    /// Opens a saved search here: the window, with its words, kind, filters and map area, searched again.
+    func open(_ saved: SavedSearch) {
+        show()
+        Task { await search.open(saved) }
+    }
+
+    /// Save This Search… (⌘S): asks for the name, the suggested one filled in. Only with something to save.
+    func saveSearch() {
+        guard search.isSearching, !app.savedSearches.unreadable else { return }
+        savedSheet.beginSave(search.saved(named: search.suggestedName), describing: search.savedSummary, on: window)
+    }
+
+    func editSavedSearches() {
+        savedSheet.beginEdit(on: window)
     }
 
     private func makeWindow() -> QuickLookWindow {
@@ -69,6 +90,7 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
         if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible {
             QLPreviewPanel.shared().orderOut(nil)
         }
+        savedSheet.end()
         removeKeyMonitor()
         PreviewPlayback.shared.stop()
         window?.contentView = nil
@@ -107,8 +129,8 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
     }
 
     /// Arrows move through the grid (← → only once you've arrowed, so they still move the cursor while you type),
-    /// ↩ opens, ⌘↩ reveals, Space previews, ⌘C copies, Esc closes the preview or clears the search, Tab turns the
-    /// suggested filter on, ⌫ in an empty field takes the last filter off.
+    /// ↩ opens, ⌘↩ reveals, Space previews, ⌘C copies, ⌘S saves the search, Esc closes the preview or clears the
+    /// search, Tab turns the suggested filter on, ⌫ in an empty field takes the last filter off.
     private func handle(_ event: NSEvent) -> Bool {
         // An input method is composing (Japanese, Chinese…): ↩, the arrows and Esc are its keys until it's done.
         if (search.field?.currentEditor() as? NSTextView)?.hasMarkedText() == true { return false }
@@ -144,6 +166,8 @@ final class SearchWindowController: NSObject, NSWindowDelegate {
             search.filter = kinds[index]
         case 26 where modifiers == .command && app.model.hasCode:   // ⌘7: code
             search.filter = .code
+        case 1 where modifiers == .command && search.isSearching && !app.savedSearches.unreadable:   // ⌘S
+            saveSearch()
         case 8 where modifiers == .command:   // ⌘C
             // The selected file, as in the panel, except right after you selected some of the query's words (then
             // they're what you meant; arrowing or clicking to a result means the file).
@@ -266,6 +290,8 @@ final class SearchModel {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var shownGeneration = 0
     @ObservationIgnored private var task: Task<Void, Never>?
+    /// While a saved search is put in the window: its words, kind, tokens and area change together, then it runs once.
+    @ObservationIgnored private var runsHeld = false
     /// A result was clicked, or another moment of it picked under the preview (Quick Look, when it's open, follows).
     @ObservationIgnored var selected: () -> Void = {}
 
@@ -295,8 +321,8 @@ final class SearchModel {
         var filter = SearchFilter(area: area)
         for token in tokens {
             switch token {
-            case .person(_, let ids): filter.people.append(ids)
-            case .album(let ids, _): filter.albums.formUnion(ids)
+            case .person(_, let ids, _): filter.people.append(ids)   // empty: keeps nothing (a saved one that's gone)
+            case .album(_, _, let ids, _): filter.albums = (filter.albums ?? []).union(ids)
             case .photosFavorites: filter.favorites = true
             case .digupFavorites: filter.paths = []
             case .shotOnMyDevices: filter.shotOn = Set(myDevices)   // empty: still filtering (`SearchFilter.shotOn`)
@@ -386,6 +412,82 @@ final class SearchModel {
         }
     }
 
+    // MARK: Saved searches
+
+    /// The window's search as a saved search, under `name`: its words, kind, and tokens in order (the map's area
+    /// among them).
+    func saved(named name: String) -> SavedSearch {
+        SavedSearch(id: UUID(), name: name, query: query, kind: filter, filters: shownTokens.compactMap(savedFilter),
+                    saved: Date())
+    }
+
+    private func savedFilter(_ token: FilterToken) -> SavedSearch.Filter? {
+        switch token {
+        case .person(let name, _, let photos): .person(SavedSearch.Person(name: name, photos: photos))
+        case .album(let title, let folders, _, let photos):
+            .album(SavedSearch.Album(title: title, folders: folders, photos: photos))
+        case .photosFavorites: .photosFavorites
+        case .digupFavorites: .digupFavorites
+        case .shotOnMyDevices: .from(.mine)
+        // The window's From offers these two origins (`PhotosFilterMenus`).
+        case .origin(let origin): SavedSearch.From(rawValue: origin.rawValue).map { .from($0) }
+        case .area: area.map { .area(SavedSearch.Area($0)) }
+        }
+    }
+
+    /// The name Save This Search… suggests: the words, then the people and albums ("beach · Tatiana Rotari ·
+    /// Florida"); with neither, the other filters ("Photos Favorites · Shot on my devices").
+    var suggestedName: String {
+        let words = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let named = shownTokens.filter {
+            switch $0 {
+            case .person, .album: true
+            default: false
+            }
+        }
+        let parts = (words.isEmpty ? [] : [words]) + named.map(\.title)
+        return (parts.isEmpty ? shownTokens.map(\.title) : parts).joined(separator: " · ")
+    }
+
+    /// What a search saved now keeps: "“beach” · Images · Tatiana Rotari · In the map's area".
+    var savedSummary: String {
+        let words = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ((words.isEmpty ? [] : ["“\(words)”"]) + [filter?.title ?? "All kinds"] + shownTokens.map(\.title))
+            .joined(separator: " · ")
+    }
+
+    /// Puts a saved search in the window and runs it: its words, kind, tokens and map area. Its people and albums are
+    /// found by Photos' uuid in the libraries as they are now (`PhotosChoices.token(for:)`); one that's gone shows
+    /// struck through and keeps nothing.
+    func open(_ saved: SavedSearch) async {
+        let read = await engine.photosChoices()
+        choices = read
+        choicesRead = Date()
+        var tokens: [FilterToken] = [], area: SearchFilter.Area?
+        for filter in saved.filters {
+            switch filter {
+            case .person(let person): tokens.append(read.token(for: person))
+            case .album(let album): tokens.append(read.token(for: album))
+            case .photosFavorites: tokens.append(.photosFavorites)
+            case .digupFavorites: tokens.append(.digupFavorites)
+            case .from(.mine): tokens.append(.shotOnMyDevices)
+            case .from(.saved): tokens.append(.origin(.saved))
+            case .from(.imported): tokens.append(.origin(.imported))
+            case .area(let box): area = box.searchArea
+            }
+        }
+        runsHeld = true
+        self.tokens = tokens
+        self.area = area
+        filter = saved.kind
+        query = saved.query
+        runsHeld = false
+        run()
+        let missing = tokens.filter(\.isMissing).count
+        log("window: opened a saved search with \(saved.filters.count) filters"
+            + (missing > 0 ? ", \(missing) of them not in Photos now" : ""))
+    }
+
     /// The file in its app, at the page or moment that matched (or the one picked under the preview) when the app can
     /// be told where.
     func open(_ row: ResultRow) {
@@ -401,6 +503,7 @@ final class SearchModel {
     }
 
     private func run() {
+        guard !runsHeld else { return }
         readChoices()
         generation += 1
         let current = generation
@@ -571,6 +674,9 @@ struct SearchWindowView: View {
                             .offset(x: 30, y: 44)   // just under the field, below the magnifier
                     }
                 }
+                SavedSearchesMenu(saved: app.savedSearches, canSave: search.isSearching,
+                                  open: { app.searchWindow.open($0) }, save: { app.searchWindow.saveSearch() },
+                                  edit: { app.searchWindow.editSavedSearches() })
                 Button {
                     search.showsMap.toggle()
                 } label: {

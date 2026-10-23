@@ -13,9 +13,9 @@ import SwiftUI
 ///     -debugSnapshot <png>    once the final results and their pictures are showing, draw the panel into <png>
 ///     -debugKeys "down,space,esc,cmd+c"   then press these keys (posted through the app's own event queue, so
 ///                             no Accessibility permission is needed) and log what each one did. ⌘C goes to a
-///                             private pasteboard. Keys: down, up, left, right, space, esc, return, cmd+c,
-///                             cmd+y, cmd+o, cmd+1, cmd+2, cmd+comma and letters; `settings`, `window` and `panel`
-///                             open those, `wait` waits. Each goes to the window that has the keyboard. With
+///                             private pasteboard. Keys: down, up, left, right, space, esc, return, tab, cmd+c,
+///                             cmd+y, cmd+o, cmd+s, cmd+1, cmd+2, cmd+comma and letters; `settings`, `window` and
+///                             `panel` open those, `wait` waits. Each goes to the window that has the keyboard. With
 ///                             -debugWindow search they test the window instead.
 ///     -debugType "a|b c"      then type each query (|-separated) into the field, one key every
 ///                             `-debugTypeInterval` seconds (default 0.09), waiting for its final results; the panel
@@ -58,6 +58,14 @@ import SwiftUI
 ///     -debugArea "lat1,lon1,lat2,lon2"   with -debugWindow search: results kept to that box of the map
 ///     -debugFilters "person:Katie|album:Pumpkin Farm|favorites|digup"   with -debugWindow search: these filters on
 ///                             (a Photos library's people and albums, by name; Photos' favorites; DigUp's own)
+///     -debugSaved "<name>"    with -debugWindow search: then open the saved search of that name, as the Saved menu
+///                             would
+///     -debugSavedMenu YES     with -debugWindow search: after the snapshot, log the Saved menu's items and draw them
+///                             into <snapshot>-savedmenu.png (an open menu can't be drawn offscreen, so this draws
+///                             the items the menu is made from)
+///     -debugSavedSheet save|edit   with -debugWindow search: then open Save This Search… (its name suggested) or
+///                             Edit Saved Searches…, and draw it into <snapshot>-saved.png; -debugSaveAs NAME
+///                             then presses Save with that name
 ///     -debugMoment N          with -debugWindow search: before the snapshot, pick the selected result's Nth moment
 ///                             under the preview (1: the best; a video read from Photos' stills: its Nth still) as a
 ///                             click would: it plays from there (muted), and the log says where playback got to and
@@ -367,23 +375,32 @@ enum DebugHooks {
                     search.area = SearchFilter.Area(latitudes: min(box[0], box[2])...max(box[0], box[2]),
                                                     longitudes: min(box[1], box[3])...max(box[1], box[3]))
                 }
-                // -debugFilters: the filters on before the snapshot, once the libraries' people and albums are read.
+                // -debugFilters: the filters on before the snapshot, once the libraries' people and albums are read;
+                // -debugSaved: then a saved search opened, by name.
                 let filtering = DebugProgress()
-                if let spec = defaults.string(forKey: "debugFilters") {
+                let filters = defaults.string(forKey: "debugFilters"), opening = defaults.string(forKey: "debugSaved")
+                if filters != nil || opening != nil {
                     Task {
                         let choices = await app.engine.photosChoices()
-                        for part in spec.split(separator: "|").map(String.init) {
+                        for part in (filters ?? "").split(separator: "|").map(String.init) {
                             let (kind, name) = (part.prefix { $0 != ":" }, part.drop { $0 != ":" }.dropFirst())
                             if kind == "person", let person = choices.people.first(where: { $0.name == name }) {
-                                search.set(.person(name: person.name, ids: person.ids), on: true)
+                                search.set(person.token, on: true)
                             } else if kind == "album", let album = choices.albums.first(where: { $0.title == name }) {
-                                search.set(.album(ids: album.ids, title: album.title), on: true)
+                                search.set(album.token, on: true)
                             } else if kind == "favorites" {
                                 search.set(.photosFavorites, on: true)
                             } else if kind == "digup" {
                                 search.set(.digupFavorites, on: true)
                             } else {
                                 log("debug: no filter \"\(part)\"")
+                            }
+                        }
+                        if let name = opening {
+                            if let saved = app.savedSearches.searches.first(where: { $0.name == name }) {
+                                await search.open(saved)
+                            } else {
+                                log("debug: no saved search \"\(name)\"")
                             }
                         }
                         filtering.done = true
@@ -418,17 +435,57 @@ enum DebugHooks {
                                 log("debug: added; code folders \(settings.codeRoots.map { tildePath($0.path) }) · "
                                     + "skipping \(settings.codeExcluded.map { tildePath($0.path) })")
                             }
-                            press(keys, app, describe: { windowState(app) }) {
-                                if defaults.bool(forKey: "debugCloseWindow") {
-                                    close()
-                                    log("window: closed")
+                            savedSearchSteps(app) {
+                                press(keys, app, describe: { windowState(app) }) {
+                                    if defaults.bool(forKey: "debugCloseWindow") {
+                                        close()
+                                        log("window: closed")
+                                    }
+                                    if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                                 }
-                                if defaults.bool(forKey: "debugQuit") { NSApp.terminate(nil) }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// After the search window's snapshot: `-debugSavedMenu` logs the Saved menu's items and draws them into
+    /// <snapshot>-savedmenu.png; `-debugSavedSheet save|edit` opens Save This Search… or Edit Saved Searches… and draws
+    /// it into <snapshot>-saved.png; `-debugSaveAs NAME` then presses Save with that name.
+    private static func savedSearchSteps(_ app: AppController, then done: @escaping () -> Void) {
+        let defaults = UserDefaults.standard
+        let window = app.searchWindow!
+        if defaults.bool(forKey: "debugSavedMenu") {
+            let items = SavedMenuItem.items(app.savedSearches, canSave: window.search.isSearching)
+            log("saved menu: " + items.map { item in
+                switch item {
+                case .search(let search): search.name
+                case .note(let text): "\(text) (disabled)"
+                case .divider: "—"
+                case .save(let enabled): SavedMenuItem.saveTitle + " ⌘S" + (enabled ? "" : " (disabled)")
+                case .edit(let enabled): SavedMenuItem.editTitle + (enabled ? "" : " (disabled)")
+                }
+            }.joined(separator: " | "))
+            save("saved menu", { url in
+                let view = NSHostingView(rootView: SavedMenuDrawing(items: items))
+                view.frame.size = view.fittingSize
+                let drawing = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered,
+                                       defer: false)
+                drawing.contentView = view
+                try Snapshot.write(drawing, to: url, cornerRadius: 6)
+            }, to: snapshotPath("savedmenu"))
+        }
+        guard let sheet = defaults.string(forKey: "debugSavedSheet") else { return done() }
+        if sheet == "edit" { window.editSavedSearches() } else { window.saveSearch() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            save("saved searches sheet", { try window.savedSheet.snapshot(to: $0) }, to: snapshotPath("saved"))
+            if let name = defaults.string(forKey: "debugSaveAs"), let saveAs = window.savedSheet.saveAs {
+                saveAs(name)
+                log("debug: saved as \"\(name)\"; the menu has \(app.savedSearches.searches.map(\.name))")
+            }
+            done()
         }
     }
 
@@ -666,6 +723,7 @@ enum DebugHooks {
         let previewing = QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible
         return "cell \(index) of \(rows.count) (\(search.selectedRow?.name ?? "none")) · columns \(search.columns) · "
             + "filter \(search.filter?.title ?? "All") · query \"\(search.query)\" · "
+            + "tokens \(search.shownTokens.map { $0.title + ($0.isMissing ? " (not in Photos now)" : "") }) · "
             + "Quick Look \(previewing ? "open" : "closed")"
     }
 
@@ -736,7 +794,7 @@ enum DebugHooks {
             "esc": (53, "\u{1B}", []), "return": (36, "\r", []), "cmd+c": (8, "c", .command),
             "cmd+y": (16, "y", .command), "left": (123, "\u{F702}", []), "right": (124, "\u{F703}", []),
             "cmd+1": (18, "1", .command), "cmd+2": (19, "2", .command), "cmd+o": (31, "o", .command),
-            "cmd+comma": (43, ",", .command),
+            "cmd+comma": (43, ",", .command), "tab": (48, "\t", []), "cmd+s": (1, "s", .command),
         ]
         var entry = table[name]
         if entry == nil, name.count == 1, let code = letterCodes[name] { entry = (code, name, []) }
@@ -789,4 +847,39 @@ enum DebugHooks {
 /// Whether a debug step started on another task is done (the snapshot waits for it).
 private final class DebugProgress {
     var done = false
+}
+
+/// The Saved menu's items as a menu shows them, for `-debugSavedMenu` (an open menu can't be drawn offscreen): the
+/// saved searches, a divider, Save This Search… with ⌘S, Edit Saved Searches…, what can't be chosen dimmed.
+private struct SavedMenuDrawing: View {
+    let items: [SavedMenuItem]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(items) { item in
+                switch item {
+                case .search(let search): row(search.name, enabled: true)
+                case .note(let text): row(text, enabled: false)
+                case .divider: Divider().padding(.vertical, 5).padding(.horizontal, 10)
+                case .save(let enabled): row(SavedMenuItem.saveTitle, shortcut: "⌘S", enabled: enabled)
+                case .edit(let enabled): row(SavedMenuItem.editTitle, enabled: enabled)
+                }
+            }
+        }
+        .padding(.vertical, 5)
+        .frame(width: 280)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func row(_ title: String, shortcut: String? = nil, enabled: Bool) -> some View {
+        HStack {
+            Text(title).lineLimit(1)
+            Spacer()
+            if let shortcut { Text(shortcut).foregroundStyle(.secondary) }
+        }
+        .font(.system(size: 13))
+        .foregroundStyle(enabled ? .primary : .tertiary)
+        .padding(.horizontal, 14)
+        .frame(height: 22)
+    }
 }

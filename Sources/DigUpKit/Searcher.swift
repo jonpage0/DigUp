@@ -74,10 +74,12 @@ public struct PhotosHit: Sendable, Equatable {
 /// parts combine with AND; an empty filter keeps every file.
 public struct SearchFilter: Sendable, Equatable {
     /// People a file must show, every one of them (ids of `IndexStore.photosPeople`). An entry is one person, or the
-    /// people who share a name, any of whom counts for it.
+    /// people who share a name, any of whom counts for it. An empty entry keeps nothing: a saved search's person who
+    /// isn't in the indexed libraries any more (the app's saved searches never widen to everyone).
     public var people: [Set<Int64>]
-    /// Albums a file must be in, any of them (ids of `IndexStore.photosAlbums`).
-    public var albums: Set<Int64>
+    /// Albums a file must be in, any of them (ids of `IndexStore.photosAlbums`). Nil keeps every file; an empty set
+    /// keeps none (a saved search's albums, none of them indexed any more).
+    public var albums: Set<Int64>?
     /// Only Photos' favorites.
     public var favorites: Bool
     /// How a file came into its library, any of these (`PhotosLibrary.Origin`'s raw values).
@@ -106,16 +108,20 @@ public struct SearchFilter: Sendable, Equatable {
         }
     }
 
-    public init(people: [Set<Int64>] = [], albums: Set<Int64> = [], favorites: Bool = false, origins: Set<String> = [],
-                cameras: Set<String> = [], shotOn: Set<String>? = nil, paths: Set<String>? = nil, area: Area? = nil) {
+    public init(people: [Set<Int64>] = [], albums: Set<Int64>? = nil, favorites: Bool = false,
+                origins: Set<String> = [], cameras: Set<String> = [], shotOn: Set<String>? = nil,
+                paths: Set<String>? = nil, area: Area? = nil) {
         (self.people, self.albums, self.favorites, self.area) = (people, albums, favorites, area)
         (self.origins, self.cameras, self.shotOn, self.paths) = (origins, cameras, shotOn, paths)
     }
 
     public var isEmpty: Bool {
-        people.isEmpty && albums.isEmpty && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
+        people.isEmpty && albums == nil && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
             && paths == nil && area == nil
     }
+
+    /// A part of the query that keeps no file (`IN ()` isn't SQL).
+    private static let keepsNothing = "SELECT id FROM files WHERE 0"
 
     /// The files it keeps, as a query of their ids and the values it takes; nil when it keeps every file.
     var query: (sql: String, values: [SQLValue])? {
@@ -123,9 +129,13 @@ public struct SearchFilter: Sendable, Equatable {
         func placeholders(_ words: Set<String>) -> String { words.map { _ in "?" }.joined(separator: ",") }
         var parts: [String] = [], values: [SQLValue] = []
         for group in people {
-            parts.append("SELECT file FROM photos_person_files WHERE person IN (\(list(group)))")
+            parts.append(group.isEmpty ? Self.keepsNothing
+                                       : "SELECT file FROM photos_person_files WHERE person IN (\(list(group)))")
         }
-        if !albums.isEmpty { parts.append("SELECT file FROM photos_album_files WHERE album IN (\(list(albums)))") }
+        if let albums {
+            parts.append(albums.isEmpty ? Self.keepsNothing
+                                        : "SELECT file FROM photos_album_files WHERE album IN (\(list(albums)))")
+        }
         if favorites { parts.append("SELECT file FROM photos_assets WHERE favorite = 1") }
         if !origins.isEmpty {
             parts.append("SELECT file FROM photos_assets WHERE origin IN (\(placeholders(origins)))")
@@ -149,7 +159,7 @@ public struct SearchFilter: Sendable, Equatable {
             }
         }
         if let paths {
-            parts.append(paths.isEmpty ? "SELECT id FROM files WHERE 0"
+            parts.append(paths.isEmpty ? Self.keepsNothing
                                        : "SELECT id FROM files WHERE path IN (\(placeholders(paths)))")
             values += paths.map { .text($0) }
         }

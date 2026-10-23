@@ -371,11 +371,16 @@ private struct ShortcutsSettings: View {
         Key(caps: ["⌘", "7"], spoken: "Command 7", action: "Code (when code search is on)"),
         Key(caps: ["Tab"], spoken: "Tab", action: "Take the suggested filter (a person, an album) for the words you typed"),
         Key(caps: ["⌫"], spoken: "Delete", action: "With nothing typed, take the last filter off"),
+        Key(caps: ["⌘", "S"], spoken: "Command S",
+            action: "Save this search, with its filters (the Saved menu, the bookmark beside the field, opens it again)"),
         Key(caps: ["⌘", ","], spoken: "Command comma", action: "Settings"),
     ]
 
     private static let panel: [Key] = [
         Key(caps: ["⌘", "O"], spoken: "Command O", action: "The same search in the search window, for a bigger look"),
+        Key(caps: ["Tab"], spoken: "Tab",
+            action: "Open the saved search whose name you're typing in the search window (↩ too, before you've "
+                + "arrowed to a result)"),
     ]
 
     var body: some View {

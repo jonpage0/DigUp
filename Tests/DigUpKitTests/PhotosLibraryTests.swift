@@ -219,6 +219,56 @@ import Testing
         #expect(try searcher.search("Beach", queryVector: nil).count == 4)
     }
 
+    @Test func aPersonOrAnAlbumIsFoundByPhotosUuidThroughARenameInPhotos() throws {
+        let (library, listed) = try library(1, in: folder)
+        let katie = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katie")
+        let trip = PhotosLibrary.Album(uuid: "A-TRIP", title: "Trip", folders: ["2024"])
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        let first = PhotosLibrary.Listing(assets: [asset(listed[0], people: [katie], albums: [trip])], people: [katie],
+                                          albums: [trip])
+        _ = try indexer(store) { _ in first }.sync([library])
+        let people = try store.photosPeople(), albums = try store.photosAlbums()
+        #expect(people.map(\.uuid) == ["P-KATIE"] && people.map(\.library) == [library.path])
+        #expect(albums.map(\.uuid) == ["A-TRIP"] && albums.map(\.library) == [library.path])
+
+        // Renamed in Photos, the album moved to another folder: the same uuids, now with the new names.
+        let katherine = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katherine")
+        let roadTrip = PhotosLibrary.Album(uuid: "A-TRIP", title: "Road trip", folders: ["2025"])
+        let second = PhotosLibrary.Listing(assets: [asset(listed[0], people: [katherine], albums: [roadTrip])],
+                                           people: [katherine], albums: [roadTrip])
+        _ = try indexer(store) { _ in second }.sync([library])
+        let renamed = try #require(try store.photosPeople().first { $0.uuid == "P-KATIE" })
+        let moved = try #require(try store.photosAlbums().first { $0.uuid == "A-TRIP" })
+        #expect(renamed.name == "Katherine" && renamed.id == people[0].id)
+        #expect(moved.title == "Road trip" && moved.folders == ["2025"] && moved.id == albums[0].id)
+    }
+
+    @Test func aPersonOrAnAlbumNoLongerIndexedKeepsNothing() throws {
+        let (library, listed) = try library(2, in: folder)
+        let katie = PhotosLibrary.Person(uuid: "P-KATIE", name: "Katie")
+        let trip = PhotosLibrary.Album(uuid: "A-TRIP", title: "Trip")
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        let listing = PhotosLibrary.Listing(assets: [asset(listed[0], people: [katie], albums: [trip]), listed[1]],
+                                            people: [katie], albums: [trip])
+        _ = try indexer(store) { _ in listing }.sync([library])
+        let katieID = try #require(try store.photosPeople().first?.id)
+        let tripID = try #require(try store.photosAlbums().first?.id)
+        let searcher = try Searcher(store: store, loadVectors: false)
+        func kept(_ words: String, _ filter: SearchFilter) throws -> [String] {
+            try searcher.search(words, queryVector: nil, filter: filter).map(\.path)
+        }
+        #expect(try kept("Beach", SearchFilter()).count == 2)
+        // A person with no one behind them (a saved search's, gone from Photos) keeps nothing, alone or beside someone
+        // who's there: never everyone.
+        #expect(try kept("", SearchFilter(people: [[]])).isEmpty)
+        #expect(try kept("Beach", SearchFilter(people: [[]])).isEmpty)
+        #expect(try kept("", SearchFilter(people: [[katieID], []])).isEmpty)
+        // Albums, any of them: none left keeps nothing; one gone among others keeps the others' files.
+        #expect(try kept("", SearchFilter(albums: [])).isEmpty)
+        #expect(try kept("Beach", SearchFilter(albums: [])).isEmpty)
+        #expect(try kept("", SearchFilter(albums: [tripID])) == [listed[0].path])
+    }
+
     @Test func aFilterKeepsItsFilesAmongMoreWordMatchesThanSearchLooksAt() throws {
         let (library, listed) = try library(2, in: folder)
         let assets = [asset(listed[0], favorite: true), listed[1]]

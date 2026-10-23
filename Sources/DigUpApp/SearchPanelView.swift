@@ -38,6 +38,9 @@ struct SearchPanelView: View {
                             : "Describe it: “payment error screenshot”, “zebra in a video”…") {
                 controller.field = $0
             }
+            if let saved = controller.savedSuggestion {
+                SavedSearchSuggestion(name: saved.name) { controller.openSavedSuggestion() }
+            }
             if controller.phase == .words, controller.encoder == .starting {
                 ProgressView().controlSize(.small)
             }
@@ -118,8 +121,12 @@ struct SearchPanelView: View {
     }
 
     /// The keys, saying where ↩ and Space go for a page or moment: "↩ Open at 0:06   ␣ Quick Look at 0:06", and for
-    /// code, at which line: "↩ Open in Zed at line 12".
+    /// code, at which line: "↩ Open in Zed at line 12". While a saved search is being named, ↩ opens it until you arrow
+    /// to a result.
     private var keysText: String {
+        if controller.returnOpensSaved, let saved = controller.savedSuggestion {
+            return "↩ or Tab Open “\(saved.name)” in the window   ↓ The results"
+        }
         let row = controller.selectedRow
         if let row, row.kind == .code {
             let line = row.segment == .lines ? " at line \(row.codeLine)" : ""
@@ -148,6 +155,32 @@ struct SearchPanelView: View {
             return (count == 1 ? "1 result" : "\(count) results") + (controller.isCode ? " in your code" : "")
                 + (weaker > 0 ? " · \(weaker) weaker" : "")
         }
+    }
+}
+
+/// A saved search whose name starts with what's typed, beside the panel's field: Tab (or ↩, or a click) opens it in the
+/// search window.
+private struct SavedSearchSuggestion: View {
+    let name: String
+    let open: () -> Void
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 5) {
+                Image(systemName: "bookmark.fill").font(.system(size: 10))
+                Text(name).fontWeight(.medium).lineLimit(1).truncationMode(.tail).frame(maxWidth: 220)
+                Text("saved search").foregroundStyle(.secondary).lineLimit(1)
+                Keycaps(caps: ["Tab"], size: 9)
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Color.accentColor.opacity(0.2)))
+            .contentShape(Capsule())
+            .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .help("Open the saved search “\(name)” in the window (Tab or ↩)")
     }
 }
 

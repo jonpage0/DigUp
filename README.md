@@ -91,8 +91,17 @@ With the .deb, DigUp tells you when there's a new version and opens its release 
 | ⌘C | Ctrl+C (in the window) | Copies the file, to paste anywhere |
 | ⌘O | Ctrl+O | The same search in a bigger window, with a picture grid and filters |
 | ⌘D | | Adds it to DigUp's own Favorites, or takes it off (the ♥ under the preview) |
+| ⌘S | | Saves the search window's search, with its filters, in its Saved menu |
 
 On a Mac, Settings → Shortcuts lists every key, in the panel and the window, and sets the one that opens the panel.
+
+On a Mac, the search window's Saved menu (the bookmark beside the field) keeps the searches you come back to. Save This
+Search… (⌘S) keeps the words, the kind and the filters (people, albums, favorites, From, the map's area) under a name,
+and choosing it searches again, so new files show up; Edit Saved Searches… renames, reorders and deletes them. Typing
+the start of one's name in the panel offers it, and Tab opens it in the window. They're kept in `saved-searches.json`
+beside the index, so rebuilding the index keeps them, with Photos' people and albums by Photos' own ids: someone
+renamed in Photos is still found, and someone who's gone from Photos shows struck through, and the search keeps
+nothing for them rather than everyone.
 
 DigUp lives in the menu bar on a Mac and in the tray on Windows and Linux, where you can see how indexing is going,
 pause it, or open Settings. Opening it from the Start menu or your app list shows the search window.

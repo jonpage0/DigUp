@@ -206,8 +206,9 @@ struct ResultRow: Identifiable, Equatable {
     }
 }
 
-/// How results are grouped in the panel, and the kind filters in the window.
-enum ResultGroupKind: CaseIterable {
+/// How results are grouped in the panel, and the kind filters in the window. A saved search keeps its kind by these
+/// names ("screenshots", "images"…: `SavedSearch.kind`).
+enum ResultGroupKind: String, CaseIterable, Codable {
     case screenshots, images, documents, video, audio
     /// Code search's results (the code index; a search of it never shows anything else).
     case code

@@ -64,8 +64,9 @@ final class SearchPanelController {
     /// Fading out: still on screen, but gone as far as everything else is concerned.
     @ObservationIgnored private var fading = false
     @ObservationIgnored private var activity: NSObjectProtocol?
-    /// True once ↑/↓ moved the selection since the last edit: then Space previews instead of typing a space.
-    @ObservationIgnored private var navigated = false
+    /// True once ↑/↓ moved the selection since the last edit: then Space previews instead of typing a space, and ↩
+    /// opens the result rather than a saved search being named (the footer says which).
+    private(set) var navigated = false
     @ObservationIgnored private var typedAt = Date()
     @ObservationIgnored private var noteTask: Task<Void, Never>?
     /// Called when the final results for the current query are on screen (debug hooks use it).
@@ -90,6 +91,11 @@ final class SearchPanelController {
     }
     var rows: [ResultRow] { results.groups.flatMap(\.rows) + (showWeaker ? results.weaker : []) }
     var selectedRow: ResultRow? { rows.first { $0.id == selection } }
+    /// A saved search whose name starts with what's typed (`SavedSearches.suggestion`): Tab, or ↩ before you've
+    /// arrowed to a result, opens it in the search window.
+    var savedSuggestion: SavedSearch? { app.savedSearches.suggestion(for: query) }
+    /// ↩ opens the saved search being named, not the selected result.
+    var returnOpensSaved: Bool { savedSuggestion != nil && !navigated }
 
     // MARK: Showing
 
@@ -313,8 +319,13 @@ final class SearchPanelController {
             moveSelection(by: event.keyCode == 125 ? 1 : -1)
             navigated = true
             return true
+        case 48 where modifiers.isEmpty && savedSuggestion != nil:  // Tab: the saved search being named
+            openSavedSuggestion()
+            return true
         case 36, 76:  // ↩, enter
-            if selection == Self.weakerToggle, modifiers.isEmpty {
+            if modifiers.isEmpty, returnOpensSaved {
+                openSavedSuggestion()
+            } else if selection == Self.weakerToggle, modifiers.isEmpty {
                 toggleWeaker()
             } else if modifiers == .command {
                 revealSelected()
@@ -387,6 +398,13 @@ final class SearchPanelController {
         let text = query
         hide()
         app.showSearchWindow(query: text, kind: kind)
+    }
+
+    /// The saved search named by what's typed, put in the search window and run there.
+    func openSavedSuggestion() {
+        guard let saved = savedSuggestion else { return }
+        hide()
+        app.searchWindow.open(saved)
     }
 
     /// No folders yet: hide, and open where they're chosen.
