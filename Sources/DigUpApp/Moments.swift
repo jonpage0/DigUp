@@ -162,7 +162,8 @@ extension ResultRow {
 /// Look then plays it in place of its stills (Jon, 2026-10-22). A showing is what Quick Look shows from when it opens
 /// or its files change until they change again. A download is set off once a showing has lasted 0.6 s (arrowing past
 /// results doesn't download every video on the way), at most once a showing (a failure says why in the stills' titles
-/// and is tried again only when Quick Look shows the video anew), and what it brings is shown only in that showing.
+/// and is tried again only when Quick Look shows the video anew), and what it brings is shown whenever it ends while
+/// Quick Look shows that video, in that showing or a later one.
 enum QuickLookDownload {
     fileprivate static var showing = 0
     /// The showing a download was last set off in.
@@ -214,16 +215,18 @@ extension QuickLookSource {
         QuickLookMoment.show(row, in: panel)
     }
 
-    /// Sets off `row`'s download in this showing (`QuickLookDownload`), and when it ends shows what Quick Look was
-    /// last told to, if it's still the same showing: the video, or the stills with why it failed.
+    /// Sets off `row`'s download in this showing (`QuickLookDownload`), and when it ends shows what Quick Look was last
+    /// told to, if that's still the video: the video, or its stills with why it failed.
     private func downloadVideo(of row: ResultRow) {
         guard let uuid = row.photos?.uuid else { return }
         let showing = QuickLookDownload.showing
         QuickLookDownload.setOff = showing
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard self != nil, QuickLookDownload.showing == showing, QLPreviewPanel.shared().isVisible else { return }
+            guard let self, QuickLookDownload.showing == showing, QLPreviewPanel.shared().isVisible else { return }
+            // A download set off in an earlier showing may have ended during this one's wait.
+            guard row.needsVideoDownload else { return showInQuickLook(QuickLookDownload.latest) }
             PhotosDownloads.shared.start(uuid) { [weak self] in
-                guard let self, QuickLookDownload.showing == showing, QLPreviewPanel.shared().isVisible else { return }
+                guard let self, QLPreviewPanel.shared().isVisible, QuickLookDownload.latest?.photos?.uuid == uuid else { return }
                 showInQuickLook(QuickLookDownload.latest)
             }
         }
