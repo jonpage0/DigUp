@@ -35,6 +35,9 @@ final class AppModel {
             let percent = total > 0 ? Int((Double(done) / Double(total) * 100).rounded(.down)) : 0
             let which = files > 0 ? "\(files.formatted()) long \(files == 1 ? "file" : "files")" : "long files"
             return "Reading the rest of \(which) · \(percent)%"
+        case .rating(let done, let total):
+            let percent = total > 0 ? Int((Double(done) / Double(total) * 100).rounded(.down)) : 0
+            return "Rating the pictures already indexed · \(percent)%"
         case .idle:
             if let line = downloadLine { return line }
             if let code = status.code.indexing, code.total > 0 {
@@ -79,6 +82,7 @@ final class AppModel {
         switch status.activity {
         case .indexing(let done, let total) where total > 0: return Double(done) / Double(total)
         case .finishing(let done, let total, _) where total > 0: return Double(done) / Double(total)
+        case .rating(let done, let total) where total > 0: return Double(done) / Double(total)
         case .idle:
             guard let code = status.code.indexing, code.total > 0 else { return nil }
             return Double(code.done) / Double(code.total)

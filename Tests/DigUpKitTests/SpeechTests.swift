@@ -1,0 +1,188 @@
+import Foundation
+import Testing
+@testable import DigUpKit
+
+/// What's said in a recording as stretches of speech (`Speech.stretches(of:)`): consecutive sentences up to about 30 s
+/// or 60 words, never across a silence longer than 2 s, each from its first word's start to its last word's end; and
+/// what's left when the reader fails.
+@Suite final class SpeechTests {
+    /// In Caches, not the temporary folder: the crawl reports /private/var/… for /var/… (`LongFilesTests`).
+    let folder: URL = {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let url = caches.appendingPathComponent("DigUpTests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }()
+
+    deinit {
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    typealias Token = Speech.Sentence.Token
+
+    /// A sentence as parakeet-mlx gives one: `words` words from `start`, one every `pace` seconds (each half as long),
+    /// then its full stop, a token of its own.
+    static func sentence(_ start: Double, words: Int, pace: Double = 0.5) -> Speech.Sentence {
+        let said = (0..<words).map { Token(text: " word", start: start + Double($0) * pace,
+                                           end: start + Double($0) * pace + pace / 2) }
+        let end = said.last?.end ?? start
+        return Speech.Sentence(tokens: said + [Token(text: ".", start: end, end: end + 0.25)])
+    }
+
+    /// Sentences of 15 words, 7.25 s long, 0.75 s apart: three make a stretch, and a fourth would take it to 31.25 s
+    /// (with 60 words, which a stretch may hold), so it starts the next one.
+    @Test func aStretchEndsBeforeItRunsPast30Seconds() {
+        let stretches = Speech.stretches(of: stride(from: 0.0, to: 40, by: 8).map { Self.sentence($0, words: 15) })
+        #expect(stretches.map { [$0.start, $0.end] } == [[0, 23.25], [24, 39.25]])
+    }
+
+    /// Sentences of 25 words, 6.125 s long, 0.375 s apart: two make a stretch of 50 words, and a third would take it to
+    /// 75 (in 19.125 s), so it starts the next one.
+    @Test func aStretchHoldsAtMost60Words() {
+        let stretches = Speech.stretches(of: [0, 6.5, 13].map { Self.sentence($0, words: 25, pace: 0.25) })
+        #expect(stretches.map { [$0.start, $0.end] } == [[0, 12.625], [13, 19.125]])
+        #expect(stretches.first?.text.split(separator: " ").count == 50)
+    }
+
+    /// A silence of 2.5 s after a sentence ends its stretch; one of 1.5 s doesn't. parakeet-mlx, cutting sentences at a
+    /// silence, hears the first one's full stop at the silence's end, as a sentence of its own: it ends the first
+    /// stretch, whose time is its words'.
+    @Test func aSilenceLongerThan2SecondsEndsAStretch() {
+        let first = Speech.Sentence(tokens: (0..<5).map { Token(text: " word", start: Double($0) * 0.5,
+                                                                 end: Double($0) * 0.5 + 0.25) })
+        let stop = Speech.Sentence(tokens: [Token(text: ".", start: 4.5, end: 4.75)])
+        let stretches = Speech.stretches(of: [first, stop, Self.sentence(4.75, words: 5), Self.sentence(8.5, words: 5)])
+        #expect(stretches.map { [$0.start, $0.end] } == [[0, 2.25], [4.75, 10.75]])
+        #expect(stretches.first?.text == "word word word word word.")
+    }
+
+    /// A silence over 2 s inside one of parakeet-mlx's sentences ends a stretch too: it cuts a sentence at a silence
+    /// between any two tokens, so a comma heard in the middle of the silence keeps the words either side in one.
+    @Test func aSilenceInsideASentenceEndsAStretch() {
+        let sentence = Speech.Sentence(tokens: [Token(text: " Hello", start: 0, end: 1),
+                                                Token(text: ",", start: 2.5, end: 2.6),
+                                                Token(text: " again", start: 4, end: 5)])
+        let stretches = Speech.stretches(of: [sentence])
+        #expect(stretches.map { [$0.start, $0.end] } == [[0, 1], [4, 5]])
+        #expect(stretches.map(\.text) == ["Hello,", "again"])
+    }
+
+    /// parakeet-mlx offline before it has its model, say: not a fact about the recording.
+    struct Offline: Error {}
+
+    #if canImport(AVFoundation)
+    /// A recording whose speech the reader failed on, for a reason of the reader's own, is read again later: not at once
+    /// (the next helper would fail the same way), once a while has passed, and when it fails again, not at once either.
+    /// One that ffmpeg can't decode stays as it is until it changes.
+    @Test func aRecordingTheReaderFailedOnIsReadAgainLater() throws {
+        let files = folder.appendingPathComponent("files")
+        try FileManager.default.createDirectory(at: files, withIntermediateDirectories: true)
+        let tone = (0..<48_000).map { Int16(9000 * sin(Double($0) * 2 * .pi * 440 / AudioExtractor.sampleRate)) }
+        for name in ["talk.wav", "noise.wav"] {
+            try AudioExtractor.writeWAV(tone[...], to: files.appendingPathComponent(name))
+        }
+        var options = IndexOptions()
+        options.speech = Speech.Reader { recording, _, _ in
+            if recording.lastPathComponent == "noise.wav" {
+                throw Speech.Failure(description: "ffmpeg couldn't decode it", ofRecording: true)
+            }
+            throw Offline()
+        }
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        let indexer = try Indexer(store: store, options: options, makeEmbedder: { FakeEmbedder() })
+        _ = try indexer.sync([files])
+        #expect(try indexer.run()["done"] == 2)   // their sound is read whatever the reader does
+        #expect(try store.readAgainOnce(readsSpeech: true) == 0)
+        try store.setMeta("fork_speech_retry", "0 0")   // as if the reader had failed long ago
+        #expect(try store.readAgainOnce(readsSpeech: true) == 1)
+        #expect(try store.pending(limit: nil).map { ($0.path as NSString).lastPathComponent } == ["talk.wav"])
+        _ = try indexer.run()   // and fails again
+        #expect(try store.readAgainOnce(readsSpeech: true) == 0)
+    }
+
+    /// A recording too short for a window of sound (under 2 s) is still read for what's said: one with speech is
+    /// indexed by it, one with none is left out as before, and one read before the reader was there is read again once.
+    @Test func aShortRecordingIsReadForWhatsSaid() throws {
+        let files = folder.appendingPathComponent("files")
+        try FileManager.default.createDirectory(at: files, withIntermediateDirectories: true)
+        let tone = (0..<19_200).map { Int16(9000 * sin(Double($0) * 2 * .pi * 440 / AudioExtractor.sampleRate)) }
+        for name in ["flight.wav", "hum.wav"] {   // 1.2 s each
+            try AudioExtractor.writeWAV(tone[...], to: files.appendingPathComponent(name))
+        }
+        let store = try IndexStore(directory: folder.appendingPathComponent("index"))
+        _ = try Indexer(store: store, options: IndexOptions(), makeEmbedder: { FakeEmbedder() }).sync([files])
+        #expect(try Indexer(store: store, options: IndexOptions(), makeEmbedder: { FakeEmbedder() }).run()
+                == ["skipped": 2])
+        #expect(try store.readAgainOnce(readsSpeech: true) == 2)
+        var options = IndexOptions()
+        options.speech = Speech.Reader { recording, _, _ in
+            recording.lastPathComponent == "hum.wav" ? [] : [Speech.Sentence(tokens: [
+                Token(text: " Flight", start: 0.1, end: 0.5), Token(text: " cancelled", start: 0.5, end: 1),
+                Token(text: ".", start: 1, end: 1.1),
+            ])]
+        }
+        #expect(try Indexer(store: store, options: options, makeEmbedder: { FakeEmbedder() }).run()
+                == ["done": 1, "skipped": 1])
+        var said: [String] = []
+        try store.db.query("""
+            SELECT f.path, s.loc, s.loc_end FROM fts JOIN segments s ON s.id = fts.rowid JOIN files f ON f.id = s.file
+            WHERE fts MATCH '"cancelled"' AND s.kind = 'speech'
+            """) { said.append("\(($0.text(0)! as NSString).lastPathComponent) \($0.double(1))–\($0.double(2))") }
+        #expect(said == ["flight.wav 0.1–1.0"])
+        #expect(try store.recordingsWithoutSpeech().isEmpty)   // the one where nothing is said isn't read again
+    }
+
+    /// A shell script at `name` in the test's folder, made executable: a stand-in for parakeet-mlx or ffmpeg.
+    func program(_ name: String, _ script: String) throws -> String {
+        let url = folder.appendingPathComponent(name)
+        try Data(("#!/bin/sh\n" + script).utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url.path
+    }
+
+    /// parakeet-mlx says "Failed to load audio" whenever ffmpeg fails, the recording's fault or ffmpeg's own: the
+    /// recording is blamed (settled) only when ffmpeg decodes a sound it's known to read; else it's the reader's.
+    @Test func aRecordingIsBlamedOnlyWhenFfmpegWorks() throws {
+        let parakeet = try program("parakeet-mlx", """
+            echo "Error transcribing file talk.m4a: Failed to load audio: ffmpeg version 9.0.2"
+            echo " Error opening input: Invalid data found when processing input"
+            """)
+        let recording = folder.appendingPathComponent("talk.m4a")
+        for (ffmpeg, theRecordings) in [(try program("ffmpeg", "exit 0"), true),
+                                        (try program("broken-ffmpeg", "echo 'dyld: Library not loaded' >&2; exit 1"),
+                                         false)] {
+            #expect(throws: Speech.Failure.self) {
+                do {
+                    _ = try Speech.run(parakeet, ffmpeg: ffmpeg, on: recording, in: folder, timeout: 60)
+                } catch let failure as Speech.Failure {
+                    #expect(failure.ofRecording == theRecordings, "\(ffmpeg): \(failure)")
+                    throw failure
+                }
+            }
+        }
+    }
+
+    /// The model is the one Jon chose (`Speech.model`), whatever parakeet-mlx's own settings in the environment say
+    /// (PARAKEET_MODEL picks another model, PARAKEET_DECODING another way of decoding).
+    @Test func parakeetRunsTheChosenModelAsDigUpSetsIt() throws {
+        let seen = folder.appendingPathComponent("seen.txt")
+        let parakeet = try program("parakeet-mlx", """
+            echo "$@" > '\(seen.path)'
+            echo "${PARAKEET_MODEL:-none} ${PARAKEET_DECODING:-none}" >> '\(seen.path)'
+            while [ $# -gt 0 ]; do [ "$1" = "--output-dir" ] && dir="$2"; shift; done
+            echo '{"text": "", "sentences": []}' > "$dir/speech.json"
+            """)
+        setenv("PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v2", 1)
+        setenv("PARAKEET_DECODING", "beam", 1)
+        defer {
+            unsetenv("PARAKEET_MODEL")
+            unsetenv("PARAKEET_DECODING")
+        }
+        #expect(try Speech.run(parakeet, ffmpeg: try program("ffmpeg", "exit 0"),
+                               on: folder.appendingPathComponent("talk.m4a"), in: folder, timeout: 60).isEmpty)
+        let lines = try String(contentsOf: seen, encoding: .utf8).split(separator: "\n")
+        #expect(lines.first?.contains("--model \(Speech.model)") == true)
+        #expect(lines.last == "none none")
+    }
+    #endif
+}

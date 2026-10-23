@@ -125,6 +125,23 @@ extension VideoExtractor {
         return (written ?? nil).flatMap { Location(iso6709: $0, source: .quicktime) }
     }
 
+    /// The video's size as it's shown (its picture's natural size through its preferred transform: a phone's portrait
+    /// video is stored wide and turned on playback) and its length, or nil. Its metadata only: nothing is decoded. A
+    /// file with no picture has its length alone.
+    static func dimensions(of url: URL) -> MediaDimensions? {
+        let read = try? runBlocking { () async throws -> (size: CGSize?, seconds: Double) in
+            let asset = AVURLAsset(url: url)
+            let seconds = try await asset.load(.duration).seconds
+            guard let track = try await asset.loadTracks(withMediaType: .video).first else { return (nil, seconds) }
+            let (natural, transform) = try await track.load(.naturalSize, .preferredTransform)
+            return (CGRect(origin: .zero, size: natural).applying(transform).size, seconds)
+        }
+        guard let read else { return nil }
+        return MediaDimensions(width: read.size.map { Int(abs($0.width).rounded()) },
+                               height: read.size.map { Int(abs($0.height).rounded()) },
+                               duration: read.seconds > 0 ? read.seconds : nil, source: .file)
+    }
+
     static func averageHash(_ image: CGImage) -> UInt64 {
         let side = 8
         var pixels = [UInt8](repeating: 0, count: side * side)

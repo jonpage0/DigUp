@@ -10,7 +10,8 @@ import SwiftUI
 final class Previews {
     static let shared = Previews()
     private let cache = NSCache<NSString, NSImage>()
-    /// The text of a document's passage or a stretch of code (`Engine.text(ofSegment:code:)`), set when the app starts.
+    /// The text of a document's passage, a stretch of code or a stretch of what's said (`Engine.text(ofSegment:code:)`),
+    /// set when the app starts.
     var passage: (Int64, Bool) async -> String? = { _, _ in nil }
     /// Every moment of a recording that matches a query, by path and query (`Engine.moments(of:matching:)`), set when
     /// the app starts. Not cached: the preview asks once a result.
@@ -379,8 +380,10 @@ struct PreviewPicture: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .frame(maxWidth: size.width, maxHeight: size.height)
             } else if let image {
-                Image(nsImage: image)
+                let hidden = SensitiveBlur.shared.hides(row)
+                Image(nsImage: image.veiled(hidden))
                     .resizable()
+                    .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
                     .overlay(alignment: .bottomLeading) { marks }
                     // The faces found in it, to say who they are; else the ones the People filter took it for. Not
@@ -397,6 +400,8 @@ struct PreviewPicture: View {
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2, perform: open)
                     .overlay { if row.moment != nil { PlayButton(row: row) } }
+                    // Over the play button too: playing it would show it. A click shows it.
+                    .sensitiveCover(hidden, iconSize: 26, show: { SensitiveBlur.shared.show(row) })
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
@@ -674,7 +679,7 @@ struct AudioMoment: View {
     }
 }
 
-/// "Matches the frame at 0:06" and the words it has, if any.
+/// "Matches the frame at 0:06" and the words it has, if any: what's said, for a stretch of speech.
 struct WhyItMatched: View {
     let row: ResultRow
 
@@ -688,8 +693,11 @@ struct WhyItMatched: View {
                     .foregroundStyle(row.matchedMeaning ? AnyShapeStyle(Brand.gradient) : AnyShapeStyle(.secondary))
             }
             .font(.system(size: 12, weight: .medium))
-            // Code shows its lines above, the words marked there.
-            if let excerpt = row.excerpt, row.kind != .code {
+            // What's said shows whole, its words marked; code shows its lines above, the words marked there.
+            if row.segment == .speech {
+                SpokenWords(row: row)
+                    .padding(.leading, 22)
+            } else if let excerpt = row.excerpt, row.kind != .code {
                 Text(highlighted(excerpt, size: 12))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
@@ -698,6 +706,27 @@ struct WhyItMatched: View {
                     .textSelection(.enabled)
             }
         }
+    }
+}
+
+/// What's said in the stretch of speech a result is at, all of it as the index keeps it, with the query's words marked
+/// as a PDF page's are (`ResultRow.markedWords`).
+struct SpokenWords: View {
+    let row: ResultRow
+    @State private var text: String?
+
+    var body: some View {
+        Text(marking(row.markedWords, in: text ?? row.excerpt.map(Self.unmarked) ?? ""))
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .lineLimit(6)
+            .textSelection(.enabled)
+            .task(id: row.previewKey) { text = await Previews.shared.passage(row.segmentID, false) }
+    }
+
+    /// An excerpt without keyword search's « » marks.
+    private static func unmarked(_ excerpt: String) -> String {
+        excerpt.replacingOccurrences(of: "«", with: "").replacingOccurrences(of: "»", with: "")
     }
 }
 
@@ -759,7 +788,7 @@ struct Passage: View {
     /// Up to ~900 characters from just before the first marked word, the words marked like a search in Preview.
     private var marked: AttributedString {
         let source = text ?? row.excerpt?.replacingOccurrences(of: "«", with: "").replacingOccurrences(of: "»", with: "") ?? ""
-        let words = Set((row.foundWords + row.terms).filter { $0.count >= 2 })
+        let words = row.markedWords
         let first = words.compactMap { SearchText.matches(of: $0, in: source).first?.lowerBound }.min()
         var start = source.startIndex
         if let first, source.distance(from: source.startIndex, to: first) > 200 {
@@ -768,16 +797,7 @@ struct Passage: View {
         }
         let window = String(source[start...].prefix(900))
         let lead = start > source.startIndex ? "…" : ""
-        var result = AttributedString(lead + window + (source.distance(from: start, to: source.endIndex) > 900 ? "…" : ""))
-        let shown = String(result.characters)
-        for word in words {
-            for found in SearchText.matches(of: word, in: shown) {
-                guard let range = Range(found, in: result) else { continue }
-                result[range].backgroundColor = Color(red: 1, green: 0.86, blue: 0.2)
-                result[range].foregroundColor = .black
-            }
-        }
-        return result
+        return marking(words, in: lead + window + (source.distance(from: start, to: source.endIndex) > 900 ? "…" : ""))
     }
 
     /// Arabic or Hebrew text reads from the right.
@@ -787,6 +807,20 @@ struct Passage: View {
         }
         return false
     }
+}
+
+/// `text` with `words` marked where keyword search would find them (`SearchText.matches`), as Preview marks what you
+/// searched for: a document's passage, what's said in a recording.
+func marking(_ words: Set<String>, in text: String) -> AttributedString {
+    var result = AttributedString(text)
+    for word in words {
+        for found in SearchText.matches(of: word, in: text) {
+            guard let range = Range(found, in: result) else { continue }
+            result[range].backgroundColor = Color(red: 1, green: 0.86, blue: 0.2)
+            result[range].foregroundColor = .black
+        }
+    }
+    return result
 }
 
 /// The lines of code that matched, numbered as in the file, in a monospaced card like an editor's: the query's words

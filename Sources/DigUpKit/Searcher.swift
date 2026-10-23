@@ -23,9 +23,13 @@ public struct SearchHit: Sendable {
     public var focus: Double? = nil
     /// A picture or video of a Photos library: where it is in Photos, and what Photos calls it.
     public var photos: PhotosHit? = nil
-    /// A video or audio file: how many moments of it match the query (`Searcher.moments(of:queryVector:zGate:)`),
-    /// counted from the scores the search has anyway. 0 when none does (it's here by its name, say).
+    /// A video or audio file: how many moments of it match the query (`Searcher.moments(of:text:queryVector:zGate:)`),
+    /// counted from the scores the search has anyway, and from its stretches of speech that hold the query's words. 0
+    /// when none does (it's here by its name, say).
     public var momentCount = 0
+    /// A picture or a video: what the sensitive-picture detector said of each of its pictures (`SensitivePictures`).
+    /// Nil for any other file.
+    public var pictures: SensitivePictures? = nil
     /// A picture outside Photos kept by the People filter: the faces in it taken for its people.
     public var faces: [FaceMatch] = []
 }
@@ -41,14 +45,35 @@ public struct FaceMatch: Sendable, Equatable {
     public let confirmed: Bool
 }
 
-/// A stretch of a recording that matches a query (`Searcher.moments(of:queryVector:zGate:)`): its segments that stand
-/// out on the query's scale, neighbours of the same kind merged into one.
+/// A stretch of a recording that matches a query (`Searcher.moments(of:text:queryVector:zGate:)`): its segments that
+/// stand out on the query's scale or hold the query's words, neighbours of the same kind merged into one.
 public struct Moment: Sendable, Equatable {
     public enum Kind: String, Sendable {
         /// A frame of the video, or one of Photos' stills of a video in iCloud.
         case seen
         /// A window of its sound (an audio file, or a video's soundtrack).
         case heard
+        /// A stretch of what's said in it (`Speech`), found by what its words mean or by the words themselves.
+        case said
+
+        /// The kind of moment a recording's segment makes; nil for one that makes none (its name, Photos' words).
+        public init?(_ segment: SegmentKind) {
+            switch segment {
+            case .frame: self = .seen
+            case .audio: self = .heard
+            case .speech: self = .said
+            default: return nil
+            }
+        }
+
+        /// The segments a moment of this kind is made of.
+        public var segment: SegmentKind {
+            switch self {
+            case .seen: .frame
+            case .heard: .audio
+            case .said: .speech
+            }
+        }
     }
 
     public let kind: Kind
@@ -59,10 +84,13 @@ public struct Moment: Sendable, Equatable {
     /// A video in iCloud read from Photos' filmstrip: the still's place in it, from 0 (the indexer writes a stills
     /// video's frames in the filmstrip's order, `PhotosLibrary.filmstrip(startingAt:)`).
     public let still: Int?
-    /// How far its best segment stands out for the query (`Searcher.meaning`): the moments of a file go best first.
+    /// Its best segment's score as `search` scores a file (what it means for the query and the query's words in it):
+    /// the moments of a file go best first.
     public let score: Double
     /// Its best segment.
     public let segmentID: Int64
+    /// What's said in a `said` moment, as the index keeps it; nil for the others.
+    public let words: String?
 }
 
 /// A hit from a Photos library (`PhotosLibrary`): the asset it shows, its title and date in Photos (from its
@@ -83,8 +111,8 @@ public struct PhotosHit: Sendable, Equatable {
     public var still: String? = nil
 }
 
-/// What a search keeps besides its kinds: Photos' facts about a library's files, and where files were taken. The
-/// parts combine with AND; an empty filter keeps every file.
+/// What a search keeps besides its kinds: Photos' facts about a library's files, where files were taken, and how long
+/// and what shape they are. The parts combine with AND; an empty filter keeps every file.
 public struct SearchFilter: Sendable, Equatable {
     /// People a file must show, every one of them (ids of `IndexStore.photosPeople`). An entry is one person, or the
     /// people who share a name, any of whom counts for it. An empty entry keeps nothing: a saved search's person who
@@ -117,6 +145,18 @@ public struct SearchFilter: Sendable, Equatable {
     /// before anything is matched, counted or cut to the best, so it's never in a result or a count, and found by path,
     /// whatever the index knows of the file yet.
     public var photosOnly: Set<String>?
+    /// Only files with a picture rated sensitive at this position (the Sensitive filter): a picture, or a frame or a
+    /// still of a video (`sensitive_scores`).
+    public var sensitive: SensitivePosition?
+    /// Leaves out every file with a picture rated sensitive at this position, and every picture or video not rated yet
+    /// (not read, or with a picture the rating pass hasn't got to, or never read: too small, or unreadable): what an AI
+    /// app doesn't see while "Pictures rated sensitive" is off (`AIAccess.sensitive`), fail-safe as hidden Photos items
+    /// are. Left out before anything is matched, counted or cut to the best, as `photosOnly` is.
+    public var leavingOutSensitive: SensitivePosition?
+    /// Only videos and recordings this long (`media_dimensions.duration`): the Length filter.
+    public var length: Length?
+    /// Only pictures and videos of this shape as they're shown (`media_dimensions.width`, `height`): the Shape filter.
+    public var shape: Shape?
     /// The faces outside Photos matched to people, by face, to go by instead of the index's own (`face_matches`): what an
     /// AI app is told is matched only with the named faces it may see (`IndexStore.faceMatches(referencesKeptBy:)`,
     /// `digup mcp`). Nil goes by the index's.
@@ -132,16 +172,139 @@ public struct SearchFilter: Sendable, Equatable {
         }
     }
 
+    /// How long a video or a recording is, in seconds: `atLeast` or longer, and shorter than `under`; either may be
+    /// left out, not both (approved 2026-10-22). The Length menu offers `buckets`; a saved search keeps one as
+    /// `{"atLeast": 15, "under": 60}` (its `Codable`), `digup mcp` takes `{at_least, under}`.
+    public struct Length: Sendable, Hashable {
+        public let atLeast: Double?
+        public let under: Double?
+        /// The longest a bound can be: ten years of 365 days, in seconds. Any longer is no recording's, and a number
+        /// that big can't be said in minutes and seconds (a Length token says it so): the CLI, `digup mcp` and a saved
+        /// search's reader turn it down, as they do any length `init` does.
+        public static let longest: Double = 10 * 365 * 24 * 60 * 60
+
+        /// Nil with no bound, a bound below 0 (`under` above it), over `longest` or that isn't a number, or `atLeast`
+        /// not below `under`.
+        public init?(atLeast: Double? = nil, under: Double? = nil) {
+            guard atLeast != nil || under != nil, atLeast.map({ 0 <= $0 && $0 <= Self.longest }) ?? true,
+                  under.map({ 0 < $0 && $0 <= Self.longest }) ?? true else { return nil }
+            if let atLeast, let under, atLeast >= under { return nil }
+            (self.atLeast, self.under) = (atLeast, under)
+        }
+
+        /// The Length menu's: under 15 s, 15 s – 1 min, 1 – 5 min, over 5 min.
+        public static let buckets: [Length] = {
+            let bounds: [(atLeast: Double?, under: Double?)] = [(nil, 15), (15, 60), (60, 300), (300, nil)]
+            return bounds.compactMap { Length(atLeast: $0.atLeast, under: $0.under) }
+        }()
+
+        /// As `digup search --length` and the app's debug flags write it, in seconds: "15..60", "..15", "300..".
+        public init?(_ text: String) {
+            let bounds = text.components(separatedBy: "..")
+            guard bounds.count == 2, bounds.allSatisfy({ $0.isEmpty || Double($0) != nil }) else { return nil }
+            self.init(atLeast: Double(bounds[0]), under: Double(bounds[1]))
+        }
+
+        public var text: String {
+            func seconds(_ value: Double?) -> String {
+                guard let value else { return "" }
+                return value == value.rounded() && abs(value) < 1e15 ? String(Int(value)) : String(value)
+            }
+            return seconds(atLeast) + ".." + seconds(under)
+        }
+
+        /// The files this long, as a condition on a `media_dimensions` row (a still picture's has no duration, which
+        /// no bound holds), and the values it takes.
+        var condition: (sql: String, values: [SQLValue]) {
+            let bounds = [atLeast.map { ("duration >= ?", $0) }, under.map { ("duration < ?", $0) }].compactMap { $0 }
+            return (bounds.map(\.0).joined(separator: " AND "), bounds.map { .double($0.1) })
+        }
+    }
+
+    /// What shape a picture or a video is as it's shown (approved 2026-10-22): taller than wide, wider than tall, square
+    /// (its sides within 5 %), wide (2:1 or wider: panoramas and cinema), or an exact ratio, width to height in whole
+    /// numbers from 1 to 99, its orientation included ("16:9" is landscape, "9:16" portrait), matched within 2 %. Square
+    /// is apart from portrait and landscape; wide is among landscape. Written as a saved search and `digup mcp` keep it:
+    /// "portrait", "landscape", "square", "wide" or "W:H" (`text`).
+    public enum Shape: Sendable, Hashable {
+        case portrait, landscape, square, wide
+        case ratio(width: Int, height: Int)
+
+        /// Square: the long side at most this many times the short one (5 %).
+        public static let squareTolerance = 1.05
+        /// Wide: at least this many times as wide as tall (2:1).
+        public static let wideRatio = 2.0
+        /// An exact ratio: a shape at most this many times wider or narrower than it (2 %), the same either way, so a
+        /// picture and the same picture turned match "16:9" and "9:16" alike.
+        public static let ratioTolerance = 1.02
+        /// The whole numbers an exact ratio is written in.
+        public static let ratioTerms = 1...99
+        /// The Shape menu's exact ratios.
+        public static let ratios: [Shape] = [.ratio(width: 16, height: 9), .ratio(width: 9, height: 16),
+                                             .ratio(width: 4, height: 3), .ratio(width: 3, height: 4),
+                                             .ratio(width: 3, height: 2), .ratio(width: 2, height: 3)]
+
+        /// From `text`: one of the four names, or "W:H" written plainly (no sign, no leading zero), each from 1 to 99.
+        public init?(_ text: String) {
+            switch text {
+            case "portrait": self = .portrait
+            case "landscape": self = .landscape
+            case "square": self = .square
+            case "wide": self = .wide
+            default:
+                let terms = text.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+                guard terms.count == 2, let width = Int(terms[0]), let height = Int(terms[1]),
+                      terms == [String(width), String(height)], Self.ratioTerms.contains(width),
+                      Self.ratioTerms.contains(height) else { return nil }
+                self = .ratio(width: width, height: height)
+            }
+        }
+
+        public var text: String {
+            switch self {
+            case .portrait: "portrait"
+            case .landscape: "landscape"
+            case .square: "square"
+            case .wide: "wide"
+            case .ratio(let width, let height): "\(width):\(height)"
+            }
+        }
+
+        /// Whether a `media_dimensions` row's width and height are this shape, in SQL.
+        var condition: String {
+            switch self {
+            case .portrait: "height > width * \(Self.squareTolerance)"
+            case .landscape: "width > height * \(Self.squareTolerance)"
+            case .square: "MAX(width, height) <= MIN(width, height) * \(Self.squareTolerance)"
+            case .wide: "width >= height * \(Self.wideRatio)"
+            case .ratio(let width, let height):
+                "width * \(height) BETWEEN height * \(width) / \(Self.ratioTolerance) "
+                    + "AND height * \(width) * \(Self.ratioTolerance)"
+            }
+        }
+    }
+
     public init(people: [Set<Int64>] = [], albums: Set<Int64>? = nil, favorites: Bool = false,
                 origins: Set<String> = [], cameras: Set<String> = [], shotOn: Set<String>? = nil,
-                paths: Set<String>? = nil, area: Area? = nil) {
+                paths: Set<String>? = nil, area: Area? = nil, length: Length? = nil, shape: Shape? = nil) {
         (self.people, self.albums, self.favorites, self.area) = (people, albums, favorites, area)
         (self.origins, self.cameras, self.shotOn, self.paths) = (origins, cameras, shotOn, paths)
+        (self.length, self.shape) = (length, shape)
     }
 
     public var isEmpty: Bool {
         people.isEmpty && albums == nil && !favorites && origins.isEmpty && cameras.isEmpty && shotOn == nil
-            && paths == nil && area == nil && photosOnly == nil
+            && paths == nil && area == nil && photosOnly == nil && sensitive == nil && leavingOutSensitive == nil
+            && length == nil && shape == nil
+    }
+
+    /// What of it leaves files out of an AI app's sight (`photosOnly`, `leavingOutSensitive`); empty for DigUp's own
+    /// searches. A file it leaves out bears on nothing a search does, not even on whether a word counts as indexed
+    /// (`Searcher.search`'s prefix matching).
+    var exclusions: SearchFilter {
+        var exclusions = SearchFilter()
+        (exclusions.photosOnly, exclusions.leavingOutSensitive) = (photosOnly, leavingOutSensitive)
+        return exclusions
     }
 
     /// A part of the query that keeps no file (`IN ()` isn't SQL).
@@ -197,6 +360,14 @@ public struct SearchFilter: Sendable, Equatable {
             values += [.double(area.latitudes.lowerBound), .double(area.latitudes.upperBound),
                        .double(area.longitudes.lowerBound), .double(area.longitudes.upperBound)]
         }
+        if let length {
+            let condition = length.condition
+            parts.append("SELECT file FROM media_dimensions WHERE \(condition.sql)")
+            values += condition.values
+        }
+        if let shape {
+            parts.append("SELECT file FROM media_dimensions WHERE \(shape.condition)")   // a recording's has no size
+        }
         if let photosOnly {
             // As `PhotosLibrary.library(containing:)`; the paths kept go as one value (a library has thousands).
             parts.append("SELECT id FROM files WHERE path NOT LIKE ?"
@@ -207,6 +378,20 @@ public struct SearchFilter: Sendable, Equatable {
                 let list = try? JSONSerialization.data(withJSONObject: Array(photosOnly), options: .withoutEscapingSlashes)
                 values.append(.text(list.map { String(decoding: $0, as: UTF8.self) } ?? "[]"))
             }
+        }
+        if let sensitive {
+            parts.append("SELECT s.file FROM sensitive_scores JOIN segments s ON s.id = segment WHERE "
+                         + sensitive.condition)
+        }
+        if let leavingOutSensitive {
+            // A file that isn't a picture or a video has no picture to rate; one that is must have been read, and each
+            // of its pictures rated and not sensitive.
+            parts.append("""
+                SELECT id FROM files f WHERE f.kind NOT IN \(IndexStore.pictureKinds) OR (f.state IN \
+                \(IndexStore.readStates) AND NOT \(IndexStore.hasUnratedPicture) AND NOT EXISTS (
+                    SELECT 1 FROM sensitive_scores JOIN segments s ON s.id = segment
+                    WHERE s.file = f.id AND \(leavingOutSensitive.condition)))
+                """)
         }
         return parts.isEmpty ? nil : (parts.joined(separator: " INTERSECT "), values)
     }
@@ -228,6 +413,65 @@ public struct SearchFilter: Sendable, Equatable {
         return """
             SELECT s.file FROM faces f JOIN segments s ON s.id = f.segment WHERE f.id IN (SELECT value FROM json_each(?))
             """
+    }
+}
+
+/// Any key of a JSON object, to see which keys it has.
+private struct JSONKey: CodingKey {
+    let stringValue: String
+    init(stringValue: String) { self.stringValue = stringValue }
+    var intValue: Int? { nil }
+    init?(intValue: Int) { nil }
+}
+
+/// A length as a saved search keeps it (`saved-searches.json`'s `{"length": …}`, approved 2026-10-22): `{"atLeast": 15,
+/// "under": 60}`, in seconds, an open bound left out. Read strictly, as the app reads the file: another key, a bound
+/// that's null or not a number, or bounds `init(atLeast:under:)` turns down aren't this shape.
+extension SearchFilter.Length: Codable {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case atLeast, under
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let keys = try decoder.container(keyedBy: JSONKey.self).allKeys.map(\.stringValue)
+        let known = Set(CodingKeys.allCases.map(\.rawValue))
+        guard keys.allSatisfy(known.contains) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                    debugDescription: "a length has atLeast and under, not \(keys)"))
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func bound(_ key: CodingKeys) throws -> Double? {
+            container.contains(key) ? try container.decode(Double.self, forKey: key) : nil
+        }
+        guard let length = Self(atLeast: try bound(.atLeast), under: try bound(.under)) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription:
+                "a length has a bound or two, from 0 to \(Int(Self.longest)) seconds, atLeast below under"))
+        }
+        self = length
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(atLeast, forKey: .atLeast)
+        try container.encodeIfPresent(under, forKey: .under)
+    }
+}
+
+/// A shape as a saved search keeps it (`saved-searches.json`'s `{"shape": …}`, approved 2026-10-22): its `text`, read
+/// strictly (`init(_:)`).
+extension SearchFilter.Shape: Codable {
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        guard let shape = Self(try container.decode(String.self)) else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription:
+                "a shape is portrait, landscape, square, wide or W:H in whole numbers from 1 to 99")
+        }
+        self = shape
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(text)
     }
 }
 
@@ -341,13 +585,15 @@ public final class Searcher {
             (kinds == nil || fileKind[file].map { kinds!.contains($0) } ?? false) && (kept?.contains(file) ?? true)
         }
 
-        // Meaning: score every vector on this query's scale (`meaning`), keep each file's best segment, and a
-        // recording's segments that stand out (its moments, counted for the hits it makes).
+        // Meaning: score every vector on this query's scale (`meaning`), set by the vectors the caller may see
+        // (`rowsSettingScale`), keep each file's best segment, and a recording's segments that stand out (its moments,
+        // counted for the hits it makes).
         var best: [Int64: (z: Double, cosine: Double, row: Int)] = [:]
         var standouts: [Int64: [(segment: Int64, z: Double)]] = [:]
         if let query = queryVector, query.count == Vectors.dimension, !rowFile.isEmpty {
             let scores = score(query)
-            let meaning = Self.meaning(scores, rowModality, setsScale: rowSetsScale)
+            let setsScale = try rowsSettingScale(seeing: filter.exclusions)
+            let meaning = Self.meaning(scores, rowModality, setsScale: setsScale)
             for row in 0..<scores.count where allowed(rowFile[row]) {
                 let (file, z) = (rowFile[row], meaning[row])
                 if z > (best[file]?.z ?? -.infinity) { best[file] = (z, Double(scores[row]), row) }
@@ -357,24 +603,20 @@ public final class Searcher {
             }
         }
 
-        // Words: FTS5 with Porter stemming over file names, folder names, OCR, page and document text. A name from code
-        // ("quantize_row_q8_0_ref") is matched as one phrase, as it's written.
+        // Words: FTS5 with Porter stemming over file names, folder names, OCR, page and document text, and what's said
+        // in recordings. A name from code ("quantize_row_q8_0_ref") is matched as one phrase, as it's written.
         let terms = Self.terms(text)
         let identifier = isCode ? CodeLookup.identifier(text) : nil
         var words: [(file: Int64, segment: Int64, snippet: String?)] = []
         var coverage: [Int64: Double] = [:]   // share of the query's words found anywhere in the file
-        var patterns = identifier.map { [CodeLookup.phrase($0)] } ?? Self.patterns(terms, prefixLast: prefixLast)
-        // A word that's in no file as typed matches as the start of longer words, as the last word does while it's
-        // being typed: "grok" finds "Grok4" and "Grokipedia" (stemming only covers endings, as in "grokking").
-        // Otherwise a file the panel showed while you typed dropped out once you stopped. A word that is in the index
-        // as typed stays whole, so "cat" doesn't bring in "category"; so does a word of two letters, the start of too
-        // many words to stand for one.
-        if identifier == nil {
-            for index in terms.indices where terms[index].count >= 3 && !patterns[index].hasSuffix("*") {
-                if try !isIndexed(patterns[index]) { patterns[index] += "*" }
-            }
-        }
-        if !patterns.isEmpty {
+        // Only the files an AI app may see count for a word's prefix matching (`SearchFilter.exclusions`).
+        let patterns = try identifier.map { [CodeLookup.phrase($0)] }
+            ?? wordPatterns(terms, prefixLast: prefixLast, within: filter.exclusions.query)
+        // An AI app's search: which files match, how far, and where, from the files it sees alone (`wordsInSight`).
+        let inSight = filter.exclusions.query != nil
+        if !patterns.isEmpty, inSight {
+            (words, coverage) = try wordsInSight(patterns, within: narrowing, allowed: allowed)
+        } else if !patterns.isEmpty {
             var seen = Set<Int64>()
             // The filter narrows the matches before they're cut to the best 1,000: else a file it keeps could be
             // outranked by that many matches it doesn't, and never be seen.
@@ -405,8 +647,8 @@ public final class Searcher {
         // Score: meaning z + a bonus that grows with word coverage, + 1 for the kind the query asks for.
         // One common word can't beat a strong meaning match; all the words of an exact lookup usually do.
         // (This beat reciprocal-rank fusion on both evals, 2026-10-07: R@1 0.88 vs 0.73 synthetic, 0.86 vs 0.82 real.)
-        let lookup = Self.isLookup(terms) || identifier != nil
-        let (meaningWeight, wordsWeight) = lookup ? (0.5, wordWeight * 2) : (1, wordWeight)
+        let (meaningWeight, wordsWeight) = Self.weights(lookup: Self.isLookup(terms) || identifier != nil,
+                                                        wordWeight: wordWeight)
         let hinted = Self.kindHints(text)
         var candidates = Set(best.filter { $0.value.z >= zGate }.keys)
         for (file, share) in coverage where share >= 0.5 { candidates.insert(file) }
@@ -424,7 +666,12 @@ public final class Searcher {
             .prefix(limit) {
             let rank = hits.count
             let semantic = best[file]
-            let keyword = wordRank[file]
+            var keyword = wordRank[file]
+            // An AI app's: the words quoted for the files shown alone (`wordsInSight` matches every file it sees).
+            if inSight, let match = keyword, match.1.snippet == nil {
+                let quoted = try snippet(ofSegment: match.1.segment, patterns, terms: terms)
+                keyword = (match.0, (match.1.file, match.1.segment, quoted))
+            }
             // Point at the best meaning segment if it stands out; else at the segment the words matched.
             let useMeaning = semantic.map { $0.z >= zGate || keyword == nil } ?? false
             guard var segmentID = useMeaning ? semantic.map({ rowSegment[$0.row] }) : keyword?.1.segment else { continue }
@@ -460,12 +707,17 @@ public final class Searcher {
                 }
                 if matchedKind != SegmentKind.name.rawValue { snippet = excerpt(text, limit: 400) }
             }
+            // A recording's moments: what stands out in it, and what's said in it with the query's words, looked for in
+            // it whether or not it's among keyword search's first files (`words`), as its preview looks (`moments`).
+            let said = Self.recordings.contains(row.kind) ? try saidWords(inFile: file, patterns) : [:]
             hits.append(SearchHit(path: row.path, kind: row.kind, score: score, z: semantic?.z,
                                   cosine: semantic?.cosine, keywordRank: keyword?.0, segment: segment,
                                   segmentID: segmentID, loc: loc, locEnd: locEnd, excerpt: snippet ?? storedExcerpt,
                                   modified: row.modified, size: row.size, info: row.info, focus: focus,
                                   photos: try photosHit(file: file, path: row.path, segment: segmentID, kind: segment),
-                                  momentCount: try moments(ofFile: file, standouts[file] ?? []).count,
+                                  momentCount: try moments(ofFile: file, standouts[file] ?? [], said: said,
+                                                           weights: (meaningWeight, wordsWeight)).count,
+                                  pictures: try pictures(file: file, kind: row.kind),
                                   faces: try faceMatches(ofFile: file, path: row.path, filter: filter)))
         }
         return hits
@@ -496,8 +748,14 @@ public final class Searcher {
                              segment: segment.kind, segmentID: segment.id, loc: nil, locEnd: nil, excerpt: nil,
                              modified: row.modified, size: row.size, info: row.info,
                              photos: try photosHit(file: file, path: row.path, segment: segment.id, kind: segment.kind),
+                             pictures: try pictures(file: file, kind: row.kind),
                              faces: try faceMatches(ofFile: file, path: row.path, filter: filter))
         }
+    }
+
+    /// What the detector said of a picture's or a video's pictures; nil for any other file.
+    private func pictures(file: Int64, kind: FileKind) throws -> SensitivePictures? {
+        [.image, .screenshot, .video].contains(kind) ? try store.sensitivePictures(ofFile: file) : nil
     }
 
     /// A file's row, as a hit shows it.
@@ -581,43 +839,67 @@ public final class Searcher {
 
     // MARK: Moments
 
-    /// The files read as recordings, a frame every few seconds and a window of sound at a time: the ones with moments.
+    /// The files read as recordings, a frame every few seconds, a window of sound and a stretch of speech at a time: the
+    /// ones with moments.
     private static let recordings: Set<FileKind> = [.video, .audio]
 
-    /// Every moment of the recording at `path` that matches the query, best first: its frames (or Photos' stills of it)
-    /// and windows of sound that stand out on the query's scale as `search` puts it (`meaning`, at least `zGate`), with
-    /// neighbours of the same kind merged (`merged`). A search's hits count theirs the same way (`momentCount`). None
-    /// for a file that isn't a video or audio, or without a query vector: frames and sound windows carry no words, so
-    /// only meaning finds them.
-    public func moments(of path: String, queryVector: [Float]?, zGate: Double = 2.0) throws -> [Moment] {
-        guard let query = queryVector, query.count == Vectors.dimension else { return [] }
+    /// Every moment of the recording at `path` that matches the query (its words, `text`, and its vector), best first:
+    /// its frames (or Photos' stills of it), windows of sound and stretches of speech that stand out on the query's scale
+    /// as `search` puts it (`meaning`, at least `zGate`), and its stretches of speech that hold at least half of the
+    /// query's words, as a file qualifies by them (`saidWords`). Each is scored as `search` scores a file, and
+    /// neighbours of the same kind are merged (`merged`). A search's hits count theirs the same way (`momentCount`).
+    /// None for a file that isn't a video or audio; without a vector, only what's said can match.
+    public func moments(of path: String, text: String, queryVector: [Float]?, zGate: Double = 2.0) throws -> [Moment] {
         var file: (id: Int64, kind: FileKind?)?
         try store.db.query("SELECT id, kind FROM files WHERE path = ?", [.text(path)]) {
             file = ($0.int(0), FileKind(rawValue: $0.text(1) ?? ""))
         }
         guard let file, let kind = file.kind, Self.recordings.contains(kind) else { return [] }
-        if !vectorsLoaded { try reload() }
-        guard !rowFile.isEmpty else { return [] }
-        let meaning = Self.meaning(score(query), rowModality, setsScale: rowSetsScale)
-        let standouts = rowFile.indices.filter { rowFile[$0] == file.id && meaning[$0] >= zGate }
-            .map { (segment: rowSegment[$0], z: meaning[$0]) }
-        return try moments(ofFile: file.id, standouts)
+        var standouts: [(segment: Int64, z: Double)] = []
+        if let query = queryVector, query.count == Vectors.dimension {
+            if !vectorsLoaded { try reload() }
+            // The app's preview: nothing is left out of its sight.
+            let setsScale = try rowsSettingScale(seeing: SearchFilter())
+            let meaning = Self.meaning(score(query), rowModality, setsScale: setsScale)
+            standouts = rowFile.indices.filter { rowFile[$0] == file.id && meaning[$0] >= zGate }
+                .map { (segment: rowSegment[$0], z: meaning[$0]) }
+        }
+        let terms = Self.terms(text)
+        // The app's preview: nothing is left out of its sight.
+        let said = try saidWords(inFile: file.id, wordPatterns(terms, prefixLast: false, within: nil))
+        return try moments(ofFile: file.id, standouts, said: said,
+                           weights: Self.weights(lookup: Self.isLookup(terms), wordWeight: Self.wordWeight))
     }
 
-    /// A recording's moments, from its segments that stand out (with their scores) and where the index has them.
-    private func moments(ofFile file: Int64, _ standouts: [(segment: Int64, z: Double)]) throws -> [Moment] {
-        guard !standouts.isEmpty else { return [] }
-        let scores = Dictionary(uniqueKeysWithValues: standouts.map { ($0.segment, $0.z) })
-        let ids = scores.keys.map(String.init).joined(separator: ",")
-        var placed: [(segment: Int64, kind: Moment.Kind, start: Double?, end: Double?)] = []
-        try store.db.query("SELECT id, kind, loc, loc_end FROM segments WHERE id IN (\(ids))") { row in
-            let kind: Moment.Kind? = switch SegmentKind(rawValue: row.text(1) ?? "") {
-            case .frame: .seen
-            case .audio: .heard
-            default: nil
-            }
-            guard let kind else { return }
-            placed.append((row.int(0), kind, row.isNull(2) ? nil : row.double(2), row.isNull(3) ? nil : row.double(3)))
+    /// A recording's stretches of speech that hold at least half of the query's words (`patterns`), as a file
+    /// qualifies by them (`search`), with the share of them each holds.
+    private func saidWords(inFile file: Int64, _ patterns: [String]) throws -> [Int64: Double] {
+        var shares: [Int64: Double] = [:]
+        for pattern in patterns {
+            try store.db.query("""
+                SELECT s.id FROM fts JOIN segments s ON s.id = fts.rowid
+                WHERE fts MATCH ? AND s.file = ? AND s.kind = '\(SegmentKind.speech.rawValue)'
+                """, [.text(pattern), .int(file)]) { shares[$0.int(0), default: 0] += 1 / Double(patterns.count) }
+        }
+        return shares.filter { $0.value >= 0.5 }
+    }
+
+    /// A recording's moments, from its segments that stand out (with how far), its stretches of speech that hold the
+    /// query's words (with their share of them), and where the index has them. Each is scored as `search` scores a file,
+    /// its meaning and its words weighed by `weights`.
+    private func moments(ofFile file: Int64, _ standouts: [(segment: Int64, z: Double)], said: [Int64: Double],
+                         weights: (meaning: Double, words: Double)) throws -> [Moment] {
+        guard !standouts.isEmpty || !said.isEmpty else { return [] }
+        let z = Dictionary(uniqueKeysWithValues: standouts.map { ($0.segment, $0.z) })
+        let ids = Set(z.keys).union(said.keys).map(String.init).joined(separator: ",")
+        var placed: [(segment: Int64, kind: Moment.Kind, start: Double?, end: Double?, words: String?)] = []
+        try store.db.query("""
+            SELECT s.id, s.kind, s.loc, s.loc_end, coalesce(fts.original, fts.body) FROM segments s
+            LEFT JOIN fts ON fts.rowid = s.id WHERE s.id IN (\(ids))
+            """) { row in
+            guard let kind = SegmentKind(rawValue: row.text(1) ?? "").flatMap(Moment.Kind.init) else { return }
+            placed.append((row.int(0), kind, row.isNull(2) ? nil : row.double(2), row.isNull(3) ? nil : row.double(3),
+                           kind == .said ? row.text(4) : nil))
         }
         // A frame with no time is one of Photos' stills of a video in iCloud: the indexer writes them in the
         // filmstrip's order (`Indexer.stills`), so its place among the file's frames is its place in the filmstrip.
@@ -628,11 +910,13 @@ public final class Searcher {
         }
         return Self.merged(placed.map {
             MomentPiece(segment: $0.segment, kind: $0.kind, start: $0.start, end: $0.end,
-                        still: $0.start == nil ? filmstrip[$0.segment] : nil, score: scores[$0.segment] ?? 0)
+                        still: $0.start == nil ? filmstrip[$0.segment] : nil, words: $0.words,
+                        score: weights.meaning * max(z[$0.segment] ?? 0, 0)
+                            + weights.words * pow(said[$0.segment] ?? 0, 1.5))
         })
     }
 
-    /// A segment of a recording that stands out for a query, and where it is: what a moment is made of (`merged`).
+    /// A segment of a recording that matches a query, and where it is: what a moment is made of (`merged`).
     private struct MomentPiece {
         let segment: Int64
         let kind: Moment.Kind
@@ -641,25 +925,30 @@ public final class Searcher {
         let end: Double?
         /// A still's place in its filmstrip.
         let still: Int?
+        /// What's said in a stretch of speech.
+        let words: String?
         let score: Double
     }
 
-    /// Moments from pieces, best first. Timed pieces of one kind merge while each starts where the moment so far ends,
-    /// or sooner: a video's kept frame stands for the stretch until the next one (`VideoExtractor.keyframes`), so two
-    /// frames that match one after the other touch, and windows of sound overlap (30 s long, 25 s apart); a frame or
-    /// window between them that doesn't match leaves a gap, and two moments. A piece spans at least its own stretch:
-    /// to its end as the index has it, else a frame step or a sound window on from its start. A still is a moment of
-    /// its own: stills carry no time, so none is known to be next to another.
+    /// Moments from pieces, best first. Timed frames and windows of sound merge while each starts where the moment so
+    /// far of its kind ends, or sooner: a video's kept frame stands for the stretch until the next one
+    /// (`VideoExtractor.keyframes`), so two frames that match one after the other touch, and windows of sound overlap
+    /// (30 s long, 25 s apart); a frame or window between them that doesn't match leaves a gap, and two moments. A piece
+    /// spans at least its own stretch: to its end as the index has it, else a frame step or a sound window on from its
+    /// start. A stretch of speech is a moment of its own, with its words: stretches end where speech pauses or runs long
+    /// (`Speech.stretches(of:)`), so none overlaps the next. A still is one too: stills carry no time, so none is known
+    /// to be next to another.
     private static func merged(_ pieces: [MomentPiece]) -> [Moment] {
         let defaults = IndexOptions()
         func moment(_ best: MomentPiece, from start: Double?, to end: Double?) -> Moment {
             Moment(kind: best.kind, start: start, end: end, still: best.still, score: best.score,
-                   segmentID: best.segment)
+                   segmentID: best.segment, words: best.words)
         }
-        var moments: [Moment] = []
+        let (said, others) = (pieces.filter { $0.kind == .said }, pieces.filter { $0.kind != .said })
+        var moments = said.map { moment($0, from: $0.start, to: $0.end) }
         for kind in [Moment.Kind.seen, .heard] {
             let step = kind == .seen ? defaults.frameInterval : defaults.audioWindow
-            let timed = pieces.compactMap { piece in piece.start.map { (piece: piece, start: $0) } }
+            let timed = others.compactMap { piece in piece.start.map { (piece: piece, start: $0) } }
                 .filter { $0.piece.kind == kind }
                 .sorted { $0.start < $1.start }
             var open: (start: Double, end: Double, best: MomentPiece)?
@@ -674,7 +963,7 @@ public final class Searcher {
             }
             if let done = open { moments.append(moment(done.best, from: done.start, to: done.end)) }
         }
-        moments += pieces.filter { $0.start == nil }.map { moment($0, from: nil, to: nil) }
+        moments += others.filter { $0.start == nil }.map { moment($0, from: nil, to: nil) }
         return moments.sorted { first, second in
             first.score != second.score ? first.score > second.score
                 : (first.start ?? Double(first.still ?? 0)) < (second.start ?? Double(second.still ?? 0))
@@ -714,6 +1003,12 @@ public final class Searcher {
         !terms.isEmpty && terms.allSatisfy {
             $0.contains(where: \.isNumber) && ($0.contains(where: \.isLetter) || $0.count >= 4)
         }
+    }
+
+    /// How much a match's meaning and the query's words in it count (`search`, a recording's moments): a lookup
+    /// (`isLookup`, or a name from code) weighs words double and meaning half.
+    static func weights(lookup: Bool, wordWeight: Double) -> (meaning: Double, words: Double) {
+        lookup ? (0.5, wordWeight * 2) : (1, wordWeight)
     }
 
     /// How many of `hits` (best first) are strong: scoring at least `ratio` × the top hit. The rest pass the gates but
@@ -756,7 +1051,8 @@ public final class Searcher {
     /// The scale (the averages and the deviation) comes from the vectors in `setsScale` (all by default): `search` leaves
     /// out the later pages of long files, which are scored on it but don't move it. A book's hundreds of pages pulled the
     /// text average down for every query, and documents rose over screenshots everywhere (2026-10-09, the testbed's long
-    /// files finished: real eval 24 → 22 of 26 first; 24 with the scale kept).
+    /// files finished: real eval 24 → 22 of 26 first; 24 with the scale kept). What the caller may not see is left
+    /// out of it too (`rowsSettingScale`).
     static func meaning(_ scores: [Float], _ modality: [Modality], setsScale: [Bool]? = nil) -> [Double] {
         let means = modalityMeans(scores, modality, setsScale: setsScale)
         let centered = zip(scores, modality).map { Double($0) - means[$1, default: 0] }
@@ -772,6 +1068,18 @@ public final class Searcher {
         }
         let deviation = max((squares / max(count, 1)).squareRoot(), 0.02)
         return centered.map { ($0 - mean) / deviation }
+    }
+
+    /// The vectors that set a query's scale (`meaning`) for a caller who sees what `exclusions` keeps (an AI app's,
+    /// `SearchFilter.exclusions`): of those that set it at all (`rowSetsScale`), only its files'. A file left out of an
+    /// AI app's sight bears on nothing it searches (MCP-PLAN.md), and its vectors would move the averages and the
+    /// deviation, and so whether a file the app sees stands out (`zGate`). With nothing left out (DigUp's own window),
+    /// `rowSetsScale` as it is. Every meaning score of a search is put on the scale these give.
+    private func rowsSettingScale(seeing exclusions: SearchFilter) throws -> [Bool] {
+        guard let seen = exclusions.query else { return rowSetsScale }
+        var files = Set<Int64>()
+        try store.db.query(seen.sql, seen.values) { files.insert($0.int(0)) }
+        return rowSetsScale.indices.map { rowSetsScale[$0] && files.contains(rowFile[$0]) }
     }
 
     /// The average score of each modality for this query. Small groups (< 20 vectors) take the average of all.
@@ -793,8 +1101,8 @@ public final class Searcher {
         return out
     }
 
-    /// The text of a page, a document's passage or a screenshot's OCR, as it's written: the preview shows the part of a
-    /// document that matched.
+    /// The text of a page, a document's passage, a screenshot's OCR or a stretch of what's said, as it's written: the
+    /// preview shows the part of a document that matched, and all of what's said there.
     public func text(ofSegment id: Int64) throws -> String? {
         var text: String?
         try store.db.query("SELECT coalesce(original, body) FROM fts WHERE rowid = ?", [.int(id)]) { text = $0.text(0) }
@@ -825,7 +1133,7 @@ public final class Searcher {
     }
 
     /// FTS5 patterns for the query's words: quoted, and as prefixes for the last word while it's being typed and for
-    /// words of languages that attach endings (`SearchText.inflects`). `search` makes a word that's in no file a
+    /// words of languages that attach endings (`SearchText.inflects`). `wordPatterns` makes a word that's in no file a
     /// prefix too.
     static func patterns(_ terms: [String], prefixLast: Bool) -> [String] {
         terms.enumerated().map { index, term in
@@ -834,11 +1142,92 @@ public final class Searcher {
         }
     }
 
-    /// Whether keyword search finds `pattern` in any file.
-    private func isIndexed(_ pattern: String) throws -> Bool {
+    /// `patterns`, with a word that's in no file as typed matched as the start of longer words, as the last word is
+    /// while it's being typed: "grok" finds "Grok4" and "Grokipedia" (stemming only covers endings, as in "grokking").
+    /// Otherwise a file the panel showed while you typed dropped out once you stopped. A word that is in the index as
+    /// typed stays whole, so "cat" doesn't bring in "category"; so does a word of two letters, the start of too many
+    /// words to stand for one. Only the files `within` keeps count (an AI app's, `SearchFilter.exclusions`; nil, every
+    /// file): one left out having the word must not make it stay whole, nor show that it's there.
+    private func wordPatterns(_ terms: [String], prefixLast: Bool,
+                              within kept: (sql: String, values: [SQLValue])?) throws -> [String] {
+        var patterns = Self.patterns(terms, prefixLast: prefixLast)
+        for index in terms.indices where terms[index].count >= 3 && !patterns[index].hasSuffix("*") {
+            if try !isIndexed(patterns[index], within: kept) { patterns[index] += "*" }
+        }
+        return patterns
+    }
+
+    /// Whether keyword search finds `pattern` in any file, or in any of the files `within` keeps.
+    private func isIndexed(_ pattern: String, within kept: (sql: String, values: [SQLValue])?) throws -> Bool {
         var found = false
-        try store.db.query("SELECT 1 FROM fts WHERE fts MATCH ? LIMIT 1", [.text(pattern)]) { _ in found = true }
+        guard let kept else {
+            try store.db.query("SELECT 1 FROM fts WHERE fts MATCH ? LIMIT 1", [.text(pattern)]) { _ in found = true }
+            return found
+        }
+        try store.db.query("""
+            SELECT 1 FROM fts JOIN segments s ON s.id = fts.rowid WHERE fts MATCH ? AND s.file IN (\(kept.sql)) LIMIT 1
+            """, [.text(pattern)] + kept.values) { _ in found = true }
         return found
+    }
+
+    /// Keyword matches for a caller who doesn't see every file (an AI app's, `SearchFilter.exclusions`), none of them
+    /// decided by a file it may not see (MCP-PLAN.md): keyword search's own ranking (bm25) weighs a word by how many of
+    /// all the index's segments have it, so it isn't used, and no match is left out by a cap. Every segment of the
+    /// files `narrowing` keeps (and `allowed`) that holds one of `patterns` counts (`segmentsHolding`): each file at
+    /// its segment that holds the most of them (of those that hold as many, the first), in order of how much of the
+    /// query the file holds (`coverage`, as `search` has it), then of how much that segment does, then of id. Their
+    /// words are quoted later, for the files shown (`snippet`).
+    private func wordsInSight(_ patterns: [String], within narrowing: (sql: String, values: [SQLValue])?,
+                              allowed: (Int64) -> Bool)
+        throws -> (words: [(file: Int64, segment: Int64, snippet: String?)], coverage: [Int64: Double]) {
+        var coverage: [Int64: Double] = [:]
+        var held: [Int64: (file: Int64, patterns: Int)] = [:]   // by segment
+        for found in try segmentsHolding(patterns, within: narrowing) {
+            for file in Set(found.map(\.file)) where allowed(file) {
+                coverage[file, default: 0] += 1 / Double(patterns.count)
+            }
+            for (file, segment) in found where allowed(file) {
+                held[segment, default: (file, 0)].patterns += 1
+            }
+        }
+        var best: [Int64: (segment: Int64, patterns: Int)] = [:]   // by file
+        for (segment, match) in held {
+            if let current = best[match.file], current.patterns > match.patterns
+                || current.patterns == match.patterns && current.segment < segment { continue }
+            best[match.file] = (segment, match.patterns)
+        }
+        let ordered = best.sorted { first, second in
+            (coverage[first.key] ?? 0, first.value.patterns, second.key)
+                > (coverage[second.key] ?? 0, second.value.patterns, first.key)
+        }
+        return (ordered.map { (file: $0.key, segment: $0.value.segment, snippet: nil) }, coverage)
+    }
+
+    /// The segments of the files `kept` keeps (nil: every file) that hold each of `patterns`: every one of them, in no
+    /// order of keyword search's, so that nothing outside `kept` bears on which they are (`wordsInSight`).
+    private func segmentsHolding(_ patterns: [String], within kept: (sql: String, values: [SQLValue])?) throws
+        -> [[(file: Int64, segment: Int64)]] {
+        try patterns.map { pattern in
+            var found: [(file: Int64, segment: Int64)] = []
+            try store.db.query("""
+                SELECT s.file, s.id FROM fts JOIN segments s ON s.id = fts.rowid
+                WHERE fts MATCH ?\(kept.map { " AND s.file IN (\($0.sql))" } ?? "")
+                """, [.text(pattern)] + (kept?.values ?? [])) { found.append(($0.int(0), $0.int(1))) }
+            return found
+        }
+    }
+
+    /// A keyword match's words in its segment, quoted as `search` quotes them: marked, as they're written (FTS5's
+    /// snippet, which looks at the segment alone).
+    private func snippet(ofSegment segment: Int64, _ patterns: [String], terms: [String]) throws -> String? {
+        var snippet: String?
+        try store.db.query("""
+            SELECT snippet(fts, 1, '«', '»', '…', 12), original FROM fts WHERE fts MATCH ? AND rowid = ?
+            """, [.text(patterns.joined(separator: " OR ")), .int(segment)]) { row in
+            // Text that normalizing changed is quoted as it's written (with its hamza, harakat, joiners).
+            snippet = row.text(1).flatMap { SearchText.snippet($0, terms: terms) } ?? row.text(0)
+        }
+        return snippet
     }
 
     /// The query's words as an FTS5 OR-query.

@@ -94,6 +94,7 @@ final class AppController {
         Previews.shared.passage = { [engine] id, code in await engine.text(ofSegment: id, code: code) }
         Previews.shared.moments = { [engine] path, text in await engine.moments(of: path, matching: text) }
         CodeEditor.current = CodeEditor.chosen(model.settings.codeEditor)
+        SensitiveBlur.shared.position = model.settings.blurSensitive
         download.onReady = { [weak self] in self?.engine.modelArrived() }
         engine.start()
         let settings = model.settings
@@ -260,7 +261,17 @@ final class AppController {
         model.settings.aiAccess = access
         log("ai apps: access \(access.on ? "on" : "off"); Photos \(access.photos ? "on" : "off"), hidden items "
             + "\(access.hiddenPhotos ? "on" : "off"), code \(access.code ? "on" : "off"), pictures "
-            + (access.pictures ? "on" : "off"))
+            + "\(access.pictures ? "on" : "off"), pictures rated sensitive \(access.sensitive ? "on" : "off")")
+    }
+
+    /// "Blur sensitive pictures" (Settings → General): the results blur at the new position at once, a search with the
+    /// Sensitive filter on runs again at it, and AI apps' next call goes by it.
+    func setBlurSensitive(_ position: SensitivePosition) {
+        AppSettings.save(blurSensitive: position)
+        model.settings.blurSensitive = position
+        SensitiveBlur.shared.position = position
+        log("blur sensitive pictures: \(position.title)")
+        searchWindow.search.sensitivePositionChanged()
     }
 
     /// "Index only at set hours": on or off, and the hours (kept while it's off).

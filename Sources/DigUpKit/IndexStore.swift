@@ -75,13 +75,14 @@ public final class IndexStore {
         try migrateForkFacts()
     }
 
-    /// Opens an index only to read it (`digup mcp`): nothing is created, migrated or written. An index that isn't
-    /// there, or that the app hasn't brought up to this DigUp's schema yet (it does when it opens it), is refused, not
-    /// changed.
+    /// Opens an index only to read it (`digup mcp`), whether or not DigUp has it open: nothing in it is created,
+    /// migrated or written (`Database.reader(of:)`; SQLite's write-ahead log and shared memory beside it are made when
+    /// they aren't there). An index that isn't there, or that the app hasn't brought up to this DigUp's schema yet (it
+    /// does when it opens it), is refused, not changed.
     public init(readingOnly directory: URL, file name: String = IndexStore.mainFile) throws {
         self.directory = directory
         file = directory.appendingPathComponent(name)
-        db = try Database(readingOnly: file.path)
+        db = try Database.reader(of: file.path)
         var version: Int64 = 0
         try db.query("PRAGMA user_version") { version = $0.int(0) }
         guard version == Self.schemaVersion, try forkFactsStepped() >= Self.forkFactsVersion else {
@@ -226,14 +227,16 @@ public final class IndexStore {
     // MARK: The fork's tables
 
     /// The fork's own tables, for what Photos says about a library's files and where files were taken
-    /// (`createForkFacts`) and for the faces in pictures (`createFaces`), are versioned apart from upstream's schema:
-    /// `meta` "fork_photos_facts" says how many of the fork's steps an index has had, each run once and in order, and
+    /// (`createForkFacts`), how revealing its pictures are (`createSensitiveScores`), how big and how long its
+    /// pictures, videos and recordings are (`createMediaDimensions`) and the faces in pictures (`createFaces`), are
+    /// versioned apart from upstream's schema: `meta` "fork_photos_facts" says how many of the fork's steps an index
+    /// has had, each run once and in order, and
     /// `PRAGMA user_version` stays upstream's.
     /// Upstream owns those numbers: a fork's 6 would claim upstream's migration 6 had run when it hadn't. An upstream
     /// DigUp still opens the index; it doesn't read Photos libraries, so it removes their files, and the foreign keys
     /// take their facts with them. An index a later fork stepped further (a column added) is left as it is.
     static let forkFactsKey = "fork_photos_facts"
-    static let forkFactsVersion = 3
+    static let forkFactsVersion = 5
 
     /// An index already at upstream's current schema that hasn't had the fork's steps (made by upstream's DigUp, or by
     /// the fork before these tables): `migrate` gives an older one theirs, before upstream's own steps.
@@ -253,7 +256,9 @@ public final class IndexStore {
         guard from < Self.forkFactsVersion else { return }
         if from < 1 { try createForkFacts() }
         if from < 2 { try recreatePhotosAssets() }
-        if from < 3 { try createFaces() }
+        if from < 3 { try createSensitiveScores() }
+        if from < 4 { try createMediaDimensions() }
+        if from < 5 { try createFaces() }
         try setMeta(Self.forkFactsKey, "\(Self.forkFactsVersion)")
     }
 
@@ -332,8 +337,49 @@ public final class IndexStore {
             """)
     }
 
-    /// Fork step 3 (approved 2026-10-22, "faces outside Photos"): the faces in pictures, to find the people named in
-    /// Photos in pictures outside it (`Faces`).
+    /// Fork step 3 (approved 2026-10-22: "yes to sensitive_scores"): what the sensitive-picture detector said about
+    /// each picture (`SensitiveLevels`), one row per segment that is a picture, `image` or `frame` (not a PDF page drawn
+    /// as a picture, `page_image`, for now). A segment without a row hasn't been rated: not yet, or its file is only in
+    /// iCloud. Per segment, not per file, because a video is many pictures; a file's answer is a query over its
+    /// segments. The indexer writes a picture's row when it reads the picture; reading a file again replaces its
+    /// segments, and the foreign key takes their rows with them. An index made before this gets its rows once, from
+    /// the rating pass (`Indexer.ratePictures`). Which model said so is `meta` "fork_sensitive_model"
+    /// (`adoptSensitiveModel`): rows of two models are never kept together.
+    private func createSensitiveScores() throws {
+        try db.execute("""
+            CREATE TABLE IF NOT EXISTS sensitive_scores(
+                segment INTEGER PRIMARY KEY REFERENCES segments(id) ON DELETE CASCADE,
+                low REAL NOT NULL CHECK (low BETWEEN 0 AND 1),         -- the model's probability of each level;
+                medium REAL NOT NULL CHECK (medium BETWEEN 0 AND 1),   -- neutral is what's left (1 - low - medium - high)
+                high REAL NOT NULL CHECK (high BETWEEN 0 AND 1),
+                CHECK (low + medium + high <= 1.0001)
+            );
+            """)
+    }
+
+    /// Fork step 4 (approved 2026-10-22: "yes, approved, buckets and exact ratios"): a picture's, video's or
+    /// recording's size as it's shown and its length (`MediaDimensions`), one row per file whose size or length is
+    /// known, for the Length and Shape filters. `source` is 'photos' exactly when the file is in a Photos library:
+    /// Photos' upright size and its length, of the version it shows, whether or not the original is on this Mac,
+    /// which the sync writes from the listing. The indexer writes the others ('file') when it reads a file (a picture
+    /// turned by its orientation, a video's size through its transform), and reading it again drops them first, as it
+    /// does its segments. An index made before this gets them once, from their metadata alone (`measureOnce`).
+    private func createMediaDimensions() throws {
+        try db.execute("""
+            CREATE TABLE IF NOT EXISTS media_dimensions(
+                file INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                width INTEGER CHECK (width > 0),         -- pixels as shown (after rotation); NULL for a sound recording
+                height INTEGER CHECK (height > 0),
+                duration REAL CHECK (duration >= 0),     -- seconds, for a video or recording; NULL for a still picture
+                source TEXT NOT NULL CHECK (source IN ('photos', 'file')),
+                CHECK ((width IS NULL) = (height IS NULL)),
+                CHECK (width IS NOT NULL OR duration IS NOT NULL)
+            );
+            """)
+    }
+
+    /// Fork step 5 (approved 2026-10-22, "faces outside Photos", and its corrections): the faces in pictures, to find
+    /// the people named in Photos in pictures outside it (`Faces`).
     /// - `faces`: one row a face DigUp keeps, in the picture segment it's in (an `image` segment, for now): in a Photos
     ///   library the faces Photos named, with their person (`photos_people`), and outside every face found, with none.
     ///   The box is in the picture as it's shown, in fractions from its top-left corner; `print` is the recognizer's
@@ -429,18 +475,18 @@ public final class IndexStore {
     }
 
     /// One part of a file's words as indexing read them: a page, a passage, the text in a picture, what Photos knows
-    /// about it, a stretch of code.
+    /// about it, a stretch of code, a stretch of what's said in a recording.
     public struct Words: Sendable, Equatable {
         public let segment: SegmentKind
-        /// The page, the passage's number, or a stretch of code's first line (or cell); nil for a picture's text and
-        /// Photos' words.
+        /// The page, the passage's number, a stretch of code's first line (or cell), or the second a stretch of what's
+        /// said starts; nil for a picture's text and Photos' words.
         public let loc: Double?
         public let locEnd: Double?
         public let text: String
     }
 
     /// The segments that hold a file's words, as an SQL list.
-    private static let wordSegments = [SegmentKind.page, .pageImage, .chunk, .ocr, .photosInfo, .lines, .cells]
+    private static let wordSegments = [SegmentKind.page, .pageImage, .chunk, .ocr, .photosInfo, .lines, .cells, .speech]
         .map { "'\($0.rawValue)'" }.joined(separator: ",")
 
     /// The words read from the file at `path`, in order, when the filter keeps it (`digup mcp`'s `read_text`); nil for
@@ -542,6 +588,7 @@ public final class IndexStore {
             try db.run("DELETE FROM fts WHERE rowid IN (SELECT id FROM segments WHERE kind NOT IN \(Self.crawlKinds))")
             try db.run("DELETE FROM segments WHERE kind NOT IN \(Self.crawlKinds)")
             try db.run("DELETE FROM locations WHERE NOT \(Self.crawlLocation)")
+            try db.run("DELETE FROM media_dimensions WHERE NOT \(Self.crawlDimensions)")
             try db.run("UPDATE files SET state = 'pending', detail = NULL, info = NULL, indexed_at = NULL")
             try setMeta("fingerprint", nil)
         }
@@ -617,11 +664,14 @@ public final class IndexStore {
     /// Files read once more because DigUp reads them better now, each kind once per index (the schema stays as it was,
     /// so an older DigUp still opens the index): PDFs with pages read as pictures, whose words come from OCR now
     /// (`meta` "scans_ocr"), pictures that couldn't be read at all, like SVGs, which AppKit draws now
-    /// ("pictures_drawn"), and GIFs read before an animated one's later frames were read too (`animationFrames`), each
+    /// ("pictures_drawn"), GIFs read before an animated one's later frames were read too (`animationFrames`), each
     /// read again unless it has frames already ("gifs_framed"; a GIF that isn't animated is read again once as well, as
-    /// telling them apart would mean reading every one). Only where this machine does each. Returns how many files.
+    /// telling them apart would mean reading every one), and, once `readsSpeech` (parakeet-mlx is here), the recordings
+    /// read before what's said in them was (`recordingsWithoutSpeech`, `speechReadKey`). Only where this machine does
+    /// each. With `readsSpeech`, also the recordings the reader of speech failed on, now and then (`speechRetry`).
+    /// Returns how many files.
     @discardableResult
-    public func readAgainOnce() throws -> Int {
+    public func readAgainOnce(readsSpeech: Bool) throws -> Int {
         var files = Set<Int64>(), flags: [String] = []
         if OCR.isAvailable, try meta("scans_ocr") == nil {
             try db.query("SELECT DISTINCT file FROM segments WHERE kind = 'page_image'") { files.insert($0.int(0)) }
@@ -639,61 +689,166 @@ public final class IndexStore {
                 """) { files.insert($0.int(0)) }
             flags.append("gifs_framed")
         }
-        guard !flags.isEmpty else { return 0 }
+        if readsSpeech, try meta(Self.speechReadKey) == nil {
+            files.formUnion(try recordingsWithoutSpeech().map(\.id))
+            flags.append(Self.speechReadKey)
+        }
+        let retry = readsSpeech ? try speechRetry(now: Date().timeIntervalSince1970) : nil
+        files.formUnion(retry?.files ?? [])
+        guard !flags.isEmpty || retry?.changed == true else { return 0 }
         try db.transaction {
             for file in files { try requeue(file) }
             for flag in flags { try setMeta(flag, "1") }
+            if let retry, retry.changed { try setMeta(Self.speechRetryKey, retry.state) }
         }
         return files.count
+    }
+
+    /// `meta` "fork_speech_read": the recordings read before what's said in them was have been queued to be read again,
+    /// once (`readAgainOnce`). The fork's, as its tables are (`forkFactsKey`).
+    static let speechReadKey = "fork_speech_read"
+
+    /// A recording's info (`Indexer`): how many stretches of speech were read in it ("0": nothing is said), or why what's
+    /// said in it couldn't be read, the recording's own failure (`speechProblemInfo`: ffmpeg can't decode it, settled
+    /// until it changes) or the reader's (`readerProblemInfo`: parakeet-mlx failing, its model not downloaded, its time
+    /// limit; read again later, `speechRetry`). A recording read with no reader of speech has none of them.
+    static let speechInfo = "speech"
+    static let speechProblemInfo = "speech_problem"
+    static let readerProblemInfo = "speech_reader_problem"
+
+    /// `meta` "fork_speech_retry": while some recordings wait to be read again because the reader failed on them, when
+    /// the wait began (seconds since 1970) and how many times they've been read again since, "<since> <tries>"
+    /// (`speechRetry`).
+    static let speechRetryKey = "fork_speech_retry"
+    /// The first wait before reading them again, in seconds; each wait after is twice the one before, up to the longest.
+    static let firstSpeechRetry = 3600.0
+    static let longestSpeechRetry = 86_400.0
+
+    /// The recordings the reader of speech failed on (`readerProblemInfo`) to read again now, and `meta`
+    /// "fork_speech_retry" as it is after (`changed`: not as it was). They wait `firstSpeechRetry`, then twice as long
+    /// each time they fail again, up to `longestSpeechRetry`: a reader that's back (the network, a reinstall) reads them
+    /// within the hour, and one that's broken for good reads them again once a day, not at every start of a helper.
+    /// With none waiting, the waits start over.
+    func speechRetry(now: Double) throws -> (files: [Int64], state: String?, changed: Bool) {
+        var failed: [Int64] = []
+        try db.query("""
+            SELECT id FROM files WHERE \(Self.recordingsRead)
+            AND json_extract(info, '$.\(Self.readerProblemInfo)') IS NOT NULL
+            """) { failed.append($0.int(0)) }
+        let stored = try meta(Self.speechRetryKey)
+        guard !failed.isEmpty else { return ([], nil, stored != nil) }
+        let wait = (stored ?? "").split(separator: " ").compactMap { Double($0) }
+        guard wait.count == 2 else { return ([], "\(Int(now)) 0", true) }   // the first seen: the wait begins
+        let (since, tries) = (wait[0], wait[1])
+        guard now - since >= min(Self.firstSpeechRetry * pow(2, tries), Self.longestSpeechRetry) else {
+            return ([], stored, false)
+        }
+        return (failed, "\(Int(now)) \(Int(tries) + 1)", true)
+    }
+
+    /// A recording on this Mac read before what's said in it was (`Speech`), and how long it is.
+    public struct UnheardRecording: Sendable {
+        public let id: Int64
+        public let kind: FileKind
+        public let seconds: Double
+    }
+
+    /// The recordings that have been read, as SQL: audio and video files indexed, or left out when nothing in them was
+    /// seen or heard (shorter than 2 s, or silent), which can still have something said in them.
+    static let recordingsRead = "kind IN (\(sqlList([FileKind.audio, .video]))) AND state IN ('done', 'skipped')"
+
+    /// The recordings on this Mac read without their speech: audio and video files read (or left out, `recordingsRead`)
+    /// while there was no reader of speech (their info has none of `speechInfo`, `speechProblemInfo` and
+    /// `readerProblemInfo`). Not a video in iCloud, read from Photos' stills or its poster: its sound isn't here.
+    public func recordingsWithoutSpeech() throws -> [UnheardRecording] {
+        let standIns = PhotosLibrary.Reading.allCases.filter(\.isStandIn).map { "'\($0.rawValue)'" }.joined(separator: ",")
+        var recordings: [UnheardRecording] = []
+        try db.query("""
+            SELECT id, kind, CAST(json_extract(info, '$.duration') AS REAL) FROM files
+            WHERE \(Self.recordingsRead)
+            AND json_extract(info, '$.\(Self.speechInfo)') IS NULL
+            AND json_extract(info, '$.\(Self.speechProblemInfo)') IS NULL
+            AND json_extract(info, '$.\(Self.readerProblemInfo)') IS NULL
+            AND id NOT IN (SELECT file FROM photos_assets WHERE reading IN (\(standIns)))
+            """) { row in
+            guard let kind = FileKind(rawValue: row.text(1) ?? "") else { return }
+            recordings.append(UnheardRecording(id: row.int(0), kind: kind, seconds: row.isNull(2) ? 0 : row.double(2)))
+        }
+        return recordings
     }
 
     /// `meta` "locations_read": "1" once every picture and video read before DigUp kept locations has had its look
     /// (`locateOnce`), else the ids of the ones still waiting for it, as a JSON array.
     static let locationsReadKey = "locations_read"
-    static let locationsAllRead = "1"
+    /// `meta` "fork_dimensions_read": as "locations_read", for the pictures, videos and recordings read before DigUp
+    /// kept their sizes and lengths (`measureOnce`). The fork's, as its tables are (`forkFactsKey`).
+    static let dimensionsReadKey = "fork_dimensions_read"
+    /// What those keys say once no file waits.
+    static let allReadOnce = "1"
 
     /// Pictures and videos read before DigUp kept where they were taken get it once per index, from their metadata
-    /// alone: a picture's GPS tags, a video's location, milliseconds a file, and nothing read for the model again. Not
-    /// a Photos library's files, whose location is Photos' (the sync's). A file that's away now (gone, on a drive
-    /// that's unplugged, or in the cloud, where reading it would download it) waits for a later call
-    /// (`locationsReadKey`), which looks at the waiting files alone; one whose row went, or that was read again since
-    /// (which reads its location), stops waiting. Only where this machine reads locations. Returns how many files got
-    /// one.
+    /// alone (`readOnce`): a picture's GPS tags, a video's location. Not a Photos library's files, whose location is
+    /// Photos' (the sync's). Only where this machine reads locations. Returns how many files got one.
     @discardableResult
     public func locateOnce() throws -> Int {
         var kinds: [FileKind] = []
         if ImageExtractor.readsLocations { kinds += [.image, .screenshot] }
         if VideoExtractor.readsLocations { kinds.append(.video) }
         guard !kinds.isEmpty else { return 0 }
-        let waiting = try meta(Self.locationsReadKey)   // nil: the first look, at every file
-        guard waiting != Self.locationsAllRead else { return 0 }
+        return try readOnce(Self.locationsReadKey, files: """
+            state = 'done' AND kind IN (\(Self.sqlList(kinds))) AND id NOT IN (SELECT file FROM locations)
+            """, read: { url, kind in
+                kind == .video ? VideoExtractor.location(of: url) : ImageExtractor.location(of: url)
+            }, write: setLocation)
+    }
+
+    /// Pictures, videos and recordings read before DigUp kept their size as shown and their length get them once per
+    /// index, from their metadata alone (`readOnce`, `MediaDimensions.read`): a picture's size and orientation, a
+    /// video's size, transform and duration, a recording's duration. A recording left out because nothing in it was
+    /// seen or heard has a length too. Not a Photos library's files, whose size and length are Photos' (the sync's).
+    /// Returns how many files got them.
+    @discardableResult
+    public func measureOnce() throws -> Int {
+        try readOnce(Self.dimensionsReadKey, files: """
+            (kind IN (\(Self.sqlList([FileKind.image, .screenshot]))) AND state = 'done' OR \(Self.recordingsRead))
+            AND id NOT IN (SELECT file FROM media_dimensions)
+            """, read: MediaDimensions.read, write: setDimensions)
+    }
+
+    /// A pass over the files read before DigUp kept something it reads from their metadata alone, milliseconds a
+    /// file, with nothing read for the model again (`locateOnce`, `measureOnce`): the files `condition` picks (an SQL
+    /// condition on `files`), but a Photos library's, get what `read` finds in them (nil: nothing to keep), written by
+    /// `write`. A file that's away now (gone, on a drive that's unplugged, or in the cloud, where reading it would
+    /// download it) waits for a later call, its id in `meta` `key`, and that call looks at the waiting files alone;
+    /// one whose row went, or that was read again since (which reads it), stops waiting. Once none waits, `key` says
+    /// `allReadOnce`. Every file is looked at before anything is written: the index isn't held while they're read.
+    /// Returns how many files got something.
+    private func readOnce<Fact>(_ key: String, files condition: String, read: (URL, FileKind) -> Fact?,
+                                write: (Fact, Int64) throws -> Void) throws -> Int {
+        let waiting = try meta(key)   // nil: the first look, at every file
+        guard waiting != Self.allReadOnce else { return 0 }
         let onlyWaiting = waiting == nil ? "" : " AND id IN (SELECT value FROM json_each(?))"
         var files: [(id: Int64, path: String, kind: FileKind)] = []
-        try db.query("""
-            SELECT id, path, kind FROM files WHERE state = 'done' AND kind IN (\(Self.sqlList(kinds)))
-            AND id NOT IN (SELECT file FROM locations)\(onlyWaiting)
-            """, waiting.map { [.text($0)] } ?? []) { row in
+        try db.query("SELECT id, path, kind FROM files WHERE \(condition)\(onlyWaiting)",
+                     waiting.map { [.text($0)] } ?? []) { row in
             let path = row.text(1) ?? ""
             guard PhotosLibrary.library(containing: path) == nil, let kind = FileKind(rawValue: row.text(2) ?? "")
             else { return }
             files.append((row.int(0), path, kind))
         }
-        // Every file looked at before anything is written: the index isn't held while they're read.
-        var found: [(file: Int64, location: Location)] = [], away: [Int64] = []
+        var found: [(file: Int64, fact: Fact)] = [], away: [Int64] = []
         for file in files {
             guard let info = FileSystem.info(of: file.path), info.isRegular, !info.dataless else {
                 away.append(file.id)
                 continue
             }
-            let url = URL(fileURLWithPath: file.path)
-            let location = autoreleasepool {
-                file.kind == .video ? VideoExtractor.location(of: url) : ImageExtractor.location(of: url)
+            if let fact = autoreleasepool(invoking: { read(URL(fileURLWithPath: file.path), file.kind) }) {
+                found.append((file.id, fact))
             }
-            if let location { found.append((file.id, location)) }
         }
         try db.transaction {
-            for (file, location) in found { try setLocation(location, of: file) }
-            try setMeta(Self.locationsReadKey, away.isEmpty ? Self.locationsAllRead
+            for (file, fact) in found { try write(fact, file) }
+            try setMeta(key, away.isEmpty ? Self.allReadOnce
                         : String(decoding: try JSONEncoder().encode(away), as: UTF8.self))
         }
         return found.count
@@ -758,6 +913,8 @@ public final class IndexStore {
     /// The locations the crawl writes: Photos', from the listing. The others come from reading the file, and go when
     /// it's read again, as its segments do.
     static let crawlLocation = "source = '\(Location.Source.photos.rawValue)'"
+    /// The sizes and lengths the crawl writes: Photos', from the listing; the others go as a file's location does.
+    static let crawlDimensions = "source = '\(MediaDimensions.Source.photos.rawValue)'"
 
     private func deleteSegments(of file: Int64, keepingCrawled: Bool) throws {
         let filter = keepingCrawled ? "AND kind NOT IN \(Self.crawlKinds)" : ""
@@ -765,6 +922,8 @@ public final class IndexStore {
         try db.run("DELETE FROM segments WHERE file = ? \(filter)", [.int(file)])
         let located = keepingCrawled ? "AND NOT \(Self.crawlLocation)" : ""
         try db.run("DELETE FROM locations WHERE file = ? \(located)", [.int(file)])
+        let measured = keepingCrawled ? "AND NOT \(Self.crawlDimensions)" : ""
+        try db.run("DELETE FROM media_dimensions WHERE file = ? \(measured)", [.int(file)])
     }
 
     /// "Screenshot 2026-10-01 at 9.41.07 PM.png" → searchable words. A Photos library's file is named for its asset's
@@ -788,10 +947,11 @@ public final class IndexStore {
 
     /// What Photos says about a file from a Photos library: its words, title and date (its `photosInfo` segment),
     /// whether it's a favorite, what DigUp read of it, how it came into the library and the device that took it
-    /// (`photos_assets`), where it was taken (its `photos` location), and who is in it and the albums it's in, as their
-    /// rows of the file's library (`photos_people`, `photos_albums`). Rows, not Photos' uuids: a library renamed or
-    /// moved is a new library to the index (its people and albums are spelled with its path), so its files are linked
-    /// to its own rows again, and the old library's go.
+    /// (`photos_assets`), where it was taken (its `photos` location), its size as shown and a video's length (its
+    /// `photos` dimensions), and who is in it and the albums it's in, as their rows of the file's library
+    /// (`photos_people`, `photos_albums`). Rows, not Photos' uuids: a library renamed or moved is a new library to the
+    /// index (its people and albums are spelled with its path), so its files are linked to its own rows again, and the
+    /// old library's go.
     public struct PhotosFacts: Equatable, Sendable {
         public var title: String
         public var date: Double
@@ -802,6 +962,7 @@ public final class IndexStore {
         public var originApp: String?
         public var camera: String?
         public var location: Location?
+        public var dimensions: MediaDimensions?
         public var people: Set<Int64>
         public var albums: Set<Int64>
 
@@ -811,17 +972,17 @@ public final class IndexStore {
             (title, date, text) = (asset.title, asset.date, asset.text)
             (favorite, reading, origin, originApp, camera) = (asset.favorite, asset.reading, asset.origin,
                                                               asset.originApp, asset.camera)
-            location = asset.location
+            (location, dimensions) = (asset.location, asset.dimensions)
             self.people = Set(asset.people.compactMap { people[$0] })
             self.albums = Set(asset.albums.compactMap { albums[$0] })
         }
 
         init(title: String, date: Double, text: String, favorite: Bool, reading: PhotosLibrary.Reading,
              origin: PhotosLibrary.Origin, originApp: String?, camera: String?, location: Location? = nil,
-             people: Set<Int64> = [], albums: Set<Int64> = []) {
+             dimensions: MediaDimensions? = nil, people: Set<Int64> = [], albums: Set<Int64> = []) {
             (self.title, self.date, self.text, self.favorite) = (title, date, text, favorite)
             (self.reading, self.origin, self.originApp, self.camera) = (reading, origin, originApp, camera)
-            (self.location, self.people, self.albums) = (location, people, albums)
+            (self.location, self.dimensions, self.people, self.albums) = (location, dimensions, people, albums)
         }
 
         /// What its `photos_assets` row holds.
@@ -851,6 +1012,9 @@ public final class IndexStore {
         try db.query("SELECT file, latitude, longitude, source, place FROM locations WHERE \(Self.crawlLocation)") {
             facts[$0.int(0)]?.location = Self.location($0, from: 1)
         }
+        try db.query("SELECT file, width, height, duration FROM media_dimensions WHERE \(Self.crawlDimensions)") {
+            facts[$0.int(0)]?.dimensions = Self.dimensions($0, from: 1, source: .photos)
+        }
         try db.query("SELECT file, person FROM photos_person_files") { facts[$0.int(0)]?.people.insert($0.int(1)) }
         try db.query("SELECT file, album FROM photos_album_files") { facts[$0.int(0)]?.albums.insert($0.int(1)) }
         return facts
@@ -858,7 +1022,7 @@ public final class IndexStore {
 
     /// Writes what differs between a library file's facts and the ones `stored` (nil: none written yet): keyword
     /// search finds Photos' words in it, a result shows its title and date, and the filters see its favorite, origin,
-    /// camera, place, people and albums. Nothing is embedded.
+    /// camera, place, size, length, people and albums. Nothing is embedded.
     func setPhotosFacts(_ facts: PhotosFacts, replacing stored: PhotosFacts?, of file: Int64) throws {
         if stored.map({ ($0.title, $0.date, $0.text) != (facts.title, facts.date, facts.text) }) ?? true {
             let kind = SegmentKind.photosInfo.rawValue
@@ -881,6 +1045,13 @@ public final class IndexStore {
                 try setLocation(location, of: file)
             } else {
                 try db.run("DELETE FROM locations WHERE file = ?", [.int(file)])
+            }
+        }
+        if stored?.dimensions != facts.dimensions {
+            if let dimensions = facts.dimensions {
+                try setDimensions(dimensions, of: file)
+            } else {
+                try db.run("DELETE FROM media_dimensions WHERE file = ?", [.int(file)])
             }
         }
         if stored?.people != facts.people {
@@ -1116,6 +1287,130 @@ public final class IndexStore {
         }
         return readings
     }
+
+    // MARK: Sensitive pictures
+
+    /// `meta` "fork_sensitive_model": the detector whose ratings `sensitive_scores` holds (`SensitiveModel.identity`).
+    public static let sensitiveModelKey = "fork_sensitive_model"
+    /// The segments that are pictures, which get a rating, as an SQL list.
+    static let pictureSegments = "('\(SegmentKind.image.rawValue)', '\(SegmentKind.frame.rawValue)')"
+    /// The kinds of files that are pictures or have them.
+    static let pictureKinds = "(\(sqlList([FileKind.image, .screenshot, .video])))"
+    /// The states of a file that was read (its segments are written).
+    static let readStates = "('done', 'partial')"
+
+    /// Makes `model` the one the ratings are from: another one's (or ratings no model is recorded for) are all
+    /// deleted first, and the rating pass rates every picture again (`Indexer.ratePictures`). Returns how many went.
+    @discardableResult
+    public func adoptSensitiveModel(_ model: String) throws -> Int {
+        guard try meta(Self.sensitiveModelKey) != model else { return 0 }
+        return try db.transaction {
+            var deleted = 0
+            try db.query("SELECT COUNT(*) FROM sensitive_scores") { deleted = Int($0.int(0)) }
+            try db.run("DELETE FROM sensitive_scores")
+            try setMeta(Self.sensitiveModelKey, model)
+            return deleted
+        }
+    }
+
+    /// Sets what `model` said of a picture segment, in place of what it had, while `model` is the one the ratings are
+    /// from: an indexer still at work after another model took them over (`adoptSensitiveModel`) writes nothing, so
+    /// two models' ratings are never kept together. The check and the write are one statement.
+    func setSensitive(_ levels: SensitiveLevels, ofSegment segment: Int64, model: String) throws {
+        try db.run("""
+            INSERT OR REPLACE INTO sensitive_scores(segment, low, medium, high)
+            SELECT ?, ?, ?, ? WHERE (SELECT value FROM meta WHERE key = ?) = ?
+            """, [.int(segment), .double(levels.low), .double(levels.medium), .double(levels.high),
+                  .text(Self.sensitiveModelKey), .text(model)])
+    }
+
+    /// A picture segment without a rating, of a file that was read: what the rating pass reads again.
+    struct UnratedPicture {
+        let segment: Int64
+        let kind: SegmentKind
+        /// When it's shown, in seconds: a frame of a video or a GIF.
+        let loc: Double?
+        /// Its place among its file's segments of its kind, from 0: a stills video's frames are its filmstrip's stills
+        /// in order (`Indexer.stills`), a GIF's are its frames as `ImageExtractor.animationFrames` reads them.
+        let place: Int
+    }
+
+    /// The picture segments without a rating, by file, in indexing order, of the files that were read. (The segments'
+    /// columns are named apart from the files' own.)
+    func unratedPictures() throws -> [(file: FileRecord, pictures: [UnratedPicture])] {
+        var found: [(file: FileRecord, pictures: [UnratedPicture])] = []
+        try db.query("""
+            SELECT \(Self.fileColumns), p.segment, p.segment_kind, p.at, p.place
+            FROM (SELECT id AS segment, file, kind AS segment_kind, loc AS at,
+                         ROW_NUMBER() OVER (PARTITION BY file, kind ORDER BY id) - 1 AS place
+                  FROM segments WHERE kind IN \(Self.pictureSegments)) p
+            JOIN files ON files.id = p.file
+            WHERE state IN \(Self.readStates) AND p.segment NOT IN (SELECT segment FROM sensitive_scores)
+            ORDER BY \(FileKind.indexingOrderSQL), mtime DESC, files.id, p.segment
+            """) { row in
+            let file = Self.record(row)
+            guard let kind = SegmentKind(rawValue: row.text(9) ?? "") else { return }
+            let picture = UnratedPicture(segment: row.int(8), kind: kind, loc: row.isNull(10) ? nil : row.double(10),
+                                         place: Int(row.int(11)))
+            if found.last?.file.id == file.id {
+                found[found.count - 1].pictures.append(picture)
+            } else {
+                found.append((file, [picture]))
+            }
+        }
+        return found
+    }
+
+    /// How many of the pictures read have a rating, and how many wait for one (`Indexer.ratePictures`).
+    public func sensitiveCounts() throws -> (rated: Int, waiting: Int) {
+        var counts = (rated: 0, waiting: 0)
+        try db.query("""
+            SELECT COUNT(r.segment), COUNT(*) - COUNT(r.segment) FROM segments s JOIN files f ON f.id = s.file
+            LEFT JOIN sensitive_scores r ON r.segment = s.id
+            WHERE s.kind IN \(Self.pictureSegments) AND f.state IN \(Self.readStates)
+            """) { counts = (Int($0.int(0)), Int($0.int(1))) }
+        return counts
+    }
+
+    /// What the detector said of each picture of the file `file`, as it was read last.
+    func sensitivePictures(ofFile file: Int64) throws -> SensitivePictures {
+        var (path, read) = ("", 0.0)
+        try db.query("SELECT path, coalesce(indexed_at, 0) FROM files WHERE id = ?", [.int(file)]) {
+            (path, read) = ($0.text(0) ?? "", $0.double(1))
+        }
+        var pictures = SensitivePictures(path: path, read: read)
+        try db.query("""
+            SELECT s.id, s.kind, s.loc, r.segment IS NOT NULL, r.low, r.medium, r.high FROM segments s
+            LEFT JOIN sensitive_scores r ON r.segment = s.id
+            WHERE s.file = ? AND s.kind IN \(Self.pictureSegments) ORDER BY s.id
+            """, [.int(file)]) { row in
+            let picture = SensitivePictures.Picture(
+                segment: row.int(0), loc: row.isNull(2) ? nil : row.double(2),
+                levels: row.int(3) == 0 ? nil : SensitiveLevels(low: row.double(4), medium: row.double(5),
+                                                                 high: row.double(6)))
+            if row.text(1) == SegmentKind.image.rawValue { pictures.image = picture } else { pictures.frames.append(picture) }
+        }
+        return pictures
+    }
+
+    /// How many of the files a filter keeps are pictures or videos waiting for a rating: not read yet, or read with a
+    /// picture the rating pass hasn't got to. `digup mcp` keeps them from AI apps until they're rated
+    /// (`SearchFilter.leavingOutSensitive`), and says how many there are.
+    public func unratedFiles(keptBy filter: SearchFilter) throws -> Int {
+        let kept = filter.query
+        var count = 0
+        try db.query("""
+            SELECT COUNT(*) FROM files f WHERE f.kind IN \(Self.pictureKinds)
+            AND (f.state = 'pending' OR (f.state IN \(Self.readStates) AND \(Self.hasUnratedPicture)))
+            """ + (kept.map { " AND f.id IN (\($0.sql))" } ?? ""), kept?.values ?? []) { count = Int($0.int(0)) }
+        return count
+    }
+
+    /// The file `f` has a picture segment without a rating, as SQL.
+    static let hasUnratedPicture = """
+        EXISTS (SELECT 1 FROM segments s WHERE s.file = f.id AND s.kind IN \(pictureSegments)
+                AND s.id NOT IN (SELECT segment FROM sensitive_scores))
+        """
 
     // MARK: Faces
 
@@ -1502,7 +1797,6 @@ public final class IndexStore {
             """) { (counts.matchedPictures, counts.confirmed) = (Int($0.int(0)), Int($0.int(1))) }
         return counts
     }
-
     // MARK: Locations
 
     /// Sets where a file was taken, in place of what it had.
@@ -1536,6 +1830,27 @@ public final class IndexStore {
         guard let source = Location.Source(rawValue: row.text(column + 2) ?? "") else { return nil }
         return Location(latitude: row.double(column), longitude: row.double(column + 1), source: source,
                         place: row.text(column + 3))
+    }
+
+    // MARK: Sizes and lengths
+
+    /// Sets a file's size as shown and its length, in place of what it had.
+    func setDimensions(_ dimensions: MediaDimensions, of file: Int64) throws {
+        try db.run("""
+            INSERT INTO media_dimensions(file, width, height, duration, source) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(file) DO UPDATE SET width = excluded.width, height = excluded.height,
+                duration = excluded.duration, source = excluded.source
+            """, [.int(file), .optional(dimensions.width), .optional(dimensions.height), .optional(dimensions.duration),
+                  .text(dimensions.source.rawValue)])
+    }
+
+    /// A file's size and length from its row's width, height and duration, starting at `column`.
+    static func dimensions(_ row: Statement, from column: Int32, source: MediaDimensions.Source) -> MediaDimensions? {
+        func value<T>(_ offset: Int32, _ read: (Int32) -> T) -> T? {
+            row.isNull(column + offset) ? nil : read(column + offset)
+        }
+        return MediaDimensions(width: value(0) { Int(row.int($0)) }, height: value(1) { Int(row.int($0)) },
+                               duration: value(2, row.double), source: source)
     }
 
     // MARK: Stats

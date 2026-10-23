@@ -12,14 +12,18 @@ let usage = """
     digup: search your files by meaning (DigUp developer CLI)
 
       digup estimate <folder>... [--json]     what would be indexed, and how long the first pass takes
-      digup index <folder>... [--limit N]     sync the index with these folders, embed what's new, read the faces of
-                                              pictures read before faces were, then the rest of long PDFs and
-                                              documents
+      digup index <folder>... [--limit N]     sync the index with these folders, embed what's new, rate the pictures
+                                              read before pictures were rated, read the faces of pictures read
+                                              before faces were, then the rest of long PDFs and documents
       digup search [<words>...] [--kind K,K] [--with NAME]... [--album TITLE]... [--favorites] [--origin O]...
-                   [--camera NAME]... [--shot-on NAME]... [--within LAT,LON,LAT,LON] [-n 10] [--json]
+                   [--camera NAME]... [--shot-on NAME]... [--within LAT,LON,LAT,LON] [--sensitive] [--length S..S]
+                   [--shape SHAPE] [-n 10] [--json]
                                               "code: <words>" searches the code index; with filters and no
                                               words, the newest files they keep
       digup status                            what's in the index
+      digup sensitive <picture>... [--json]   how revealing each picture is, read and rated as indexing does it
+                                              (the sensitive-picture detector, made by scripts/sensitive-model.py),
+                                              and how long that took
       digup speed [--model [--if-needed] [--when-quiet S] [--tries N]] [--json]
                                               this machine's speed next to the M4 Pro behind the estimates, and
                                               what indexing has measured here (costs.json in the index folder);
@@ -63,6 +67,12 @@ let usage = """
                            Photos, what a camera saved with no device named, and older items taken with it
       --within LAT,LON,LAT,LON
                            only files taken inside the box with these two corners (degrees)
+      --sensitive          only pictures and videos with a picture rated sensitive, as the app's Sensitive filter
+                           keeps them with blurring off (Revealing: low or higher at 0.5 or more)
+      --length S..S        only videos and recordings at least the first number of seconds long and shorter than the
+                           second; either may be left out (..15: under 15 s; 300..: 5 min or longer)
+      --shape SHAPE        only pictures and videos of this shape as they're shown: portrait, landscape, square (sides
+                           within 5 %), wide (2:1 or wider), or an exact ratio W:H within 2 % (16:9, 9:16, 4:3…)
       --include-code       also index loose source code and data files as documents (outside code projects)
       --include-datasets   don't skip folders that look like datasets
       --include-hidden-photos
@@ -78,6 +88,9 @@ let usage = """
     Photos libraries (a .photoslibrary, chosen or inside a chosen folder) are read through osxphotos when it's
     installed (`uv tool install osxphotos`; $DIGUP_OSXPHOTOS names it, "" turns it off): see PhotosLibrary.swift.
     Each library's listing is kept in the index folder (photos/).
+
+    What's said in recordings on this Mac is read by parakeet-mlx when it and ffmpeg are installed (`uv tool install
+    parakeet-mlx`; $DIGUP_PARAKEET names it, "" turns it off): see Speech.swift.
 
     The model: EmbeddingGemma 2 on llama.cpp, from $DIGUP_MODELS (only there, when set), else
     ~/Library/Application Support/DigUp/Models or the Hugging Face cache. DIGUP_WORKER_DIR=worker uses the
@@ -97,7 +110,7 @@ struct Arguments {
     static let valued: Set<String> = ["--index", "--limit", "--kind", "-n", "--zgate", "--word-weight", "--new-limit",
                                       "--linger", "--shot-tokens", "--code-stretch", "--encoder-idle", "--to",
                                       "--memory-limit", "--time-limit", "--tries", "--when-quiet", "--within",
-                                      "--defaults-suite", "--library", "--catalog", "--engine"]
+                                      "--defaults-suite", "--length", "--shape", "--library", "--catalog", "--engine"]
     static let repeated: Set<String> = ["--exclude", "--exclude-ext", "--code-root", "--code-exclude", "--with",
                                         "--album", "--origin", "--camera", "--shot-on"]
 
@@ -146,8 +159,12 @@ struct Arguments {
         options.includeHiddenPhotos = flags.contains("--include-hidden-photos")
         options.excludedFolders = (lists["--exclude"] ?? []).map { Self.folderURL($0).path }
         options.excludedExtensions = IndexOptions.extensions((lists["--exclude-ext"] ?? []).joined(separator: ","))
-        // Photos libraries through osxphotos, if it's here (never for the code index: `Crawler`).
-        if !code { options.photos = PhotosLibrary.osxphotosReader(keepingListingsIn: indexFolder) }
+        // Photos libraries through osxphotos, and what's said in recordings through parakeet-mlx, if they're here (never
+        // for the code index: `Crawler`).
+        if !code {
+            options.photos = PhotosLibrary.osxphotosReader(keepingListingsIn: indexFolder)
+            options.speech = Speech.parakeetReader()
+        }
         if let tokens = values["--shot-tokens"].flatMap(Int.init) { options.screenshotBudget = tokens }
         if let characters = values["--code-stretch"].flatMap(Int.init) { options.codeStretch = characters }
         return options
@@ -196,11 +213,13 @@ struct Arguments {
     var filtered: Bool {
         lists["--with"] != nil || lists["--album"] != nil || flags.contains("--favorites") || values["--within"] != nil
             || lists["--origin"] != nil || lists["--camera"] != nil || lists["--shot-on"] != nil
+            || flags.contains("--sensitive") || values["--length"] != nil || values["--shape"] != nil
     }
 
     /// The search's filter: --with NAME (every one in it; a name that several people in Photos share means any of
     /// them), --album TITLE (in any of them), --favorites, --origin O, --camera NAME and --shot-on NAME (any of them
-    /// each), --within LAT,LON,LAT,LON (two corners of a box).
+    /// each), --within LAT,LON,LAT,LON (two corners of a box), --sensitive (as the app's filter keeps them with
+    /// blurring off), --length S..S and --shape SHAPE.
     func filter(in store: IndexStore) throws -> SearchFilter {
         var filter = SearchFilter(favorites: flags.contains("--favorites"))
         if let names = lists["--with"] {
@@ -252,6 +271,22 @@ struct Arguments {
             filter.area = SearchFilter.Area(latitudes: min(corners[0], corners[2])...max(corners[0], corners[2]),
                                             longitudes: min(corners[1], corners[3])...max(corners[1], corners[3]))
         }
+        if flags.contains("--sensitive") { filter.sensitive = SensitivePosition.off.filterPosition }
+        if let text = values["--length"] {
+            guard let length = SearchFilter.Length(text) else {
+                throw CLIError("--length takes seconds as AT_LEAST..UNDER, either left out (..15, 15..60, 300..), "
+                               + "the first below the second, neither over "
+                               + "\(Int(SearchFilter.Length.longest)) (ten years)")
+            }
+            filter.length = length
+        }
+        if let text = values["--shape"] {
+            guard let shape = SearchFilter.Shape(text) else {
+                throw CLIError("--shape is portrait, landscape, square, wide, or W:H in whole numbers from 1 to 99 "
+                               + "(16:9, 9:16)")
+            }
+            filter.shape = shape
+        }
         return filter
     }
 }
@@ -277,6 +312,8 @@ func location(_ hit: SearchHit) -> String {
     case .page, .pageImage: hit.loc.map { "p. \(Int($0))" } ?? ""
     case .audio, .frame:
         hit.loc.map { "at \(MatchDescription.clock($0))" + (hit.segment == .audio ? " (sound)" : "") } ?? ""
+    case .speech:
+        hit.loc.map { "\(MatchDescription.clock($0))–\(MatchDescription.clock(hit.locEnd ?? $0)) (said)" } ?? ""
     case .chunk: hit.loc.map { "part \(Int($0))" } ?? ""
     case .lines: hit.loc.map { "lines \(Int($0))–\(Int(hit.locEnd ?? $0))" + (hit.focus.map { ", opens at \(Int($0))" } ?? "") } ?? ""
     case .cells: hit.loc.map { $0 == hit.locEnd ? "cell \(Int($0))" : "cells \(Int($0))–\(Int(hit.locEnd ?? $0))" } ?? ""
@@ -347,7 +384,8 @@ func estimate(_ args: Arguments) throws {
         }
         let started = Date()
         let crawl = Crawler.crawl([folder], options: options)
-        let parts = Estimator.estimates(bySubfolder: crawl.candidates, of: folder.path, options: options, costs: costs)
+        let parts = Estimator.estimates(bySubfolder: crawl.candidates, of: folder.path, options: options, costs: costs,
+                                        ratesPictures: SensitiveModel.isInstalled(in: SensitiveModel.models))
         let estimate = parts.values.reduce(Estimate(), +)
         // Biggest first; the app lists them under the folder, so that a long first pass can be cut down.
         let subfolders = parts.filter { $0.key != folder.path }.sorted {
@@ -364,6 +402,7 @@ func estimate(_ args: Arguments) throws {
                   "calibrated": calibrated,
                   "pdf_pages": estimate.pdfPages, "pdf_pages_total": estimate.pdfPagesTotal,
                   "audio_seconds": estimate.audioSeconds, "video_seconds": estimate.videoSeconds,
+                  "speech_seconds": estimate.speechSeconds,
                   "long_files": estimate.longFiles, "later_seconds": estimate.laterSeconds,
                   "code_stretches": estimate.codeStretches, "bytes": estimate.bytes,
                   "subfolders": subfolders.prefix(500).map {
@@ -387,6 +426,9 @@ func estimate(_ args: Arguments) throws {
                                      + "(\(number(estimate.codeStretches)) stretches)")
             default: kinds.append("\(number(count)) \(kind.rawValue)\(count == 1 ? "" : "s")")
             }
+        }
+        if estimate.speechSeconds > 0 {
+            kinds.append("what's said in \(duration(estimate.speechSeconds)) of recordings")
         }
         print("\(tilde(folder.path))    first index ≈ \(duration(estimate.seconds))"
               + (args.code ? ", index ≈ \(ByteCountFormatter.string(fromByteCount: Int64(estimate.bytes), countStyle: .file))" : ""))
@@ -414,13 +456,16 @@ func estimate(_ args: Arguments) throws {
 func index(_ args: Arguments) throws {
     let store = try args.store()
     if args.flags.contains("--reindex") { try store.resetAll() }
-    let indexer = try Indexer(store: store, options: args.options, faces: args.code ? nil : faceReader(), makeEmbedder: {
+    let indexer = try Indexer(store: store, options: args.options, rater: args.code ? nil : sensitiveRater(),
+                              faces: args.code ? nil : faceReader(), makeEmbedder: {
         try makeEmbedder(textOnly: false, log: store.directory.appendingPathComponent("worker.log"))
     })
     indexer.embedderSource = embedderSource()
     indexer.costsFolder = store.directory
-    try store.readAgainOnce()   // what older indexes couldn't read: scanned pages' words, SVGs, GIFs' later frames
+    // What older indexes couldn't read: scanned pages' words, SVGs, GIFs' later frames, what's said in recordings.
+    try store.readAgainOnce(readsSpeech: indexer.readsSpeech)
     try store.locateOnce()      // where the pictures and videos it read before were taken
+    try store.measureOnce()     // their sizes as shown, and how long its videos and recordings are
     try indexer.checkModel()
     let folders = try args.folders()
     let sync = try indexer.sync(folders)
@@ -444,8 +489,16 @@ func index(_ args: Arguments) throws {
     } else {
         print("done in \(duration(Date().timeIntervalSince(started))): " + statesLine(states))
     }
-    // The faces of pictures read before faces were, once (not after a --limit run: files are still pending).
+    // Pictures read before they were rated, then the faces of pictures read before faces were, once each (not after a
+    // --limit run: files are still pending).
     if limit == nil {
+        started = Date()
+        let rated = try indexer.ratePictures(onStep: { step in
+            let name = (step.path as NSString).lastPathComponent
+            print("[rate \(lpad("\(step.done)", 5))/\(step.total)] \(pad(step.kind.rawValue, 10)) "
+                  + String(format: "%5.2fs  ", step.seconds) + name + "  (\(step.rated) rated)")
+        })
+        if rated > 0 { print("rated \(rated) pictures read before in \(duration(Date().timeIntervalSince(started)))") }
         started = Date()
         let read = try indexer.readFaces(onStep: { step in
             let name = (step.path as NSString).lastPathComponent
@@ -470,6 +523,57 @@ func index(_ args: Arguments) throws {
 
 func statesLine(_ states: [String: Int]) -> String {
     states.sorted { $0.key < $1.key }.map { "\($0.value) \($0.key)" }.joined(separator: " · ")
+}
+
+/// The sensitive-picture detector, when it's in the models folder (`SensitiveModel.models`); one that isn't this
+/// conversion of this commit is said on stderr and not used.
+func sensitiveRater() -> (any PictureRater)? {
+    do {
+        return try SensitiveModel.rater(in: SensitiveModel.models)
+    } catch {
+        FileHandle.standardError.write(Data("pictures aren't rated: \(error)\n".utf8))
+        return nil
+    }
+}
+
+/// `digup sensitive <picture>... [--json]`: each picture read and rated as indexing does it (a screenshot, by its name
+/// or macOS's mark, as a screenshot), and how long that took; --json: a line each, with its levels.
+func sensitive(_ args: Arguments) throws {
+    guard !args.positional.isEmpty else { throw CLIError("which pictures?") }
+    guard let rater = try SensitiveModel.rater(in: SensitiveModel.models) else {
+        throw CLIError("the sensitive-picture detector isn't in \(tilde(SensitiveModel.folder(in: SensitiveModel.models).path)): "
+                       + "make it with \(SensitiveModel.makeCommand)")
+    }
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("digup-sensitive-" + UUID().uuidString)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    var times: [Double] = []
+    for path in args.positional {
+        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        let started = Date()
+        do {
+            let levels = try autoreleasepool {
+                try Indexer.rate(pictureAt: url, screenshot: Rules.isScreenshot(url), with: rater, in: folder)
+            }
+            let ms = Date().timeIntervalSince(started) * 1000
+            times.append(ms)
+            if args.flags.contains("--json") {
+                emit(["path": url.path, "ms": ms, "levels": ["neutral": 1 - levels.lowOrHigher, "low": levels.low,
+                                                              "medium": levels.medium, "high": levels.high]])
+            } else {
+                print(String(format: "low+ %.3f · medium+ %.3f · high %.3f  %4.0f ms  ", levels.lowOrHigher,
+                             levels.mediumOrHigher, levels.high, ms) + url.lastPathComponent)
+            }
+        } catch {
+            if args.flags.contains("--json") { emit(["path": url.path, "error": "\(error)"]) } else {
+                print("can't rate \(url.lastPathComponent): \(error)")
+            }
+        }
+    }
+    if !args.flags.contains("--json"), !times.isEmpty {
+        print(String(format: "%d pictures, %.0f ms each on average (reading included)", times.count,
+                     times.reduce(0, +) / Double(times.count)))
+    }
 }
 
 /// Embeds queries with a running query encoder (`makeEmbedder(textOnly: true…)`: the text model alone, 0.3B params,
@@ -500,8 +604,8 @@ func search(_ args: Arguments) throws {
     if let code { query = code }
     guard code == nil || !query.isEmpty else { throw CLIError("search the code for what?") }
     let store = try IndexStore(directory: args.indexFolder, file: code == nil ? IndexStore.mainFile : IndexStore.codeFile)
-    // Photos' people, albums, favorites, origins and cameras, and a box on the map: the main index's. With no words,
-    // the search lists what they keep.
+    // Photos' people, albums, favorites, origins and cameras, a box on the map, a length and a shape: the main index's.
+    // With no words, the search lists what they keep.
     let filter = code == nil ? try args.filter(in: store) : SearchFilter()
     let searcher = try Searcher(store: store, loadVectors: !query.isEmpty)
     let started = Date()
@@ -571,6 +675,12 @@ func status(_ args: Arguments) throws {
     }
     if let fingerprint = try store.meta("fingerprint") { print("built with: \(fingerprint)") }
     print("this digup: llama.cpp \(LlamaEmbedder.buildTag), vectors \(LlamaEmbedder.vectorVersion)")
+    if !args.code {
+        let ratings = try store.sensitiveCounts()
+        print("pictures rated: \(number(ratings.rated)), \(number(ratings.waiting)) waiting · "
+              + (try store.meta(IndexStore.sensitiveModelKey) ?? "no model yet")
+              + (SensitiveModel.isInstalled(in: SensitiveModel.models) ? "" : " (the detector isn't installed here)"))
+    }
     print("size: \(ByteCountFormatter.string(fromByteCount: IndexStore.size(of: store.file), countStyle: .file))")
 }
 
@@ -582,8 +692,10 @@ func indexService(_ args: Arguments) throws -> Int32 {
     }
     func part(_ file: String, options: IndexOptions, roots: [URL]) throws -> IndexService.Part {
         let store = try IndexStore(directory: args.indexFolder, file: file)
-        // The main index reads faces in pictures, where there's a recognizer; code has none.
-        let indexer = try Indexer(store: store, options: options, faces: options.code ? nil : faceReader(),
+        // The main index's pictures are rated as they're read, and the ones read before once (`ratePictures`); it
+        // reads faces in pictures too, where there's a recognizer. Code has neither.
+        let indexer = try Indexer(store: store, options: options, rater: options.code ? nil : sensitiveRater(),
+                                  faces: options.code ? nil : faceReader(),
                                   makeEmbedder: { try model.embedder() })
         indexer.costsFolder = args.indexFolder   // what indexing costs here, for later estimates
         // A new app version may bring a new model: the index starts over by itself (keyword search on names goes on).
@@ -879,6 +991,7 @@ do {
     case "index": try index(args)
     case "search": try search(args)
     case "status": try status(args)
+    case "sensitive": try sensitive(args)
     case "speed": try speed(args)
     case "eval": try evaluate(args)
     case "index-service":

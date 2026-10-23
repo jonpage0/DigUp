@@ -11,6 +11,9 @@ nonisolated struct EngineStatus: Sendable, Equatable {
         /// The rest of long PDFs and documents (`Indexer.finishLongFiles`): `done` of the `total` pages and chunks this
         /// pass set out to read, `files` long files still unfinished.
         case finishing(done: Int, total: Int, files: Int)
+        /// Rating the pictures read before they were rated (`Indexer.ratePictures`): `done` of the `total` this pass set
+        /// out to rate.
+        case rating(done: Int, total: Int)
         case failed(String)
     }
 
@@ -622,9 +625,17 @@ nonisolated final class Engine: @unchecked Sendable {
         case "rest":
             update { $0.activity = .finishing(done: int("done"), total: int("total"), files: int("files")) }
             refreshSearcher(force: false)
+        case "rate":
+            update { $0.activity = .rating(done: int("done"), total: int("total")) }
         case "located":
             log("index: where \(int("files")) files already indexed were taken, read from their metadata")
+        case "measured":
+            log("index: the sizes and lengths of \(int("files")) files already indexed, read from their metadata")
         case "summary":
+            if event["rated"] != nil {
+                log("index: rated \(int("rated")) pictures read before in \(int("ms")) ms")
+                return
+            }
             let states = (event["states"] as? [String: Int] ?? [:]).sorted { $0.key < $1.key }
                 .map { "\($0.value) \($0.key)" }.joined(separator: " · ")
             if event["faces"] as? Bool == true {
@@ -739,6 +750,7 @@ nonisolated final class Engine: @unchecked Sendable {
         update {
             if case .indexing = $0.activity { $0.activity = .idle }
             if case .finishing = $0.activity { $0.activity = .idle }
+            if case .rating = $0.activity { $0.activity = .idle }
             if case .starting = $0.activity { $0.activity = .idle }
             $0.code.indexing = nil
         }
@@ -937,6 +949,15 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
+    /// How many of the index's pictures are rated, and how many wait for the rating pass (Settings → General).
+    func sensitiveCounts() async -> (rated: Int, waiting: Int) {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: (try? searchStore?.sensitiveCounts()) ?? (0, 0))
+            }
+        }
+    }
+
     private func searchCode(_ text: String, vector: QueryVector?, prefixLast: Bool, limit: Int) async -> [SearchHit] {
         await withCheckedContinuation { continuation in
             searchQueue.async { [self] in
@@ -953,8 +974,8 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
-    /// The text of the part of a file a hit points at (a document's passage, a page, a stretch of code), for the
-    /// preview.
+    /// The text of the part of a file a hit points at (a document's passage, a page, a stretch of code, what's said in a
+    /// stretch of a recording), for the preview.
     func text(ofSegment id: Int64, code: Bool = false) async -> String? {
         await withCheckedContinuation { continuation in
             searchQueue.async { [self] in
@@ -963,17 +984,27 @@ nonisolated final class Engine: @unchecked Sendable {
         }
     }
 
-    /// Every moment of the recording at `path` that matches `text` (`Searcher.moments(of:queryVector:zGate:)`), best
-    /// first, for the preview. None when meaning search can't run: no query vector, or the index's vectors are another
-    /// model's (as `search` finds them).
+    /// Every moment of the recording at `path` that matches `text` (`Searcher.moments(of:text:queryVector:zGate:)`),
+    /// best first, for the preview. Without a query vector, or with one of another model than the index's (as `search`
+    /// finds them), only what's said in it can match, by its words.
     func moments(of path: String, matching text: String) async -> [Moment] {
-        guard let vector = await embedQuery(text) else { return [] }
+        let vector = await embedQuery(text)
         return await withCheckedContinuation { continuation in
             searchQueue.async { [self] in
-                guard let searcher, searcher.vectorSource == nil || searcher.vectorSource == vector.source else {
-                    return continuation.resume(returning: [])
+                guard let searcher else { return continuation.resume(returning: []) }
+                let values = vector.flatMap {
+                    searcher.vectorSource == nil || searcher.vectorSource == $0.source ? $0.values : nil
                 }
-                continuation.resume(returning: (try? searcher.moments(of: path, queryVector: vector.values)) ?? [])
+                continuation.resume(returning: (try? searcher.moments(of: path, text: text, queryVector: values)) ?? [])
+            }
+        }
+    }
+
+    /// The recordings on this Mac read before what's said in them was (Settings → Storage → Speech).
+    func recordingsWithoutSpeech() async -> [IndexStore.UnheardRecording] {
+        await withCheckedContinuation { continuation in
+            searchQueue.async { [self] in
+                continuation.resume(returning: (try? searchStore?.recordingsWithoutSpeech()) ?? [])
             }
         }
     }

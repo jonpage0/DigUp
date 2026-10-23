@@ -26,6 +26,14 @@ struct SavedSearch: Equatable, Identifiable {
         case digupFavorites
         case from(From)
         case area(Area)
+        /// The Sensitive filter, at the position "Blur sensitive pictures" has when the search runs (as `from: "mine"`
+        /// is the devices list as it is then, not a copy of it). `{ "sensitive": true }`, approved 2026-10-22.
+        case sensitive
+        /// The Length filter: `{ "length": { "atLeast": 15, "under": 60 } }`, either bound left out (approved
+        /// 2026-10-22; the kit reads it strictly: `SearchFilter.Length`'s `Codable`).
+        case length(SearchFilter.Length)
+        /// The Shape filter: `{ "shape": "portrait" }`, or an exact ratio, `{ "shape": "16:9" }` (approved 2026-10-22).
+        case shape(SearchFilter.Shape)
     }
 
     /// A person by Photos' ids, one per library that has them (everyone of the name, as the People filter joins
@@ -68,20 +76,23 @@ struct SavedSearch: Equatable, Identifiable {
         var searchArea: SearchFilter.Area { SearchFilter.Area(latitudes: south...north, longitudes: west...east) }
     }
 
-    /// What the file's shape asks of a search beyond its keys: a name, at most one From and one area, and an area
-    /// that's a box.
+    /// What the file's shape asks of a search beyond its keys: a name, at most one From, one area, one Sensitive, one
+    /// Length and one Shape, and an area that's a box.
     var isWellFormed: Bool {
-        var froms = 0, areas = 0
+        var froms = 0, areas = 0, sensitives = 0, lengths = 0, shapes = 0
         for filter in filters {
             switch filter {
             case .from: froms += 1
             case .area(let area):
                 guard area.isBox else { return false }
                 areas += 1
+            case .sensitive: sensitives += 1
+            case .length: lengths += 1
+            case .shape: shapes += 1
             default: break
             }
         }
-        return !name.isEmpty && froms <= 1 && areas <= 1
+        return !name.isEmpty && [froms, areas, sensitives, lengths, shapes].allSatisfy { $0 <= 1 }
     }
 }
 
@@ -155,10 +166,10 @@ extension SavedSearch.Area {
     }
 }
 
-/// A filter is an object with exactly one key, one of these six; anything else isn't this shape.
+/// A filter is an object with exactly one key, one of these nine; anything else isn't this shape.
 extension SavedSearch.Filter: Codable {
     private enum Key: String, CodingKey, CaseIterable {
-        case person, album, photosFavorites, digupFavorites, from, area
+        case person, album, photosFavorites, digupFavorites, from, area, sensitive, length, shape
     }
 
     init(from decoder: any Decoder) throws {
@@ -171,13 +182,19 @@ extension SavedSearch.Filter: Codable {
         switch key {
         case .person: self = .person(try container.decode(SavedSearch.Person.self, forKey: key))
         case .album: self = .album(try container.decode(SavedSearch.Album.self, forKey: key))
-        case .photosFavorites, .digupFavorites:
+        case .photosFavorites, .digupFavorites, .sensitive:
             guard try container.decode(Bool.self, forKey: key) else {
                 throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: "is always true")
             }
-            self = key == .photosFavorites ? .photosFavorites : .digupFavorites
+            self = switch key {
+            case .photosFavorites: .photosFavorites
+            case .digupFavorites: .digupFavorites
+            default: .sensitive
+            }
         case .from: self = .from(try container.decode(SavedSearch.From.self, forKey: key))
         case .area: self = .area(try container.decode(SavedSearch.Area.self, forKey: key))
+        case .length: self = .length(try container.decode(SearchFilter.Length.self, forKey: key))
+        case .shape: self = .shape(try container.decode(SearchFilter.Shape.self, forKey: key))
         }
     }
 
@@ -190,6 +207,9 @@ extension SavedSearch.Filter: Codable {
         case .digupFavorites: try container.encode(true, forKey: .digupFavorites)
         case .from(let from): try container.encode(from, forKey: .from)
         case .area(let area): try container.encode(area, forKey: .area)
+        case .sensitive: try container.encode(true, forKey: .sensitive)
+        case .length(let length): try container.encode(length, forKey: .length)
+        case .shape(let shape): try container.encode(shape, forKey: .shape)
         }
     }
 }
@@ -199,19 +219,23 @@ extension SavedSearch.Filter: Codable {
 /// `favorites.json` is, read once and written whole on each change (to a temporary file, then renamed over the old
 /// one).
 ///
-/// The shape (approved 2026-10-22):
+/// The shape (approved 2026-10-22; `{ "sensitive": true }` with it, the same evening; `{ "length": … }` and
+/// `{ "shape": … }` with the Length and Shape filters):
 ///
 ///     { "version": 1,
 ///       "searches": [ { "id": "<UUID>", "name": "Tati at the beach", "query": "beach", "kind": "images",
 ///                       "filters": [ { "person": { "name": "…", "photos": [ { "library": "…", "uuid": "…" } ] } },
 ///                                    { "album": { "title": "…", "folders": ["…"], "photos": [ … ] } },
 ///                                    { "photosFavorites": true }, { "digupFavorites": true }, { "from": "mine" },
-///                                    { "area": { "south": 25.1, "west": -80.9, "north": 26.2, "east": -79.8 } } ],
+///                                    { "area": { "south": 25.1, "west": -80.9, "north": 26.2, "east": -79.8 } },
+///                                    { "sensitive": true }, { "length": { "atLeast": 15, "under": 60 } },
+///                                    { "shape": "16:9" } ],
 ///                       "saved": "<ISO 8601>" } ] }
 ///
 /// In the user's order, which the menu shows. A file DigUp can't read as exactly this shape (a newer version, damaged,
-/// a key anywhere that the shape doesn't have, a filter with two keys or none, two From or two areas in one search) is
-/// left as it is and never written over: nothing can be saved, renamed or deleted until it's fixed.
+/// a key anywhere that the shape doesn't have, a filter with two keys or none, two From, two areas, two Sensitive, two
+/// lengths or two shapes in one search, a length or a shape the filters don't have) is left as it is and never written
+/// over: nothing can be saved, renamed or deleted until it's fixed.
 @MainActor @Observable
 final class SavedSearches {
     private struct Stored: Codable {
@@ -319,8 +343,9 @@ final class SavedSearches {
             guard stored.searches.allSatisfy(\.isWellFormed),
                   Set(stored.searches.map(\.id)).count == stored.searches.count else {
                 unreadable = true
-                log("saved searches: \(url.lastPathComponent) has a search without a name, with two From or two areas, "
-                    + "an area that isn't a box, or an id twice; it's left as it is")
+                log("saved searches: \(url.lastPathComponent) has a search without a name, with two From, two areas, "
+                    + "two Sensitive, two lengths or two shapes, an area that isn't a box, or an id twice; it's left as "
+                    + "it is")
                 return
             }
             searches = stored.searches

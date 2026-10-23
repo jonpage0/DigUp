@@ -42,6 +42,22 @@ import ImageIO
         }
     }
 
+    /// The size `media_dimensions` keeps: the picture as it's shown, turned by its orientation, from its properties
+    /// alone (`dimensions(of:)`, where they're read without decoding it: off the Mac, only what stb reads), and as
+    /// indexing reads it for the model.
+    @Test(arguments: ["pattern-o6.jpg", "pattern-o6.heic", "pattern-o6.webp", "pattern-o6.tiff", "pattern.avif"])
+    func sizeAsShown(_ name: String) throws {
+        let url = Self.pictures.appendingPathComponent(name)
+        let shown = name.contains("-o6") ? MediaDimensions(width: 240, height: 400, duration: nil, source: .file)
+            : MediaDimensions(width: 400, height: 240, duration: nil, source: .file)
+        #expect(try ImageExtractor.prepare(url, maxPixel: 1024, minSide: 256, to: folder, png: true).dimensions == shown)
+        #if canImport(ImageIO)
+        #expect(ImageExtractor.dimensions(of: url) == shown)
+        #else
+        #expect(ImageExtractor.dimensions(of: url) == (name.hasSuffix(".jpg") ? shown : nil))
+        #endif
+    }
+
     #if !canImport(ImageIO)
     @Test func malformedHeifExtentsAreIgnored() throws {
         func bigEndian(_ value: UInt64, width: Int) -> [UInt8] {

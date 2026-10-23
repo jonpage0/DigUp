@@ -135,6 +135,9 @@ final class SettingsState {
     var checksForUpdates = false
     /// The last calls AI apps made through `digup mcp` (AI apps), oldest first.
     private(set) var aiCalls: [AICall] = []
+    /// How many of the index's pictures are rated and how many wait (General), and whether the detector is installed.
+    private(set) var ratings = (rated: 0, waiting: 0)
+    private(set) var detectorInstalled = false
     @ObservationIgnored let app: AppController
     @ObservationIgnored var selectTab: (SettingsTab) -> Void = { _ in }
     @ObservationIgnored var addFolders: () -> Void = {}
@@ -155,7 +158,10 @@ final class SettingsState {
         checksForUpdates = app.updates.automaticallyChecks
         indexSize = app.engine.indexSize
         refreshAICalls()
+        detectorInstalled = SensitiveModel.isInstalled(in: model.settings.modelsDirectory)
+        ratings = await app.engine.sensitiveCounts()
         codeIndexSize = app.engine.codeIndexSize
+        await refreshSpeech()
         codeSummaries = await app.engine.rootSummaries(code: true)
         summaries = await app.engine.rootSummaries()
         // The Photos tab's counts follow indexing as the folders' do (its listings and access are looked at when it shows).
@@ -186,6 +192,27 @@ final class SettingsState {
 
     func refreshAICalls() {
         aiCalls = AICall.last(Self.aiCallsShown, in: model.settings.indexDirectory)
+    }
+
+    // MARK: Speech
+
+    /// parakeet-mlx and the ffmpeg it needs, as last looked for (`Speech`): with both, what's said in recordings on this
+    /// Mac is read.
+    private(set) var parakeet = Speech.parakeet
+    private(set) var ffmpeg = Speech.ffmpeg
+    /// The recordings on this Mac read before what's said in them was (`IndexStore.recordingsWithoutSpeech`), how long
+    /// they play, and how long reading them again takes here, their frames and sound with their speech (`MeasuredCosts`).
+    private(set) var unheard: (files: Int, seconds: Double, reading: Double) = (0, 0, 0)
+
+    func refreshSpeech() async {
+        parakeet = Speech.parakeet
+        ffmpeg = Speech.ffmpeg
+        let recordings = await app.engine.recordingsWithoutSpeech()
+        let costs = MeasuredCosts.load(from: model.settings.indexDirectory).costs
+        unheard = (recordings.count, recordings.reduce(0) { $0 + $1.seconds }, recordings.reduce(0) { total, recording in
+            total + recording.seconds * ((recording.kind == .audio ? costs.audioSecond : costs.videoSecond)
+                                         + costs.speechSecond)
+        })
     }
 
     // MARK: Photos
@@ -348,9 +375,93 @@ private struct GeneralSettings: View {
                          ?? "DigUp \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
                 }
             }
+            SensitiveSettings(state: state)
         }
         .formStyle(.grouped)
         .scrollDisabled(true)
+    }
+}
+
+/// General → Sensitive pictures: "Blur sensitive pictures" (approved with `sensitive_scores`, 2026-10-22), and how far
+/// the detector has got, or how to make it while it isn't installed.
+private struct SensitiveSettings: View {
+    @Bindable var state: SettingsState
+
+    var body: some View {
+        Section {
+            Picker(selection: Binding(get: { state.model.settings.blurSensitive },
+                                      set: { state.app.setBlurSensitive($0) })) {
+                ForEach(SensitivePosition.allCases, id: \.self) { Text($0.title).tag($0) }
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Blur sensitive pictures")
+                    Text(Self.detail(state.model.settings.blurSensitive))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if state.detectorInstalled {
+                LabeledContent("Pictures rated") {
+                    Text(state.ratings.rated.formatted()
+                         + (state.ratings.waiting > 0 ? " · \(state.ratings.waiting.formatted()) waiting" : ""))
+                        .monospacedDigit()
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text("The detector isn't installed").font(.system(size: 13, weight: .medium))
+                    }
+                    Text("Pictures read from now on aren't rated: they aren't blurred or kept by the Sensitive "
+                         + "filter, and AI apps don't see them unless you let them see pictures rated sensitive. "
+                         + "Pictures rated before keep their ratings. To install it, run this in Terminal from DigUp's "
+                         + "source folder; it goes into \(folder):")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(command)
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+        } header: {
+            Text("Sensitive pictures")
+        } footer: {
+            Text("Each picture is rated as it's read, on this Mac (Freepik's detector), and the ones read before once. "
+                 + "A blurred picture shows when you click it; Quick Look shows it as it is. Pictures not rated yet "
+                 + "aren't blurred. It misses tiny nudes inside screenshots and figures far away, and sometimes flags "
+                 + "skin-toned close-ups and shirtless men.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Where the detector goes: the models folder's sensitive/.
+    private var folder: String { tildePath(SensitiveModel.folder(in: state.model.settings.modelsDirectory).path) }
+
+    /// The command that makes it, told the models folder when it isn't the usual one (as the script reads it).
+    private var command: String {
+        let models = state.model.settings.modelsDirectory
+        guard models.standardizedFileURL != ModelFiles.installed.standardizedFileURL else {
+            return SensitiveModel.makeCommand
+        }
+        return "DIGUP_MODELS=\(AIClientSetup.shellQuoted(models.path)) \(SensitiveModel.makeCommand)"
+    }
+
+    /// What each position blurs, with what ADULT-CONTENT-EVAL.md measured it catches.
+    static func detail(_ position: SensitivePosition) -> String {
+        switch position {
+        case .off: "Pictures show as they are. The Sensitive filter, in the search window's Filters menu, keeps the "
+            + "revealing ones."
+        case .anythingRevealing: "Swimwear, lingerie and anything more, even when the detector isn't sure: nearly "
+            + "every nude picture, and the most ordinary pictures blurred with them."
+        case .revealing: "Revealing pictures the detector is fairly sure of: about 9 in 10 nude pictures."
+        case .nudityOnly: "Nudity and explicit pictures: most nude pictures, and the fewest ordinary ones blurred."
+        }
     }
 }
 
@@ -755,6 +866,22 @@ private struct StorageSettings: View {
                     }
                 }
             }
+            Section {
+                SpeechStatus(state: state)
+            } header: {
+                Text("Speech")
+            } footer: {
+                Text("What's said in recordings on this Mac is found by its words and by what it means, and shows under "
+                     + "its moment. parakeet-mlx runs NVIDIA's Parakeet TDT 0.6B v3 (25 European languages) on this "
+                     + "Mac, and downloads it the first time (\(roughBytes(Double(Speech.modelBytes)))). Recordings "
+                     + "indexed before it was found get one more pass, by themselves; a video that's only in iCloud is "
+                     + "read once it's downloaded.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Section("Index") {
                 LabeledContent("Size on disk", value: bytes(state.indexSize))
                 if state.model.hasCode {
@@ -767,19 +894,61 @@ private struct StorageSettings: View {
             Section("Privacy") {
                 Text("DigUp reads the folders you choose and keeps what it learns in its index, on this Mac. "
                      + "It goes online only to download its model, once, and to check for updates (General), "
-                     + "which sends nothing about your files.")
+                     + "which sends nothing about your files. parakeet-mlx, once you install it, downloads its speech "
+                     + "model once too.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section {
                 Text("DigUp \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · "
-                     + "EmbeddingGemma 2 by Google (Apache 2.0), run by llama.cpp (MIT).")
+                     + "EmbeddingGemma 2 by Google (Apache 2.0), run by llama.cpp (MIT). Speech: Parakeet TDT 0.6B v3 "
+                     + "by NVIDIA (CC BY 4.0), run by parakeet-mlx (Apache 2.0).")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .scrollDisabled(true)
+    }
+}
+
+/// Storage → Speech: parakeet-mlx, which reads what's said in recordings on this Mac (`Speech`), found or how to install
+/// it, and how long the first pass over the recordings indexed before takes.
+private struct SpeechStatus: View {
+    let state: SettingsState
+
+    var body: some View {
+        if let path = state.parakeet, state.ffmpeg != nil {
+            LabeledContent("parakeet-mlx") {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Text(tildePath(path)).lineLimit(1).truncationMode(.middle)
+                }
+            }
+            let unheard = state.unheard
+            if unheard.files > 0 {
+                LabeledContent("First pass") {
+                    Text("\(unheard.files == 1 ? "1 recording" : "\(unheard.files.formatted()) recordings") indexed "
+                         + "before, \(roughDuration(unheard.seconds)) of sound · \(approximately(unheard.reading))")
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text(state.parakeet == nil ? "parakeet-mlx isn't installed" : "ffmpeg isn't installed")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                Text("DigUp reads what's said in recordings through parakeet-mlx, a free tool you install once, in "
+                     + "Terminal, with ffmpeg, which it needs. Until then recordings are found by what's seen and heard "
+                     + "in them.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                InstallCommand(command: state.parakeet == nil ? Speech.installCommand : Speech.ffmpegInstallCommand,
+                               about: InstallCommand.parakeet, checkAgain: { Task { await state.refreshSpeech() } })
+            }
+        }
     }
 }
 
@@ -821,7 +990,8 @@ private struct PhotosSettings: View {
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        InstallOSXPhotos(checkAgain: { Task { await state.refreshPhotos() } })
+                        InstallCommand(command: PhotosLibrary.installCommand, about: InstallCommand.osxphotos,
+                                       checkAgain: { Task { await state.refreshPhotos() } })
                     }
                 }
             } header: {

@@ -12,16 +12,16 @@ import WinSDK
 ///
 /// Protocol: one command per line on stdin, one JSON event per line on stdout.
 ///   stdin:  sync | sync code | stop | backfill on | backfill off      (EOF = stop)
-///   stdout: {"event": "missing" | "pruned" | "sync" | "file" | "faces" | "rest" | "summary" | "waiting" | "idle" |
-///            "error" | "exit", ...}; events about the code index say "code": true
+///   stdout: {"event": "missing" | "pruned" | "sync" | "file" | "rate" | "faces" | "rest" | "summary" | "waiting" |
+///            "idle" | "error" | "exit", ...}; events about the code index say "code": true
 ///
 /// The loop: sync, index what the sync just queued (if it's a few files: new files go first, on any power source),
 /// then the backfill if allowed; then the code index the same way (`--code-root`: its own sync, asked for with
 /// "sync code"; its folders are crawled with the first sync, so their counts show at once); then, under the same
-/// rules, the faces of pictures read before DigUp kept faces (`Indexer.readFaces`), and the rest of long files
-/// (`Indexer.finishLongFiles`). Between batches it yields to stop and to "backfill off" at once, and to a new sync once
-/// indexing has had about as long as the last sync took (`yieldAt`). When it's done it keeps a warm worker for `linger`
-/// seconds (screenshots come in bursts), then exits.
+/// rules, the pictures read before they were rated (`Indexer.ratePictures`), the faces of pictures read before DigUp
+/// kept faces (`Indexer.readFaces`), and the rest of long files (`Indexer.finishLongFiles`). Between batches it yields
+/// to stop and to "backfill off" at once, and to a new sync once indexing has had about as long as the last sync took
+/// (`yieldAt`). When it's done it keeps a warm worker for `linger` seconds (screenshots come in bursts), then exits.
 ///
 /// Before the model has downloaded it only syncs (file names are searchable at once), says it's "waiting", and exits.
 /// Folders that aren't there (an unplugged drive) or can't be read are skipped, and what was indexed from them stays.
@@ -85,10 +85,13 @@ final class IndexService: @unchecked Sendable {
                     emit(["event": "stopped", "path": path, "why": stopped.why, "code": part.code])
                 }
             }
-            let again = try main.store.readAgainOnce()   // what older indexes couldn't read: scans' words, SVGs, GIFs
+            // What older indexes couldn't read: scans' words, SVGs, GIFs' frames, what's said in recordings.
+            let again = try main.store.readAgainOnce(readsSpeech: main.indexer.readsSpeech)
             if again > 0 { emit(["event": "rescan", "files": again]) }
             let located = try main.store.locateOnce()    // where the pictures and videos it read before were taken
             if located > 0 { emit(["event": "located", "files": located]) }
+            let measured = try main.store.measureOnce()   // sizes as shown, and how long videos and recordings are
+            if measured > 0 { emit(["event": "measured", "files": measured]) }
             for part in parts {
                 try part.indexer.checkModel()   // a new model: everything is queued again
                 if let keepOnly = part.keepOnly {
@@ -147,8 +150,14 @@ final class IndexService: @unchecked Sendable {
                     if lock.withLock({ syncRequested || codeSyncRequested }) { continue }
                 }
             }
-            // Once nothing is waiting: the faces of pictures read before they were kept (only while there are some, so
-            // the helper still goes idle), then the rest of long PDFs and documents, the same way.
+            // Once nothing is waiting: the pictures read before they were rated, then the faces of pictures read before
+            // they were kept, then the rest of long PDFs and documents, the same way. Each pass reads a picture once a
+            // process and runs only while it has some, so with none left the helper goes idle.
+            if lock.withLock({ backfillAllowed }), (try? main.store.pendingCount()) ?? 1 == 0,
+               (try? code?.store.pendingCount() ?? 0) ?? 1 == 0, (try? main.indexer.hasPicturesToRate()) ?? false {
+                guard ratePictures() else { break }
+                if lock.withLock({ syncRequested || codeSyncRequested && code != nil }) { continue }
+            }
             if lock.withLock({ backfillAllowed }), (try? main.store.pendingCount()) ?? 1 == 0,
                (try? code?.store.pendingCount() ?? 0) ?? 1 == 0, (try? main.indexer.facesWaiting()) ?? 0 > 0 {
                 guard readFaces() else { break }
@@ -266,6 +275,30 @@ final class IndexService: @unchecked Sendable {
         }
     }
 
+    /// The pictures read before they were rated (`Indexer.ratePictures`), yielding as the backfill does. False when
+    /// indexing has to stop.
+    private func ratePictures() -> Bool {
+        let started = Date()
+        do {
+            let rated = try main.indexer.ratePictures(shouldStop: { [self] in
+                lock.withLock {
+                    stopRequested || !backfillAllowed
+                        || Date() >= yieldAt && (syncRequested || codeSyncRequested && code != nil)
+                }
+            }, onStep: { step in
+                emit(["event": "rate", "done": step.done, "total": step.total, "path": step.path,
+                      "kind": step.kind.rawValue, "rated": step.rated, "seconds": step.seconds])
+            })
+            if rated > 0 {
+                emit(["event": "summary", "rated": rated, "ms": Int(Date().timeIntervalSince(started) * 1000)])
+            }
+            return true
+        } catch {
+            emit(["event": "error", "message": "rating pictures: \(error)", "fatal": true])
+            return false
+        }
+    }
+
     /// The rest of long files (`Indexer.finishLongFiles`), yielding as the backfill does. False when indexing has to
     /// stop.
     private func finishLongFiles() -> Bool {
@@ -328,7 +361,8 @@ final class IndexService: @unchecked Sendable {
             if stop { return false }
             if sync || codeSync && code != nil { return true }
             if backfill, parts.contains(where: { (try? $0.store.pendingCount()) ?? 0 > 0 })
-                || (try? main.store.unfinishedCount().files) ?? 0 > 0 || (try? main.indexer.facesWaiting()) ?? 0 > 0 {
+                || (try? main.store.unfinishedCount().files) ?? 0 > 0
+                || (try? main.indexer.hasPicturesToRate()) ?? false || (try? main.indexer.facesWaiting()) ?? 0 > 0 {
                 return true
             }
         }

@@ -1,9 +1,10 @@
 import Foundation
 
 /// What indexing costs on this Mac, from the indexing itself: seconds and units (pictures, PDF pages, document chunks,
-/// seconds of audio or video, stretches of code) summed kind by kind as jobs finish, in `costs.json` beside the index.
-/// Estimates use a kind's measured cost once it has enough of them. Until then, `Costs`' fixed numbers, measured on an
-/// M4 Pro, stand in, scaled by `speed` (how this Mac compares, from a second of work that needs no model).
+/// seconds of audio or video, stretches of code, seconds of recordings read for speech, pictures rated) summed kind by
+/// kind as jobs finish, in `costs.json` beside the index. Estimates use a kind's measured cost once it has enough of
+/// them. Until then, `Costs`' fixed numbers, measured on an M4 Pro, stand in, scaled by `speed` (how this Mac compares,
+/// from a second of work that needs no model).
 public struct MeasuredCosts: Codable, Sendable, Equatable {
     public struct Tally: Codable, Sendable, Equatable {
         public var seconds = 0.0
@@ -47,7 +48,7 @@ public struct MeasuredCosts: Codable, Sendable, Equatable {
     /// Units a kind needs before its measured cost is trusted: a few dozen files, or minutes of media.
     static let enough: [String: Double] = [
         "image": 20, "screenshot": 20, "pdfPage": 30, "docChunk": 30, "audioSecond": 600, "videoSecond": 600,
-        "codeStretch": 100,
+        "codeStretch": 100, "speechSecond": 600, "sensitivePicture": 20,
     ]
 
     /// A job that took `seconds` for `units` of `name`. Recent work counts most: past ten times what's enough, what
@@ -67,7 +68,8 @@ public struct MeasuredCosts: Codable, Sendable, Equatable {
     /// `Costs`' fields by the names tallies go by.
     static var fields: [(name: String, cost: WritableKeyPath<Costs, Double>)] {
         [("image", \.image), ("screenshot", \.screenshot), ("pdfPage", \.pdfPage), ("docChunk", \.docChunk),
-         ("audioSecond", \.audioSecond), ("videoSecond", \.videoSecond), ("codeStretch", \.codeStretch)]
+         ("audioSecond", \.audioSecond), ("videoSecond", \.videoSecond), ("codeStretch", \.codeStretch),
+         ("speechSecond", \.speechSecond), ("sensitivePicture", \.sensitivePicture)]
     }
 
     /// The costs to estimate with: measured ones where there are enough; else the fixed ones as fast as `speed` says, at
@@ -118,6 +120,8 @@ public struct MeasuredCosts: Codable, Sendable, Equatable {
             costs.audioSecond *= embedding
             costs.videoSecond *= embedding
             costs.codeStretch *= embedding
+            costs.speechSecond *= embedding   // parakeet-mlx runs on the GPU too
+            costs.sensitivePicture *= embedding   // the detector runs on the GPU too
         }
         return costs
     }

@@ -17,8 +17,9 @@ import Foundation
 ///   way back to Photos (`asset(ofFile:)`), and the crawl keeps only files named so. It's also how an asset stays one
 ///   row of the index while its file changes (downloaded, edited, back to Photos' stills): `Indexer.sync`.
 /// - what Photos knows goes to keyword search in a segment of its own (`SegmentKind.photosInfo`), and what can be
-///   filtered on (who is in it, its albums, favorites, where it was taken, how it came in, the device that took it) to
-///   tables of its own (`IndexStore.PhotosFacts`). The crawl keeps both up to date without reading the picture again.
+///   filtered on (who is in it, its albums, favorites, where it was taken, how it came in, the device that took it, its
+///   size and a video's length) to tables of its own (`IndexStore.PhotosFacts`). The crawl keeps both up to date
+///   without reading the picture again.
 /// - the faces Photos named in a picture, and where they are (`Asset.faces`): the indexer prints them when it reads the
 ///   picture, to find those people in pictures outside Photos by their faces (`Faces`).
 /// - the words in a picture are the ones Photos read in it (`RecognizedText`): a screenshot isn't read again, and a
@@ -188,6 +189,13 @@ public enum PhotosLibrary {
         /// Hidden in Photos (its Hidden album: listed only with `IndexOptions.includeHiddenPhotos`); nil in a listing
         /// kept from before DigUp recorded it. What AI apps don't see until they're allowed (`visibleAssets`).
         public let hidden: Bool?
+        /// Its size as Photos shows it, upright: osxphotos' width and height, Photos' ZWIDTH and ZHEIGHT of the version
+        /// it shows (an iPhone photo stored turned, orientation 6, is 3312 × 4416), whether or not the original is on
+        /// this Mac. Nil where Photos has none, and in a listing kept from before DigUp recorded it.
+        public let width: Int?
+        public let height: Int?
+        /// A video's length in seconds, as Photos' catalog keeps it (ZDURATION); nil for a photo.
+        public let duration: Double?
         /// The faces Photos named in it, each with who it is (`people` has their uuids) and where it is in `path`'s
         /// picture: the faces pictures outside Photos are compared with (`Indexer`, `IndexStore.faces`). People's faces
         /// only, not pets'. Nil in a listing kept from before DigUp listed them.
@@ -197,12 +205,13 @@ public enum PhotosLibrary {
                     words: [String], favorite: Bool = false, latitude: Double? = nil, longitude: Double? = nil,
                     place: String? = nil, people: [String] = [], albums: [String] = [], reading: Reading = .original,
                     importedBy: Int? = nil, originApp: String? = nil, camera: String? = nil, hidden: Bool? = false,
-                    faces: [FaceBox]? = []) {
+                    width: Int? = nil, height: Int? = nil, duration: Double? = nil, faces: [FaceBox]? = []) {
             (self.uuid, self.path, self.reading, self.movie, self.screenshot) = (uuid, path, reading, movie, screenshot)
             (self.title, self.date, self.words) = (title, date, words)
             (self.favorite, self.latitude, self.longitude, self.place) = (favorite, latitude, longitude, place)
             (self.people, self.albums) = (people, albums)
             (self.importedBy, self.originApp, self.camera, self.hidden) = (importedBy, originApp, camera, hidden)
+            (self.width, self.height, self.duration) = (width, height, duration)
             self.faces = faces
         }
 
@@ -218,6 +227,12 @@ public enum PhotosLibrary {
         public var location: Location? {
             guard let latitude, let longitude else { return nil }
             return Location(latitude: latitude, longitude: longitude, source: .photos, place: place)
+        }
+
+        /// What the index keeps of its size and length (`media_dimensions`, Photos' word): a photo's size, a video's
+        /// size and length.
+        public var dimensions: MediaDimensions? {
+            MediaDimensions(width: width, height: height, duration: movie ? duration : nil, source: .photos)
         }
     }
 
@@ -293,24 +308,9 @@ public enum PhotosLibrary {
 
     // MARK: osxphotos
 
-    /// The osxphotos program: $DIGUP_OSXPHOTOS (empty: none), else where `uv tool install`, pipx, `pip install --user`,
-    /// Homebrew or MacPorts put it, else on PATH. The app's helpers run with launchd's PATH, which has none of those.
-    /// Nil where it isn't installed, and off the Mac. Looked for each time (a few file checks): installed while the app
-    /// runs, it's found without a relaunch.
-    public static var osxphotos: String? {
-        #if os(macOS)
-        let environment = ProcessInfo.processInfo.environment
-        let fm = FileManager.default
-        if let chosen = environment["DIGUP_OSXPHOTOS"] {
-            return !chosen.isEmpty && fm.isExecutableFile(atPath: chosen) ? chosen : nil
-        }
-        let folders = [fm.homeDirectoryForCurrentUser.path + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin",
-                       "/opt/local/bin"] + (environment["PATH"] ?? "").split(separator: ":").map(String.init)
-        return folders.map { $0 + "/osxphotos" }.first { fm.isExecutableFile(atPath: $0) }
-        #else
-        return nil
-        #endif
-    }
+    /// The osxphotos program, where `InstalledPrograms` finds it: $DIGUP_OSXPHOTOS names one (empty: none). Nil where it
+    /// isn't installed, and off the Mac.
+    public static var osxphotos: String? { InstalledPrograms.path(of: "osxphotos", chosenBy: "DIGUP_OSXPHOTOS") }
 
     /// The command that installs osxphotos, as the app shows it.
     public static let installCommand = "uv tool install osxphotos"
@@ -681,6 +681,28 @@ public enum PhotosLibrary {
                 connection.close()
 
 
+        def durations(db):
+            """Each video's length in seconds, by uuid, as Photos' catalog keeps it (ZASSET.ZDURATION; ZKIND 1 is a
+            video), read through osxphotos' own connection to the catalog as imported_by reads how it came in. None for
+            all of them where the catalog can't say."""
+            connection, cursor = db.get_db_connection()
+            try:
+                for assets in ("ZASSET", "ZGENERICASSET"):
+                    try:
+                        return dict(cursor.execute(
+                            f"SELECT ZUUID, ZDURATION FROM {assets} WHERE ZKIND = 1").fetchall())
+                    except Exception:
+                        continue
+                return {}
+            finally:
+                connection.close()
+
+
+        def side(value):
+            """A side of Photos' size in pixels, or None when it has none (0)."""
+            return value if isinstance(value, int) and value > 0 else None
+
+
         def origin_app(photo):
             """The app that put it in the library, as Photos recorded it (its bundle id), or None."""
             app = quietly(lambda: photo.imported_by)  # (display name, bundle id)
@@ -728,7 +750,7 @@ public enum PhotosLibrary {
             library, output, hidden = sys.argv[1], sys.argv[2], sys.argv[3] == "include-hidden"
             db = osxphotos.PhotosDB(dbfile=library)
             root = os.path.realpath(library) + os.sep
-            numbers, kinds = imported_by(db), face_kinds(db)
+            numbers, lengths, kinds = imported_by(db), durations(db), face_kinds(db)
             assets, skipped = [], {}
 
             def skip(reason):
@@ -772,6 +794,10 @@ public enum PhotosLibrary {
                     "originApp": origin_app(photo),
                     "camera": camera(photo),
                     "hidden": bool(photo.hidden),
+                    # The size of the version Photos shows, upright (one stored turned, orientation 6: 3312 x 4416).
+                    "width": side(quietly(lambda: photo.width)),
+                    "height": side(quietly(lambda: photo.height)),
+                    "duration": lengths.get(photo.uuid) if photo.ismovie else None,
                     # A video's faces are on its frames, which aren't compared.
                     "faces": [] if photo.ismovie else faces(photo, kinds),
                 })

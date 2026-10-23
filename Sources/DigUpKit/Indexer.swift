@@ -16,8 +16,9 @@ public enum IndexerError: Error, CustomStringConvertible {
 ///
 /// Model work goes to an `Embedder` (made on first use, freed by `closeWorker`). Extraction (ImageIO, Vision, PDFKit,
 /// AVFoundation) runs on a second thread one batch ahead, so reading files and embedding them overlap (see `run`).
-/// Given a `FaceReader`, a picture read is read for its faces there too (`faces`), and pictures read before get theirs
-/// from the faces pass (`readFaces`).
+/// Given a `PictureRater`, each picture read for the model is rated too, and pictures read before are rated once
+/// (`ratePictures`): `sensitive_scores`. Given a `FaceReader`, a picture read is read for its faces there too
+/// (`faces`), and pictures read before get theirs from the faces pass (`readFaces`).
 public final class Indexer {
     public struct SyncSummary: Sendable {
         public var added = 0, changed = 0, moved = 0, removed = 0, unchanged = 0
@@ -43,6 +44,12 @@ public final class Indexer {
     private let makeEmbedder: () throws -> any Embedder
     private var worker: (any Embedder)?
     private let scratch: URL
+    /// The sensitive-picture detector (`SensitiveModel.rater`), when it's there.
+    private let rater: (any PictureRater)?
+    /// The pictures the job being committed had rated, and how long that took (`MeasuredCosts` keeps it apart).
+    private var rated = (pictures: 0, seconds: 0.0)
+    /// The pictures the rating pass has tried in this process (`ratePictures`).
+    private var triedRating = Set<Int64>()
     /// What reads the faces in pictures (`Faces.reader`), when there's one.
     private let faces: (any FaceReader)?
     /// The faces Photos names in each library picture, as the last sync's listing has them, each with its person's
@@ -70,14 +77,17 @@ public final class Indexer {
     public var costsFolder: URL?
     private var measured = MeasuredCosts()
 
+    /// `rater`: the ratings already in the index are another model's, or nobody's, and go (`adoptSensitiveModel`).
     /// `faces`: what reads the faces in pictures; the faces already in the index are another recognizer's, or nobody's,
     /// and go (`IndexStore.adoptFaceRecognizer`). Without one, no faces are read and the index's stay as they are.
-    public init(store: IndexStore, options: IndexOptions, faces: (any FaceReader)? = nil,
-                makeEmbedder: @escaping () throws -> any Embedder) throws {
+    public init(store: IndexStore, options: IndexOptions, rater: (any PictureRater)? = nil,
+                faces: (any FaceReader)? = nil, makeEmbedder: @escaping () throws -> any Embedder) throws {
         self.store = store
         self.options = options
+        self.rater = rater
         self.faces = faces
         self.makeEmbedder = makeEmbedder
+        if let rater { try store.adoptSensitiveModel(rater.model) }
         if let faces { try store.adoptFaceRecognizer(faces.identity) }
         // One folder per process ($TMPDIR/DigUp-<pid>, which the helper clears up after a process that died), and one
         // in it per indexer: the helper runs two (the main index and the code index), and each clears its own away.
@@ -105,6 +115,9 @@ public final class Indexer {
     }
 
     public var workerIsRunning: Bool { worker != nil }
+
+    /// It reads what's said in recordings (`IndexOptions.speech`).
+    public var readsSpeech: Bool { options.speech != nil }
 
     // MARK: Sync
 
@@ -364,9 +377,14 @@ public final class Indexer {
             // The helper's and the CLI's main thread has no run loop to drain what Foundation autoreleases while a job
             // commits: without a pool per job it all stayed until the process exited (~30 KB a text chunk).
             let modelWasRunning = worker != nil
+            rated = (0, 0)
             let results = try autoreleasepool { try commit(prepared) }
             let seconds = Date().timeIntervalSince(started)
-            if modelWasRunning { measure(prepared, seconds: seconds) }   // else it's seconds of the model starting
+            if modelWasRunning {   // else it's seconds of the model starting
+                // Rating pictures is measured apart: an estimate counts it only where pictures are rated.
+                measure(prepared, seconds: seconds - rated.seconds)
+                measured.add("sensitivePicture", units: Double(rated.pictures), seconds: rated.seconds)
+            }
             committed(index, job, results, seconds / Double(job.files.count))
         }
     }
@@ -382,8 +400,13 @@ public final class Indexer {
             // what a chunk of prose costs (the estimate can't tell them apart from a file's size).
             let worded = chunks.filter(SearchText.hasWords).count
             if worded > 0 { measured.add("docChunk", units: Double(worded), seconds: seconds) }
-        case .audio(_, let duration): measured.add("audioSecond", units: duration, seconds: seconds)
-        case .video(_, _, let duration, _): measured.add("videoSecond", units: duration, seconds: seconds)
+        // What's said is tallied apart (`Costs.speechSecond`): the job waited while it was read.
+        case .audio(_, let duration, let speech):
+            measured.add("audioSecond", units: duration, seconds: seconds - (speech?.seconds ?? 0))
+            if let heard = speech?.seconds { measured.add("speechSecond", units: duration, seconds: heard) }
+        case .video(_, _, let duration, _, _, let speech):
+            measured.add("videoSecond", units: duration, seconds: seconds - (speech?.seconds ?? 0))
+            if let heard = speech?.seconds { measured.add("speechSecond", units: duration, seconds: heard) }
         case .code(let file): measured.add("codeStretch", units: Double(file.pieces.count), seconds: seconds)
         // A video in iCloud's stills are pictures, not seconds of video, which is what the estimate counts of one.
         case .nothing, .stills: break
@@ -515,13 +538,34 @@ public final class Indexer {
         case pdf(pages: [PDFExtractor.Page], read: Range<Int>, total: Int, title: String?)
         /// `chunks`: the ones in `read` (from 0) of the document's `total` (counted up to `IndexOptions.maxChunks` + 1).
         case doc(chunks: [String], read: Range<Int>, total: Int, characters: Int)
-        case audio(pieces: [MediaPiece], duration: Double)
-        /// `location`: where it was taken, from its own metadata (none read for a Photos library's video).
-        case video(frames: [MediaPiece], sound: [MediaPiece], duration: Double, location: Location?)
+        /// `speech`: what's said in it, when that's read (`IndexOptions.speech`).
+        case audio(pieces: [MediaPiece], duration: Double, speech: SpeechRead?)
+        /// `location`: where it was taken, from its own metadata, and `dimensions`, its size as shown and its length
+        /// (neither read for a Photos library's video, which has Photos').
+        case video(frames: [MediaPiece], sound: [MediaPiece], duration: Double, location: Location?,
+                   dimensions: MediaDimensions?, speech: SpeechRead?)
         /// A library's video in iCloud: Photos' stills of it, or its poster (`PhotosLibrary.Reading.isStandIn`), as
         /// pictures for the model.
         case stills([String])
         case code(CodeExtractor.File)
+    }
+
+    /// What a recording was heard to say (`Speech`) and how long reading it took, or why it couldn't be read: the
+    /// recording's own failure (`Speech.Failure.ofRecording`), settled until it changes, or the reader's, which reads it
+    /// again later (`IndexStore.readAgainOnce`).
+    enum SpeechRead: Sendable {
+        case said([Speech.Stretch], seconds: Double)
+        case unreadable(String)
+        case readerFailed(String)
+
+        var stretches: [Speech.Stretch] {
+            if case .said(let stretches, _) = self { stretches } else { [] }
+        }
+
+        /// How long parakeet-mlx took (`MeasuredCosts`); nil when it failed.
+        var seconds: Double? {
+            if case .said(_, let seconds) = self { seconds } else { nil }
+        }
     }
 
     struct ReadyImage: Sendable {
@@ -595,7 +639,7 @@ public final class Indexer {
                     let url = URL(fileURLWithPath: file.path)
                     startReading(file.path)
                     do {
-                        let maxPixel = screenshot ? 1536 : 1024
+                        let maxPixel = Self.pictureSide(screenshot: screenshot)
                         let image = try ImageExtractor.prepare(url, maxPixel: maxPixel, minSide: options.minImageSide,
                                                                to: folder, png: screenshot)
                         // An animated GIF: a few of its later frames too, each at the moment it's shown.
@@ -642,7 +686,10 @@ public final class Indexer {
                 let (pieces, duration) = try runBlocking {
                     try await AudioExtractor.windows(of: url, window: window, hop: hop, to: folder)
                 }
-                prepared.payload = .audio(pieces: pieces, duration: duration)
+                // No sound track: no time either (`AudioExtractor.windows`).
+                prepared.payload = .audio(pieces: pieces, duration: duration,
+                                          speech: speech(of: url, duration: duration, hasSound: duration > 0,
+                                                         options: options, in: folder))
             case .video where job.reading?.isStandIn == true:
                 // A library's video in iCloud: the stills of Photos' filmstrip of it, or its poster, each read whatever
                 // its size (it's all this Mac has of the video).
@@ -661,10 +708,13 @@ public final class Indexer {
                     ? try runBlocking { try await AudioExtractor.windows(of: url, window: window, hop: hop, to: folder) }
                         .pieces
                     : []
-                // A library's video has Photos' location (the sync's), the one the user sees and can correct.
-                let location = PhotosLibrary.library(containing: url.path) == nil
-                    ? VideoExtractor.location(of: url) : nil
-                prepared.payload = .video(frames: frames, sound: sound, duration: duration, location: location)
+                // A library's video has Photos' location and size (the sync's), the ones the user sees.
+                let outside = PhotosLibrary.library(containing: url.path) == nil
+                prepared.payload = .video(frames: frames, sound: sound, duration: duration,
+                                          location: outside ? VideoExtractor.location(of: url) : nil,
+                                          dimensions: outside ? VideoExtractor.dimensions(of: url) : nil,
+                                          speech: speech(of: url, duration: duration, hasSound: hasAudio,
+                                                         options: options, in: folder))
             case .code:
                 prepared.payload = .code(try CodeExtractor.read(url, options: options))
             }
@@ -684,6 +734,28 @@ public final class Indexer {
             prepared.payload = .nothing
         }
         return prepared
+    }
+
+    /// What's said in a recording on this Mac (`Speech`), when `options.speech` reads it; nil when nothing does. A
+    /// recording with a sound track is read however short or quiet it is (its windows of sound need 2 s, and leave out
+    /// what's under about −50 dBFS: "Flight cancelled." takes 1.2 s); nothing is said in one without. parakeet-mlx is a
+    /// program of its own with a time limit of its own (`Speech.parakeetReader`): the watchdog, which can only end this
+    /// process, doesn't time it.
+    private static func speech(of url: URL, duration: Double, hasSound: Bool, options: IndexOptions, in folder: URL)
+        -> SpeechRead? {
+        guard let reader = options.speech else { return nil }
+        guard hasSound else { return .said([], seconds: 0) }
+        let started = Date()
+        readingLock.withLock { reading = nil }
+        defer { startReading(url.path) }
+        do {
+            return .said(Speech.stretches(of: try reader.read(url, folder, duration)),
+                         seconds: Date().timeIntervalSince(started))
+        } catch let failure as Speech.Failure where failure.ofRecording {
+            return .unreadable("\(failure)")
+        } catch {
+            return .readerFailed("\(error)")
+        }
     }
 
     // MARK: Commit (the indexing thread: the model and the database)
@@ -710,10 +782,11 @@ public final class Indexer {
             case .doc(let chunks, let read, let total, let characters):
                 results[0] = try doc(batch[0], chunks: chunks, read: read, total: total, characters: characters,
                                      later: later)
-            case .audio(let pieces, let duration):
-                results[0] = try audio(batch[0], pieces: pieces, duration: duration)
-            case .video(let frames, let sound, let duration, let location):
-                results[0] = try video(batch[0], frames: frames, sound: sound, duration: duration, location: location)
+            case .audio(let pieces, let duration, let speech):
+                results[0] = try audio(batch[0], pieces: pieces, duration: duration, speech: speech)
+            case .video(let frames, let sound, let duration, let location, let dimensions, let speech):
+                results[0] = try video(batch[0], frames: frames, sound: sound, duration: duration, location: location,
+                                       dimensions: dimensions, speech: speech)
             case .stills(let stills):
                 results[0] = try self.stills(batch[0], stills)
             case .code(let code):
@@ -754,21 +827,28 @@ public final class Indexer {
         let frames = ready.flatMap(\.frames)
         var frameVectors = frames.isEmpty ? []
             : try worker.embedImages(frames.map(\.path), budget: options.frameBudget)[...]
+        // How revealing each picture and frame is, from the same files the model just read.
+        let levels = rate(ready.map(\.image.path))
+        var frameLevels = rate(frames.map(\.path))[...]
         try store.db.transaction {
             for (position, item) in ready.enumerated() {
                 let file = batch[item.slot]
-                let itsFrames = zip(item.frames, frameVectors.prefix(item.frames.count))
+                let itsFrames = zip(zip(item.frames, frameVectors.prefix(item.frames.count)),
+                                    frameLevels.prefix(item.frames.count))
                 frameVectors = frameVectors.dropFirst(item.frames.count)
+                frameLevels = frameLevels.dropFirst(item.frames.count)
                 guard let vector = vectors[position].vector else {
                     try store.finish(file.id, state: "failed", detail: vectors[position].error)
                     results[item.slot] = ("failed", vectors[position].error)
                     continue
                 }
                 let picture = try store.addSegment(file: file.id, kind: .image, modality: .image, vector: vector)
+                try writeRating(levels[position], of: picture)
                 if let faces = item.faces { try keep(faces.rows, ofSegment: picture, of: file.id) }
-                for (frame, embedding) in itsFrames {
-                    try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
-                                         locEnd: frame.end, vector: embedding.vector)
+                for ((frame, embedding), rating) in itsFrames {
+                    let segment = try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
+                                                       locEnd: frame.end, vector: embedding.vector)
+                    try writeRating(rating, of: segment)
                 }
                 // The words on screen, or the ones Photos read in a picture, are for keyword search: codes, names and
                 // errors typed exactly. Meaning comes from the picture alone; a vector of the words made screenshots
@@ -786,6 +866,7 @@ public final class Indexer {
                 if let location = item.image.location, PhotosLibrary.library(containing: file.path) == nil {
                     try store.setLocation(location, of: file.id)
                 }
+                try setDimensions(item.image.dimensions, of: file)
                 let words = item.fromPhotos ? (screenshot || !item.ocr.isEmpty ? "Photos' text \(item.ocr.count) chars" : nil)
                     : screenshot ? "ocr \(item.ocr.count) chars" : nil
                 let seen = item.faces.map { Self.facesNote($0.rows.count, seconds: $0.seconds) }
@@ -939,45 +1020,137 @@ public final class Indexer {
                 + (worded.count < code.pieces.count ? ", \(code.pieces.count - worded.count) for keywords only" : ""))
     }
 
-    private func audio(_ file: FileRecord, pieces: [MediaPiece], duration: Double) throws -> (String, String?) {
-        guard !pieces.isEmpty else {
-            try store.finish(file.id, state: "skipped", detail: "silent or shorter than 2 s")
-            return ("skipped", "silent or too short")
+    /// An audio file: its windows of sound, and what's said in it. One with no window of sound (shorter than 2 s, or
+    /// silent) is indexed by what's said in it, when something is.
+    private func audio(_ file: FileRecord, pieces: [MediaPiece], duration: Double, speech: SpeechRead?) throws
+        -> (String, String?) {
+        guard !pieces.isEmpty || !(speech?.stretches.isEmpty ?? true) else {
+            return try skipRecording(file, "silent or shorter than 2 s", note: "silent or too short", duration: duration,
+                                     speech: speech, dimensions: Self.length(duration))
         }
-        let vectors = try fullWorker().embedAudio(pieces.map(\.path))
+        let vectors = pieces.isEmpty ? [] : try fullWorker().embedAudio(pieces.map(\.path))
+        let said = try speechVectors(file, speech)
         try store.db.transaction {
             for (piece, embedding) in zip(pieces, vectors) {
                 try store.addSegment(file: file.id, kind: .audio, modality: .audio, loc: piece.start, locEnd: piece.end,
                                      vector: embedding.vector)
             }
-            try store.finish(file.id, state: "done", info: ["duration": String(format: "%.1f", duration)])
+            var info = ["duration": String(format: "%.1f", duration)]
+            try addSpeech(said, read: speech, of: file, info: &info)
+            try store.finish(file.id, state: "done", info: info)
+            try setDimensions(Self.length(duration), of: file)
         }
-        return ("done", "\(pieces.count) windows, \(Int(duration)) s")
+        return ("done", "\(pieces.count) windows, \(Int(duration)) s" + Self.note(speech))
     }
 
+    /// A video on this Mac: its frames, its windows of sound, and what's said in it. One with neither frames nor a window
+    /// of sound is indexed by what's said in it, when something is.
     private func video(_ file: FileRecord, frames: [MediaPiece], sound: [MediaPiece], duration: Double,
-                       location: Location?) throws -> (String, String?) {
-        guard !frames.isEmpty || !sound.isEmpty else {
-            try store.finish(file.id, state: "skipped", detail: "no frames or sound")
-            return ("skipped", "no frames or sound")
+                       location: Location?, dimensions: MediaDimensions?, speech: SpeechRead?) throws
+        -> (String, String?) {
+        guard !frames.isEmpty || !sound.isEmpty || !(speech?.stretches.isEmpty ?? true) else {
+            return try skipRecording(file, "no frames or sound", note: "no frames or sound", duration: duration,
+                                     speech: speech, dimensions: dimensions)
         }
         let worker = try fullWorker()
         let frameVectors = try worker.embedImages(frames.map(\.path), budget: options.frameBudget)
         let soundVectors = try worker.embedAudio(sound.map(\.path))
+        let said = try speechVectors(file, speech)
+        let levels = rate(frames.map(\.path))
         try store.db.transaction {
-            for (frame, embedding) in zip(frames, frameVectors) {
-                try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
-                                     locEnd: frame.end, vector: embedding.vector)
+            for ((frame, embedding), rating) in zip(zip(frames, frameVectors), levels) {
+                let segment = try store.addSegment(file: file.id, kind: .frame, modality: .image, loc: frame.start,
+                                                   locEnd: frame.end, vector: embedding.vector)
+                try writeRating(rating, of: segment)
             }
             for (piece, embedding) in zip(sound, soundVectors) {
                 try store.addSegment(file: file.id, kind: .audio, modality: .audio, loc: piece.start,
                                      locEnd: piece.end, vector: embedding.vector)
             }
-            try store.finish(file.id, state: "done", info: ["duration": String(format: "%.1f", duration),
-                                                            "frames": "\(frames.count)", "sound_windows": "\(sound.count)"])
+            var info = ["duration": String(format: "%.1f", duration), "frames": "\(frames.count)",
+                        "sound_windows": "\(sound.count)"]
+            try addSpeech(said, read: speech, of: file, info: &info)
+            try store.finish(file.id, state: "done", info: info)
             if let location { try store.setLocation(location, of: file.id) }
+            try setDimensions(dimensions, of: file)
         }
-        return ("done", "\(frames.count) frames, \(sound.count) sound windows, \(Int(duration)) s")
+        return ("done", "\(frames.count) frames, \(sound.count) sound windows, \(Int(duration)) s" + Self.note(speech))
+    }
+
+    /// A recording's stretches of speech, each with a text vector made as a document's passage's is (`doc`), titled
+    /// with the file's name (none for a Photos library's file, which is named for its asset's uuid). Speech that's mostly
+    /// digits gets keyword search only.
+    private func speechVectors(_ file: FileRecord, _ speech: SpeechRead?) throws -> [(Speech.Stretch, [Float]?)] {
+        let stretches = speech?.stretches ?? []
+        let worded = stretches.indices.filter { SearchText.hasWords(stretches[$0].text) }
+        guard !worded.isEmpty else { return stretches.map { ($0, nil) } }
+        let name = IndexStore.nameText(file.path)
+        let title = name.isEmpty ? nil : (name as NSString).deletingPathExtension
+        let vectors = try fullWorker().embedTexts(worded.map { Prompts.document(title: title, text: stretches[$0].text) })
+        let vector = Dictionary(uniqueKeysWithValues: zip(worded, vectors))
+        return stretches.indices.map { (stretches[$0], vector[$0]) }
+    }
+
+    /// Writes a recording's stretches of speech (`speechVectors`) as `speech` segments, their words for keyword search
+    /// and to show, and puts in its info how its speech was read (`record`).
+    private func addSpeech(_ said: [(Speech.Stretch, [Float]?)], read speech: SpeechRead?, of file: FileRecord,
+                           info: inout [String: String]) throws {
+        for (stretch, vector) in said {
+            try store.addSegment(file: file.id, kind: .speech, modality: .text, loc: stretch.start, locEnd: stretch.end,
+                                 excerpt: excerpt(stretch.text), text: stretch.text, vector: vector)
+        }
+        Self.record(speech, in: &info)
+    }
+
+    /// A recording with nothing to index: nothing seen or heard in it, and nothing said. It's left out, with how its
+    /// speech was read in its info (`record`), as a recording that's read is, and its size and length.
+    private func skipRecording(_ file: FileRecord, _ detail: String, note: String, duration: Double,
+                               speech: SpeechRead?, dimensions: MediaDimensions?) throws -> (String, String?) {
+        var info = ["duration": String(format: "%.1f", duration)]
+        Self.record(speech, in: &info)
+        try store.db.transaction {
+            try store.finish(file.id, state: "skipped", detail: detail, info: info)
+            try setDimensions(dimensions, of: file)
+        }
+        return ("skipped", note + Self.note(speech))
+    }
+
+    /// An audio file's length as `media_dimensions` keeps it; none when it has no sound track, which has no time either
+    /// (`AudioExtractor.windows`).
+    private static func length(_ duration: Double) -> MediaDimensions? {
+        MediaDimensions(width: nil, height: nil, duration: duration > 0 ? duration : nil, source: .file)
+    }
+
+    /// Writes a file's size as shown and its length, as it was read (`media_dimensions`, source `file`). A library's
+    /// file has Photos' instead (the sync's): the size and length of the version Photos shows.
+    private func setDimensions(_ dimensions: MediaDimensions?, of file: FileRecord) throws {
+        guard let dimensions, PhotosLibrary.library(containing: file.path) == nil else { return }
+        try store.setDimensions(dimensions, of: file.id)
+    }
+
+    /// How a recording's speech was read, in its info: how many stretches there are, or why they couldn't be read, the
+    /// recording's failure apart from the reader's. A recording read without a reader has none of them, which is how the
+    /// read-again pass finds it (`IndexStore.recordingsWithoutSpeech`), and one the reader failed on is read again
+    /// later.
+    private static func record(_ speech: SpeechRead?, in info: inout [String: String]) {
+        switch speech {
+        case .said(let stretches, _): info[IndexStore.speechInfo] = "\(stretches.count)"
+        case .unreadable(let why): info[IndexStore.speechProblemInfo] = why
+        case .readerFailed(let why): info[IndexStore.readerProblemInfo] = why
+        case nil: break
+        }
+    }
+
+    /// What a recording's event says of its speech: ", 4 stretches of speech", ", nothing said", or why it wasn't read.
+    private static func note(_ speech: SpeechRead?) -> String {
+        switch speech {
+        case .said(let stretches, _):
+            stretches.isEmpty ? ", nothing said"
+                : ", \(stretches.count) \(stretches.count == 1 ? "stretch" : "stretches") of speech"
+        case .unreadable(let why): ", speech not read: \(why)"
+        case .readerFailed(let why): ", speech not read for now (read again later): \(why)"
+        case nil: ""
+        }
     }
 
     /// A library's video in iCloud, from what Photos keeps of it (`PhotosLibrary.Reading.isStandIn`): each still a frame
@@ -986,13 +1159,173 @@ public final class Indexer {
     /// is Photos' (the sync's).
     private func stills(_ file: FileRecord, _ stills: [String]) throws -> (String, String?) {
         let vectors = try fullWorker().embedImages(stills, budget: options.frameBudget)
+        let levels = rate(stills)
         try store.db.transaction {
-            for embedding in vectors {
-                try store.addSegment(file: file.id, kind: .frame, modality: .image, vector: embedding.vector)
+            for (embedding, rating) in zip(vectors, levels) {
+                let segment = try store.addSegment(file: file.id, kind: .frame, modality: .image,
+                                                   vector: embedding.vector)
+                try writeRating(rating, of: segment)
             }
             try store.finish(file.id, state: "done", info: ["frames": "\(stills.count)"])
         }
         return ("done", "\(stills.count) of Photos' stills (the video is in iCloud)")
+    }
+
+    // MARK: Sensitive pictures
+
+    /// How big a picture is read for the model, on its long side: a screenshot bigger, for its small text.
+    static func pictureSide(screenshot: Bool) -> Int { screenshot ? 1536 : 1024 }
+
+    /// What the detector says of the picture at `url`, read as indexing reads a picture for the model (its thumbnail,
+    /// upright, into `folder`): what `digup sensitive` times and checks against PyTorch.
+    public static func rate(pictureAt url: URL, screenshot: Bool, with rater: any PictureRater, in folder: URL) throws
+        -> SensitiveLevels {
+        try rater.levels(ofPictureAt: URL(fileURLWithPath: readForModel(url, screenshot: screenshot, into: folder)))
+    }
+
+    /// What the detector says of each of these pictures (files written for the model: a picture's thumbnail, a frame, a
+    /// still), nil for one it couldn't read; none without a detector. The time it takes is the job's `rated`.
+    private func rate(_ paths: [String]) -> [SensitiveLevels?] {
+        guard let rater, !paths.isEmpty else { return paths.map { _ in nil } }
+        let started = Date()
+        defer { rated = (rated.pictures + paths.count, rated.seconds + Date().timeIntervalSince(started)) }
+        return paths.map { try? rater.levels(ofPictureAt: URL(fileURLWithPath: $0)) }
+    }
+
+    /// Writes a picture's rating (none: it couldn't be read) as the detector's model's (`IndexStore.setSensitive`).
+    private func writeRating(_ rating: SensitiveLevels?, of segment: Int64) throws {
+        guard let rating, let rater else { return }
+        try store.setSensitive(rating, ofSegment: segment, model: rater.model)
+    }
+
+    /// One step of the rating pass: `done` of the `total` pictures it set out to rate, and the file whose pictures it
+    /// just rated (`rated` of them; the rest it couldn't read now).
+    public struct Rating: Sendable {
+        public let done: Int
+        public let total: Int
+        public let path: String
+        public let kind: FileKind
+        public let rated: Int
+        public let seconds: Double
+    }
+
+    /// The rating pass has pictures to rate: ones without a rating it hasn't tried in this process. None without a
+    /// detector, or once another model has the ratings (`ownsRatings`).
+    public func hasPicturesToRate() throws -> Bool {
+        guard try ownsRatings() else { return false }
+        return try store.unratedPictures().contains { $0.pictures.contains { !triedRating.contains($0.segment) } }
+    }
+
+    /// The ratings are this indexer's detector's: no other model took them over since it began (`adoptSensitiveModel`,
+    /// an indexer of another version still at work alongside this one).
+    private func ownsRatings() throws -> Bool {
+        guard let rater else { return false }
+        return try store.meta(IndexStore.sensitiveModelKey) == rater.model
+    }
+
+    /// The rating pass: each picture read before DigUp rated pictures (or before the model changed, which took every
+    /// rating) is read again from its file, as it was read for the model, and rated; nothing is embedded. A file
+    /// that's away (gone, on a drive that's unplugged, or only in iCloud, where reading it would download it) is passed
+    /// over, and so is a picture that can't be read now: they wait for a later pass. Each file's ratings are one
+    /// transaction, so stopping between files (`shouldStop`) loses nothing. Returns how many pictures it rated; none
+    /// without a detector, and it stops once another model has the ratings.
+    @discardableResult
+    public func ratePictures(shouldStop: () -> Bool = { false }, onStep: (Rating) -> Void = { _ in }) throws -> Int {
+        guard let rater, try ownsRatings() else { return 0 }
+        let waiting = try store.unratedPictures().compactMap { file, pictures in
+            // Each picture once a process: one that couldn't be read waits for the next helper.
+            let untried = pictures.filter { !triedRating.contains($0.segment) }
+            return untried.isEmpty ? nil : (file: file, pictures: untried)
+        }
+        guard !waiting.isEmpty else { return 0 }
+        let standIns = try store.photosStandIns()
+        let total = waiting.reduce(0) { $0 + $1.pictures.count }
+        var done = 0, count = 0, passes = 0
+        for (file, pictures) in waiting {
+            guard !shouldStop() else { break }
+            triedRating.formUnion(pictures.map(\.segment))
+            let started = Date()
+            passes += 1
+            let folder = scratch.appendingPathComponent("rating-\(passes)")
+            let levels = autoreleasepool {
+                Self.startReading(file.path)
+                defer { Self.readingLock.withLock { Self.reading = nil } }
+                return Self.rate(pictures, of: file, reading: standIns[file.id], with: rater, in: folder)
+            }
+            try? FileManager.default.removeItem(at: folder)
+            let written = try store.db.transaction { () -> Bool in
+                guard try ownsRatings() else { return false }
+                for (segment, rating) in levels {
+                    try store.setSensitive(rating, ofSegment: segment, model: rater.model)
+                }
+                return true
+            }
+            guard written else { break }
+            done += pictures.count
+            count += levels.count
+            onStep(Rating(done: done, total: total, path: file.path, kind: file.kind, rated: levels.count,
+                          seconds: Date().timeIntervalSince(started)))
+        }
+        return count
+    }
+
+    /// The ratings of a file's pictures that could be read now, by segment: each read as indexing read it for the
+    /// model (a picture's thumbnail, a GIF's frame, a video's frame at its moment, one of Photos' stills of a video in
+    /// iCloud) into `folder`, and rated. None when the file is away; a picture that can't be read has none.
+    private static func rate(_ pictures: [IndexStore.UnratedPicture], of file: FileRecord,
+                             reading: PhotosLibrary.Reading?, with rater: any PictureRater, in folder: URL)
+        -> [Int64: SensitiveLevels] {
+        guard Self.isHere(file.path),
+              (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)) != nil
+        else { return [:] }
+        let url = URL(fileURLWithPath: file.path)
+        let side = pictureSide(screenshot: file.kind == .screenshot)
+        var animation: [MediaPiece]?, filmstrip: [String]?
+        var levels: [Int64: SensitiveLevels] = [:]
+        for picture in pictures {
+            // The picture as indexing wrote it for the model.
+            let path: String?
+            switch (picture.kind, file.kind) {
+            case (.image, _):
+                path = try? readForModel(url, screenshot: file.kind == .screenshot, into: folder)
+            case (.frame, .image), (.frame, .screenshot):
+                // One of an animated GIF's later frames, read again as `prepare` read them (in their order).
+                animation = animation ?? ImageExtractor.animationFrames(of: url, maxPixel: side, to: folder)
+                path = animation.flatMap { $0.indices.contains(picture.place) ? $0[picture.place].path : nil }
+            case (.frame, .video) where reading?.isStandIn == true:
+                // One of Photos' stills of a video in iCloud (in the filmstrip's order), or its poster.
+                filmstrip = filmstrip ?? (reading == .stills ? PhotosLibrary.filmstrip(startingAt: file.path)
+                                                             : [file.path])
+                let still = filmstrip.flatMap { $0.indices.contains(picture.place) ? $0[picture.place] : nil }
+                path = still.flatMap { still in
+                    Self.isHere(still) ? try? readForModel(URL(fileURLWithPath: still), screenshot: false, into: folder)
+                        : nil
+                }
+            case (.frame, _):
+                // A video's keyframe, at its moment.
+                let (out, seconds) = (folder.appendingPathComponent(UUID().uuidString + ".jpg"), picture.loc ?? 0)
+                path = (try? runBlocking { try await VideoExtractor.frame(at: seconds, of: url, pixels: side, to: out) })
+                    .map { out.path }
+            default:
+                path = nil
+            }
+            if let path, let rating = try? rater.levels(ofPictureAt: URL(fileURLWithPath: path)) {
+                levels[picture.segment] = rating
+            }
+        }
+        return levels
+    }
+
+    /// A picture as `prepare` reads it for the model (its thumbnail, upright), written into `folder`: its path.
+    private static func readForModel(_ url: URL, screenshot: Bool, into folder: URL) throws -> String {
+        try ImageExtractor.prepare(url, maxPixel: pictureSide(screenshot: screenshot), minSide: 0, to: folder,
+                                   png: screenshot).path
+    }
+
+    /// The file is on this Mac to read: there, a regular file, and not only in iCloud (reading it would download it).
+    private static func isHere(_ path: String) -> Bool {
+        guard let info = FileSystem.info(of: path) else { return false }
+        return info.isRegular && !info.dataless
     }
 
     // MARK: Faces
@@ -1017,7 +1350,7 @@ public final class Indexer {
     /// unplugged, or only in iCloud, where reading it would download it.
     private static func facesHere(of file: FileRecord, named: [NamedFace]?, with reader: any FaceReader)
         -> [IndexStore.FaceRow]? {
-        guard let info = FileSystem.info(of: file.path), info.isRegular, !info.dataless else { return nil }
+        guard isHere(file.path) else { return nil }
         startReading(file.path)
         defer { readingLock.withLock { reading = nil } }
         return autoreleasepool { faces(of: file, named: named, with: reader)?.rows ?? [] }

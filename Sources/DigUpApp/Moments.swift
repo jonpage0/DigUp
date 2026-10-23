@@ -19,7 +19,7 @@ extension ResultRow {
 
     /// Seconds into a recording where the match starts.
     var moment: Double? {
-        guard kind == .video || kind == .audio, segment == .frame || segment == .audio else { return nil }
+        guard kind == .video || kind == .audio, Moment.Kind(segment) != nil else { return nil }
         return loc
     }
 
@@ -39,8 +39,9 @@ extension ResultRow {
     /// Whether this result is at `moment`: the one it matched at, or the one picked.
     func isAt(_ moment: Moment, filmstrip: [String]) -> Bool {
         if let still = moment.still { return filmstrip.indices.contains(still) && photos?.still == filmstrip[still] }
-        guard let loc, let start = moment.start, let end = moment.end,
-              (moment.kind == .heard) == (segment == .audio) else { return false }
+        guard let loc, let start = moment.start, let end = moment.end, moment.kind.segment == segment else {
+            return false
+        }
         return start <= loc && (loc < end || loc == start)
     }
 
@@ -464,9 +465,9 @@ final class PreviewPlayback {
         if placed.moment != nil { play(placed) }
     }
 
-    /// Picks one of Photos' stills of a video in iCloud (`row`) to show.
-    func pick(still: String, of row: ResultRow) {
-        picked = (Self.pickKey(row), row.showing(still: still))
+    /// Picks one of Photos' stills of a video in iCloud (`row`), the `index`th of its filmstrip, to show.
+    func pick(still: String, at index: Int, of row: ResultRow) {
+        picked = (Self.pickKey(row), row.showing(still: still, at: index))
     }
 
     /// `row` at the moment or still last picked for it, else as the search gave it.
@@ -565,13 +566,19 @@ struct MomentsSection: View {
             if row.photos?.reading == .stills {
                 if !filmstrip.isEmpty {
                     StillsStrip(filmstrip: filmstrip, matched: Set(moments.compactMap(\.still)),
-                                showing: shown.photos?.still, width: width, pick: pick(still:))
+                                showing: shown.photos?.still, width: width,
+                                hidden: { index in
+                                    SensitiveBlur.shared.hides(
+                                        row.pictures.flatMap { $0.shown($0.frame(atPlace: index)) })
+                                }, pick: pick(still:))
                 }
             } else if let duration {
                 MomentStrip(row: shown, moments: moments.filter { $0.start != nil }, duration: duration, width: width,
                             label: label, isAt: isAt, pick: pick(_:))
             }
-            if !moments.isEmpty { MomentList(moments: moments, label: label, isAt: isAt, pick: pick(_:)) }
+            if !moments.isEmpty {
+                MomentList(moments: moments, label: label, isAt: isAt, pick: pick(_:), marked: row.markedWords)
+            }
         }
     }
 
@@ -580,7 +587,7 @@ struct MomentsSection: View {
         row.duration ?? moments.compactMap(\.end).max()
     }
 
-    /// "0:42–0:51 · seen", "2:10–2:40 · heard", "Still 3 of 7 · seen"
+    /// "0:42–0:51 · seen", "2:10–2:40 · heard", "0:12–0:38 · said", "Still 3 of 7 · seen"
     private func label(_ moment: Moment) -> String {
         let kind = moment.kind.rawValue
         if let still = moment.still { return "Still \(still + 1) of \(filmstrip.count) · \(kind)" }
@@ -590,21 +597,25 @@ struct MomentsSection: View {
 
     private func isAt(_ moment: Moment) -> Bool { shown.isAt(moment, filmstrip: filmstrip) }
 
+    /// A click on a moment or a still shows it: blurred, that picture shows from then on (`SensitiveBlur`).
     private func pick(_ moment: Moment) {
+        SensitiveBlur.shared.show(row.at(moment, filmstrip: filmstrip))
         PreviewPlayback.shared.pick(moment, of: row, filmstrip: filmstrip)
         picked()
     }
 
     private func pick(still: String) {
-        PreviewPlayback.shared.pick(still: still, of: row)
+        let index = filmstrip.firstIndex(of: still) ?? 0
+        SensitiveBlur.shared.show(row.showing(still: still, at: index))
+        PreviewPlayback.shared.pick(still: still, at: index, of: row)
         picked()
     }
 }
 
-/// A recording from start to end, each moment that matched marked (amber; the one the preview is at deeper; what's
-/// heard on a lane of its own when it matched both ways) and the playhead drawn across it, apart from the marks. A
-/// click on a mark plays from it. Hovering shows the frame there (`Previews.frame`), made where the pointer stops and
-/// dropped when it leaves: nothing is kept.
+/// A recording from start to end, each moment that matched marked (amber; the one the preview is at deeper; each kind,
+/// seen, heard or said, on a lane of its own when it matched more than one way) and the playhead drawn across it, apart
+/// from the marks. A click on a mark plays from it. Hovering shows the frame there (`Previews.frame`), made where the
+/// pointer stops and dropped when it leaves: nothing is kept.
 struct MomentStrip: View {
     /// The recording, at the moment the preview shows.
     let row: ResultRow
@@ -640,9 +651,9 @@ struct MomentStrip: View {
         .accessibilityLabel("\(moments.count) moments in \(ResultRow.clock(duration))")
     }
 
-    /// What's seen and what's heard each get a lane when the recording matched both ways.
+    /// What's seen, heard and said each get a lane when the recording matched more than one way.
     private var lanes: [Moment.Kind] {
-        [.seen, .heard].filter { kind in moments.contains { $0.kind == kind } }
+        [.seen, .heard, .said].filter { kind in moments.contains { $0.kind == kind } }
     }
 
     private func x(_ seconds: Double) -> CGFloat { width * CGFloat(max(0, min(1, seconds / duration))) }
@@ -707,7 +718,13 @@ struct MomentStrip: View {
             if row.kind == .video {
                 ZStack {
                     Color.black.opacity(0.85)
-                    if let frame { Image(nsImage: frame).resizable().aspectRatio(contentMode: .fit) }
+                    if let frame {
+                        let hidden = SensitiveBlur.shared.hides(
+                            row.pictures.flatMap { $0.shown($0.frame(at: pointer.seconds)) })
+                        Image(nsImage: frame.veiled(hidden)).resizable().interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                            .sensitiveCover(hidden, iconSize: 14)
+                    }
                 }
                 .frame(width: cardWidth - 8, height: (cardWidth - 8) * 9 / 16)
                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
@@ -733,6 +750,8 @@ struct StillsStrip: View {
     /// The still the preview shows.
     let showing: String?
     let width: CGFloat
+    /// Whether the still at this place is blurred (`SensitiveBlur`).
+    let hidden: (Int) -> Bool
     let pick: (String) -> Void
     private static let spacing: CGFloat = 4
 
@@ -752,7 +771,8 @@ struct StillsStrip: View {
     private func still(_ path: String, at index: Int, side: CGFloat) -> some View {
         let name = "Still \(index + 1) of \(filmstrip.count)" + (matched.contains(index) ? ", matched" : "")
         return VStack(spacing: 2) {
-            ThumbnailView(url: URL(fileURLWithPath: path), side: side)
+            ThumbnailView(url: URL(fileURLWithPath: path), side: side, veiled: hidden(index))
+                .sensitiveCover(hidden(index), iconSize: max(9, side / 4))
                 .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .strokeBorder(path == showing ? Color.accentColor : Color.primary.opacity(0.12),
                                   lineWidth: path == showing ? 2.5 : 0.5))
@@ -770,13 +790,15 @@ struct StillsStrip: View {
     }
 }
 
-/// The moments as a list, best first ("0:42–0:51 · seen"), the one the preview is at lit. A click plays one (shows the
-/// still). The best few show, the rest a click away.
+/// The moments as a list, best first ("0:42–0:51 · seen"), the one the preview is at lit, and under a moment of what's
+/// said, its words, the query's marked. A click plays one (shows the still). The best few show, the rest a click away.
 struct MomentList: View {
     let moments: [Moment]
     let label: (Moment) -> String
     let isAt: (Moment) -> Bool
     let pick: (Moment) -> Void
+    /// The words to mark in what's said (`ResultRow.markedWords`).
+    let marked: Set<String>
     @State private var showsAll = false
     private static let few = 5
 
@@ -798,15 +820,25 @@ struct MomentList: View {
 
     private func item(_ moment: Moment) -> some View {
         Button { pick(moment) } label: {
-            HStack(spacing: 7) {
-                Image(systemName: moment.kind == .seen ? "eye" : "ear")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Brand.ember)
-                    .frame(width: 14)
-                Text(label(moment))
-                Spacer(minLength: 0)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 7) {
+                    Image(systemName: Self.symbol(moment.kind))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Brand.ember)
+                        .frame(width: 14)
+                    Text(label(moment))
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 11.5).monospacedDigit())
+                if let words = moment.words {
+                    Text(marking(marked, in: words))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                        .padding(.leading, 21)
+                }
             }
-            .font(.system(size: 11.5).monospacedDigit())
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
             .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
@@ -815,5 +847,13 @@ struct MomentList: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isAt(moment) ? .isSelected : [])
+    }
+
+    private static func symbol(_ kind: Moment.Kind) -> String {
+        switch kind {
+        case .seen: "eye"
+        case .heard: "ear"
+        case .said: "quote.bubble"
+        }
     }
 }

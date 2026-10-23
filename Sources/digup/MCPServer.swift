@@ -9,11 +9,12 @@ import Foundation
 ///   and `server/discover` says what this server speaks;
 /// - 2025-11-25, 2025-06-18 and 2025-03-26: `initialize` settles the revision for the rest of the process.
 ///
-/// Read-only: the index is opened only to be read (`IndexStore(readingOnly:)`), and no tool changes, moves, opens or
-/// uploads a file. What AI apps may see is the user's to say in the app (Settings → AI apps, `AIAccess`), read from its
-/// settings at every call and enforced here, not left to the client: with access off every call fails; Photos
-/// libraries, Photos' hidden items, code and pictures each stay out until allowed, and what's out is never returned,
-/// counted or read. Each tool call is a line of `<index>/mcp.log` (`AICall`), never with what was searched for.
+/// Read-only: the index is opened only to be read, whether or not DigUp has it open (`IndexStore(readingOnly:)`), and
+/// no tool changes, moves, opens or uploads a file. What AI apps may see is the user's to say in the app (Settings → AI
+/// apps, `AIAccess`), read from its settings at every call and enforced here, not left to the client: with access off
+/// every call fails; Photos libraries, Photos' hidden items, code, pictures and pictures rated sensitive (or not rated
+/// yet) each stay out until allowed, and what's out is never returned, counted or read. Each tool call is a line of
+/// `<index>/mcp.log` (`AICall`), never with what was searched for.
 final class MCPServer {
     /// The revision named in each request's `_meta`.
     static let statelessVersions = ["2026-07-28"]
@@ -47,13 +48,15 @@ final class MCPServer {
         case hidden = "hidden in Photos, or not known not to be"
         case code = "code off"
         case pictures = "pictures off"
+        /// A picture or video rated sensitive, or not rated yet, while "Pictures rated sensitive" is off.
+        case sensitive = "rated sensitive, or not rated yet"
 
         var message: String {
             switch self {
             case .off: "DigUp's AI access is off. Turn it on in DigUp's Settings → AI apps."
             case .photos: "Photos libraries are off for AI apps. The user can turn them on in DigUp's "
                 + "Settings → AI apps."
-            case .hidden: MCPServer.notFound
+            case .hidden, .sensitive: MCPServer.notFound
             case .code: "Code search is off for AI apps. The user can turn it on in DigUp's Settings → AI apps."
             case .pictures: "Pictures are off for AI apps. The user can turn on “Pictures themselves” in DigUp's "
                 + "Settings → AI apps."
@@ -65,6 +68,9 @@ final class MCPServer {
 
     /// `read_text`'s words at most, in characters.
     static let readLimit = 20_000
+    /// `read_text`'s `moment`: what's said this long before and after it, in seconds (a stretch of speech is at most
+    /// about 30 s, `Speech`).
+    static let speechAround = 30.0
     /// The latest `moment` asked for, in seconds: far past any recording's end, and a time a clock can still say.
     static let latestMoment = Double(Int32.max)
     /// `search_files`' results: by default, and at most.
@@ -372,7 +378,8 @@ final class MCPServer {
     /// What AI apps may see of the main index, as the filter every search, count and lookup starts from: no Photos
     /// library's file until Photos is allowed, then, until hidden items are too, only the files whose assets their
     /// library's last listing vouches for (`PhotosLibrary.visibleAssets`), found by path: one the listing doesn't
-    /// name, or of a library with no listing, stays out.
+    /// name, or of a library with no listing, stays out. Until pictures rated sensitive are allowed, no picture or
+    /// video rated sensitive at the position the app's Sensitive filter goes by, and none not rated yet.
     private func visible(to access: AIAccess, in store: IndexStore) throws -> SearchFilter {
         var filter = SearchFilter()
         if !access.photos {
@@ -380,6 +387,7 @@ final class MCPServer {
         } else if !access.hiddenPhotos {
             filter.photosOnly = try store.photosFiles(shownBy: visibleAssets(of:))
         }
+        if !access.sensitive { filter.leavingOutSensitive = SensitivePosition(settings).filterPosition }
         return filter
     }
 
@@ -398,7 +406,11 @@ final class MCPServer {
     private func unseen(_ path: String, access: AIAccess) throws -> Outcome {
         let ofPhotos = PhotosLibrary.library(containing: path) != nil
         if ofPhotos, !access.photos { return .refused(.photos) }
-        if ofPhotos, try mainIndex().store.file(at: path, keptBy: SearchFilter()) != nil { return .unseen(.hidden) }
+        let store = try mainIndex().store
+        var withSensitive = try visible(to: access, in: store)
+        withSensitive.leavingOutSensitive = nil
+        if !access.sensitive, try store.file(at: path, keptBy: withSensitive) != nil { return .unseen(.sensitive) }
+        if ofPhotos, try store.file(at: path, keptBy: SearchFilter()) != nil { return .unseen(.hidden) }
         if !access.code, try codeIndex()?.store.file(at: path, keptBy: SearchFilter()) != nil {
             return .unseen(.code)
         }
@@ -409,7 +421,8 @@ final class MCPServer {
 
     private func searchFiles(_ arguments: [String: Any], access: AIAccess) throws -> Outcome {
         let input = try Input(arguments, allowed: ["query", "kind", "people", "albums", "photos_favorites",
-                                                   "digup_favorites", "from", "taken_within", "limit"])
+                                                   "digup_favorites", "from", "taken_within", "length", "shape",
+                                                   "limit"])
         var query = try input.string("query")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let kind = try input.choice("kind", of: Self.kindNames.values.sorted())
         let limit = try input.integer("limit", in: 1...Self.maxLimit) ?? Self.defaultLimit
@@ -418,12 +431,14 @@ final class MCPServer {
         let digupFavorites = try input.bool("digup_favorites") ?? false
         let from = try input.choice("from", of: ["mine", "saved", "imported"])
         let area = try input.area("taken_within")
+        let length = try input.length("length"), shape = try input.shape("shape")
 
         let codeWords = CodeQuery.text(of: query)
         if kind == Self.kindNames[.code] || codeWords != nil {
             guard access.code else { return .refused(.code) }
-            guard people == nil, albums == nil, !photosFavorites, !digupFavorites, from == nil, area == nil else {
-                throw InputError("Code search takes no Photos, favorites or map filters.")
+            guard people == nil, albums == nil, !photosFavorites, !digupFavorites, from == nil, area == nil,
+                  length == nil, shape == nil else {
+                throw InputError("Code search takes no Photos, favorites, map, length or shape filters.")
             }
             query = codeWords ?? query   // none ("code:" alone, or the kind alone): the newest code files
             guard let code = try codeIndex() else {
@@ -435,7 +450,8 @@ final class MCPServer {
 
         let photosOnly = people != nil || albums != nil || photosFavorites || from != nil
         if photosOnly, !access.photos { return .refused(.photos) }
-        guard !query.isEmpty || photosOnly || digupFavorites || area != nil || kind != nil else {
+        guard !query.isEmpty || photosOnly || digupFavorites || area != nil || length != nil || shape != nil
+                || kind != nil else {
             throw InputError("Say what to look for (query), or give a kind or a filter to list what it keeps.")
         }
         let main = try mainIndex()
@@ -476,6 +492,7 @@ final class MCPServer {
         }
         if digupFavorites { filter.paths = try favoritePaths(in: store) }
         filter.area = area
+        (filter.length, filter.shape) = (length, shape)
         let kinds = kind.flatMap { name in Self.kindNames.first { $0.value == name }?.key }.map { Set([$0]) }
         return try search(query, in: main, kinds: kinds, filter: filter, limit: limit, prompt: Prompts.query)
     }
@@ -563,7 +580,7 @@ final class MCPServer {
         guard let loc = hit.loc else { return nil }
         switch hit.segment {
         case .page, .pageImage: return "page \(Int(loc))"
-        case .frame where hit.kind != .image, .audio:
+        case .frame where hit.kind != .image, .audio, .speech:
             let end = hit.locEnd.flatMap { $0 > loc ? "–" + MatchDescription.clock($0) : nil } ?? ""
             return MatchDescription.clock(loc) + end
         case .lines, .cells: return MatchDescription.span(hit.segment, loc: loc, locEnd: hit.locEnd)
@@ -589,14 +606,26 @@ final class MCPServer {
         var found = try store.words(of: path, keptBy: allowed)
         if found == nil, access.code { found = try codeIndex()?.store.words(of: path, keptBy: SearchFilter()) }
         guard let words = found else { return try unseen(path, access: access) }
-        if moment != nil {
-            return .error("DigUp keeps no words of a recording yet, only what's seen and heard in it: "
-                          + "leave out moment.")
+        let parts: [IndexStore.Words]
+        if let moment {
+            let said = words.filter { $0.segment == .speech }
+            guard !said.isEmpty else {
+                return .error("DigUp has no words said in that file (it reads what's said in recordings on this Mac): "
+                              + "leave out moment.")
+            }
+            parts = said.filter {
+                ($0.locEnd ?? $0.loc ?? 0) >= moment - Self.speechAround && ($0.loc ?? 0) <= moment + Self.speechAround
+            }
+            if parts.isEmpty {
+                return .error("DigUp has no words said within \(Int(Self.speechAround)) s of "
+                              + "\(MatchDescription.clock(moment)) in that file.")
+            }
+        } else if let page {
+            parts = words.filter { ($0.segment == .page || $0.segment == .pageImage) && $0.loc.map(Int.init) == page }
+            if parts.isEmpty { return .error("DigUp has no words of page \(page) of that file.") }
+        } else {
+            parts = words
         }
-        let parts = page.map { page in
-            words.filter { ($0.segment == .page || $0.segment == .pageImage) && $0.loc.map(Int.init) == page }
-        } ?? words
-        if let page, parts.isEmpty { return .error("DigUp has no words of page \(page) of that file.") }
         var left = Self.readLimit, truncated = false
         var read: [[String: Any]] = []
         for part in parts where left > 0 {
@@ -626,7 +655,8 @@ final class MCPServer {
         return (path, page, moment)
     }
 
-    /// Where a part of a file's words is: its page, passage or lines; what Photos knows of it; the text in a picture.
+    /// Where a part of a file's words is: its page, passage or lines; what Photos knows of it; the text in a picture;
+    /// when it's said in a recording.
     static func whereRead(_ words: IndexStore.Words) -> String? {
         switch words.segment {
         case .page, .pageImage: words.loc.map { "page \(Int($0))" }
@@ -634,6 +664,7 @@ final class MCPServer {
         case .lines, .cells: MatchDescription.span(words.segment, loc: words.loc, locEnd: words.locEnd)
         case .ocr: "the text in the picture"
         case .photosInfo: "what Photos knows about it"
+        case .speech: words.loc.map { MatchDescription.clock($0) + "–" + MatchDescription.clock(words.locEnd ?? $0) }
         default: nil
         }
     }
@@ -674,14 +705,20 @@ final class MCPServer {
 
     // MARK: status
 
+    /// The index as AI apps may see it, and how many of the pictures and videos they could otherwise see wait to be
+    /// rated (kept from them until then, while pictures rated sensitive are off).
     private func status(access: AIAccess) throws -> Outcome {
         let store = try mainIndex().store
-        var fields = Self.summary(try store.counts(keeping: try visible(to: access, in: store)))
+        let allowed = try visible(to: access, in: store)
+        var fields = Self.summary(try store.counts(keeping: allowed))
         if access.code, let code = try codeIndex() {
             fields["code"] = Self.summary(try code.store.counts(keeping: SearchFilter()))
         }
+        var unrated = allowed
+        unrated.leavingOutSensitive = nil
+        fields["pictures_waiting_to_be_rated"] = try store.unratedFiles(keptBy: unrated)
         fields["access"] = ["photos": access.photos, "hidden_photos": access.hiddenPhotos, "code": access.code,
-                            "pictures": access.pictures]
+                            "pictures": access.pictures, "sensitive_pictures": access.sensitive]
         return .data(fields, results: 1)
     }
 
@@ -785,6 +822,33 @@ final class MCPServer {
             }
             return SearchFilter.Area(latitudes: edges[0]...edges[2], longitudes: edges[1]...edges[3])
         }
+
+        /// How long, in seconds: at least `at_least` and shorter than `under`, either left out but not both, neither
+        /// over ten years (`SearchFilter.Length.longest`).
+        func length(_ key: String) throws -> SearchFilter.Length? {
+            guard let value = value(key) else { return nil }
+            let range = value as? [String: Any] ?? [:]
+            let bounds = range.mapValues { ($0 as? NSNumber).flatMap { MCPServer.isBoolean($0) ? nil : $0.doubleValue } }
+            guard value is [String: Any], Set(range.keys).isSubset(of: ["at_least", "under"]),
+                  bounds.values.allSatisfy({ $0 != nil }),
+                  let length = SearchFilter.Length(atLeast: bounds["at_least"] ?? nil, under: bounds["under"] ?? nil)
+            else {
+                throw InputError("\(key) is {at_least, under} in seconds, either left out but not both: at_least 0 or "
+                                 + "more, under above it, neither over \(Int(SearchFilter.Length.longest)) (ten years) "
+                                 + "(under 15 s: {under: 15}; 5 min or longer: {at_least: 300}).")
+            }
+            return length
+        }
+
+        /// A shape as it's shown: portrait, landscape, square, wide, or an exact ratio "W:H".
+        func shape(_ key: String) throws -> SearchFilter.Shape? {
+            guard let text = try string(key) else { return nil }
+            guard let shape = SearchFilter.Shape(text) else {
+                throw InputError("\(key) is portrait, landscape, square, wide, or an exact ratio W:H in whole numbers "
+                                 + "from 1 to 99 (16:9, 9:16, 4:3).")
+            }
+            return shape
+        }
     }
 
     // MARK: The tools' descriptions
@@ -807,7 +871,8 @@ final class MCPServer {
         ["path": ["type": "string", "description": "A path search_files returned."],
          "page": ["type": "integer", "minimum": 1, "description": "A PDF's page, from 1."],
          "moment": ["type": "number", "minimum": 0, "maximum": latestMoment,
-                    "description": "Seconds into a recording."]]
+                    "description": "Seconds into a recording: what's said around then (read_text), or the frame there "
+                        + "(get_picture)."]]
     }
 
     /// The four tools (MCP-PLAN.md, "Tools").
@@ -833,6 +898,19 @@ final class MCPServer {
                                             "east": ["type": "number", "minimum": -180, "maximum": 180]],
                              "required": ["south", "west", "north", "east"], "additionalProperties": false,
                              "description": "Only what was taken inside this box on the map, in degrees."],
+            "length": ["type": "object",
+                       "properties": ["at_least": ["type": "number", "minimum": 0,
+                                                   "maximum": SearchFilter.Length.longest],
+                                      "under": ["type": "number", "exclusiveMinimum": 0,
+                                                "maximum": SearchFilter.Length.longest]],
+                       "minProperties": 1, "additionalProperties": false,
+                       "description": "Only videos and recordings this long, in seconds: at least at_least and "
+                        + "shorter than under, either left out (under 15 s: {under: 15}; 15 s to 1 min: {at_least: 15, "
+                        + "under: 60}; 5 min or longer: {at_least: 300})."],
+            "shape": ["type": "string", "pattern": "^(portrait|landscape|square|wide|[1-9][0-9]?:[1-9][0-9]?)$",
+                      "description": "Only pictures and videos of this shape as they're shown: portrait, landscape, "
+                        + "square (sides within 5 %), wide (2:1 or wider: panoramas, cinema), or an exact ratio W:H "
+                        + "matched within 2 %, its orientation included (16:9 landscape, 9:16 portrait, 4:3, 3:2)."],
             "limit": ["type": "integer", "minimum": 1, "maximum": maxLimit, "default": defaultLimit,
                       "description": "How many results at most."],
         ]
@@ -846,7 +924,8 @@ final class MCPServer {
                  properties: searchProperties),
             tool("read_text", title: "Read a file's words",
                  description: "The words DigUp read from one file search_files returned: a document's text, a PDF's "
-                    + "page, the text in a screenshot, what Photos knows about a picture, a stretch of code. Up to "
+                    + "page, the text in a screenshot, what Photos knows about a picture, a stretch of code, what's "
+                    + "said in a recording (with moment: what's said within \(Int(speechAround)) s of it). Up to "
                     + "\(readLimit) characters.",
                  properties: pathAndPlaceProperties, required: ["path"]),
             tool("get_picture", title: "Look at a file",
@@ -856,7 +935,8 @@ final class MCPServer {
                  properties: pathAndPlaceProperties, required: ["path"]),
             tool("status", title: "DigUp's index",
                  description: "How many of the user's files DigUp has indexed, of which kinds, whether it's still "
-                    + "reading some, and what the user lets AI apps see.",
+                    + "reading some, how many pictures wait to be rated (unseen until then, unless the user lets AI "
+                    + "apps see pictures rated sensitive), and what the user lets AI apps see.",
                  properties: [:]),
         ]
     }

@@ -267,7 +267,7 @@ final class SearchModel {
         didSet { if area != oldValue { run() } }
     }
     /// The filters on besides the kind and the map's area, in the order they were put on: Photos' people (each one in
-    /// the picture), albums (in any of them) and favorites.
+    /// the picture), albums (in any of them), favorites and From, DigUp's favorites, Sensitive, Length and Shape.
     var tokens: [FilterToken] = [] {
         didSet { if tokens != oldValue { run() } }
     }
@@ -318,6 +318,11 @@ final class SearchModel {
         if has(.shotOnMyDevices) { run() }
     }
 
+    /// "Blur sensitive pictures" moved: a search with the Sensitive filter on runs again at the new position.
+    func sensitivePositionChanged() {
+        if has(.sensitive) { run() }
+    }
+
     /// Every result shown, in order (strong ones, then the weaker ones once they're unfolded).
     var rows: [ResultRow] { results.ranked + (showWeaker ? results.weaker : []) }
 
@@ -334,6 +339,9 @@ final class SearchModel {
             case .shotOnMyDevices: filter.shotOn = Set(myDevices)   // empty: still filtering (`SearchFilter.shotOn`)
             case .origin(let origin): filter.origins = [origin.rawValue]
             case .area: break
+            case .sensitive: filter.sensitive = model.settings.blurSensitive.filterPosition
+            case .length(let length): filter.length = length
+            case .shape(let shape): filter.shape = shape
             }
         }
         return filter
@@ -404,8 +412,8 @@ final class SearchModel {
             if !on { area = nil }
         } else if on {
             guard !has(token) else { return }
-            // One "From" at a time: the one picked replaces the other.
-            tokens = (token.isFrom ? tokens.filter { !$0.isFrom } : tokens) + [token]
+            // One From, one Length and one Shape at a time: the one picked replaces the other.
+            tokens = tokens.filter { $0.choice == nil || $0.choice != token.choice } + [token]
         } else {
             tokens.removeAll { $0.id == token.id }
         }
@@ -457,9 +465,12 @@ final class SearchModel {
         case .photosFavorites: .photosFavorites
         case .digupFavorites: .digupFavorites
         case .shotOnMyDevices: .from(.mine)
-        // The window's From offers these two origins (`PhotosFilterMenus`).
+        // The window's From offers these two origins (`FilterMenuItem.items`).
         case .origin(let origin): SavedSearch.From(rawValue: origin.rawValue).map { .from($0) }
         case .area: area.map { .area(SavedSearch.Area($0)) }
+        case .sensitive: .sensitive
+        case .length(let length): .length(length)
+        case .shape(let shape): .shape(shape)
         }
     }
 
@@ -502,6 +513,9 @@ final class SearchModel {
             case .from(.saved): tokens.append(.origin(.saved))
             case .from(.imported): tokens.append(.origin(.imported))
             case .area(let box): area = box.searchArea
+            case .sensitive: tokens.append(.sensitive)
+            case .length(let length): tokens.append(.length(length))
+            case .shape(let shape): tokens.append(.shape(shape))
             }
         }
         runsHeld = true
@@ -737,7 +751,8 @@ struct SearchWindowView: View {
             .padding(.leading, 78)   // beside the window buttons
             .frame(height: 52)
             .zIndex(1)   // over the chips below it, for the suggestions
-            // The chips scroll sideways when the window is too narrow for all of them.
+            // All, the kinds and ♥ Favorites as chips, every other filter in the Filters menu: the row fits the
+            // window's 1,040 points. It scrolls sideways in a window narrower than that.
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     KindFilters(search: search, showsCode: model.hasCode)
@@ -753,10 +768,7 @@ struct SearchWindowView: View {
                         .buttonStyle(.plain)
                         .help("Favorites: only what you've marked ♥ in DigUp (\(search.favorites.count))")
                         .accessibilityAddTraits(search.has(.digupFavorites) ? .isSelected : [])
-                    }
-                    if search.searchesPhotos, !search.isCode {
-                        Divider().frame(height: 16).padding(.horizontal, 2)
-                        PhotosFilterMenus(search: search)
+                        FiltersMenu(search: search)
                     }
                 }
             }
@@ -1011,8 +1023,10 @@ private struct ResultsGrid: View {
     private func cell(_ row: ResultRow) -> some View {
         GridCell(row: row, selected: row.id == search.selectedRow?.id, favorite: search.favorites.contains(row))
             .id(row.id)
-            .overlay(FileDragArea(url: row.url, openTitle: row.openTitle, onClick: { search.select(row) },
-                                  onOpen: { search.open(row) }))
+            .overlay(FileDragArea(url: row.url, openTitle: row.openTitle, onClick: {
+                SensitiveBlur.shared.show(row)   // a click shows a blurred picture
+                search.select(row)
+            }, onOpen: { search.open(row) }))
     }
 }
 
@@ -1034,7 +1048,9 @@ private struct GridCell: View {
                             .font(.system(size: 34, weight: .light))
                             .foregroundStyle(Brand.gradient)
                     } else {
-                        MomentThumbnail(row: row)
+                        let hidden = SensitiveBlur.shared.hides(row)
+                        MomentThumbnail(row: row, hidden: hidden)
+                            .sensitiveCover(hidden, iconSize: 20)
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -1196,9 +1212,11 @@ private struct CodeOffOrHint: View {
     }
 }
 
-/// A grid cell's picture: the video frame or PDF page that matched (from the preview cache), else Quick Look's.
+/// A grid cell's picture: the video frame or PDF page that matched (from the preview cache), else Quick Look's; veiled
+/// while it's `hidden` (`SensitiveBlur`).
 private struct MomentThumbnail: View {
     let row: ResultRow
+    var hidden = false
     @State private var image: NSImage?
     @Environment(\.displayScale) private var scale
 
@@ -1206,7 +1224,7 @@ private struct MomentThumbnail: View {
         Group {
             if let image {
                 // A page shows its top (its title), anything else its middle.
-                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                Image(nsImage: image.veiled(hidden)).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: row.page == nil ? .center : .top)
             } else {
                 Image(nsImage: NSWorkspace.shared.icon(forFile: row.url.path))

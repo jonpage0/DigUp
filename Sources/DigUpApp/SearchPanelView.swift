@@ -197,7 +197,10 @@ private struct ResultList: View {
                             PanelRow(row: row, selected: row.id == controller.selection)
                                 .id(row.id)
                                 .overlay(FileDragArea(url: row.url, openTitle: row.openTitle,
-                                                      onClick: { controller.select(row) },
+                                                      onClick: {
+                                                          SensitiveBlur.shared.show(row.filePicture)
+                                                          controller.select(row)
+                                                      },
                                                       onOpen: {
                                                           controller.select(row)
                                                           controller.openSelected()
@@ -229,7 +232,10 @@ private struct ResultList: View {
                                     .id(row.id)
                                     .opacity(0.85)
                                     .overlay(FileDragArea(url: row.url, openTitle: row.openTitle,
-                                                          onClick: { controller.select(row) },
+                                                          onClick: {
+                                                              SensitiveBlur.shared.show(row.filePicture)
+                                                              controller.select(row)
+                                                          },
                                                           onOpen: {
                                                               controller.select(row)
                                                               controller.openSelected()
@@ -272,7 +278,9 @@ private struct PanelRow: View {
     var body: some View {
         HStack(spacing: 10) {
             // Code's thumbnail would be a page of tiny text: its file type's icon says more.
-            ThumbnailView(url: row.url, side: 36, iconOnly: row.kind == .code)
+            let hidden = SensitiveBlur.shared.hides(row.filePicture)
+            ThumbnailView(url: row.url, side: 36, iconOnly: row.kind == .code, veiled: hidden)
+                .sensitiveCover(hidden, iconSize: 11)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(row.title)
@@ -361,14 +369,17 @@ struct ThumbnailView: View {
     var side: CGFloat = ThumbnailView.side
     /// The file type's icon, not a picture of the file.
     var iconOnly = false
+    /// Veiled, as a picture rated sensitive is while it's blurred (`SensitiveBlur`).
+    var veiled = false
     @State private var image: NSImage?
     @Environment(\.displayScale) private var scale
 
     var body: some View {
         ZStack {
             if let image {
-                Image(nsImage: image)
+                Image(nsImage: image.veiled(veiled))
                     .resizable()
+                    .interpolation(.high)
                     .aspectRatio(contentMode: .fill)
             } else {
                 Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
