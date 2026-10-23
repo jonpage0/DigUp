@@ -9,7 +9,7 @@ import SwiftUI
 final class CustomWhenSheet {
     private var sheet: NSWindow?
     private unowned let app: AppController
-    /// The open sheet's Use (`-debugWhenSheet use` presses it), and its days (`-debugWhenThrough` sets one).
+    /// The open sheet's Use (`-debugWhenSheet use` presses it), and its days.
     private(set) var use: (() -> Void)?
     private(set) var range: CustomWhenRange?
 
@@ -50,15 +50,29 @@ final class CustomWhenSheet {
     func snapshot(to url: URL) throws {
         try Snapshot.write(sheet, to: url)
     }
+
+    /// The open sheet's date pickers, From's then Through's (`-debugWhenThrough` picks a day on one, as a click
+    /// would); none while it's closed.
+    var datePickers: [NSDatePicker] {
+        guard let view = sheet?.contentView else { return [] }
+        view.layoutSubtreeIfNeeded()
+        func pickers(in view: NSView) -> [NSDatePicker] {
+            (view as? NSDatePicker).map { [$0] } ?? view.subviews.flatMap(pickers(in:))
+        }
+        return pickers(in: view).sorted { $0.convert($0.bounds, to: nil).maxY > $1.convert($1.bounds, to: nil).maxY }
+    }
 }
 
-/// The days Custom Range… is asking for: a first day and a last one, each on or left open. What Use puts on is the
-/// kit's (`SearchFilter.When(from:through:)`), so it's never a When the saved searches' reader refuses, and a range
-/// opened here comes back as it was when nothing is changed.
+/// The days Custom Range… is asking for: a first day and a last one, each on or left open. They're days of the
+/// calendar, as a When keeps them, not moments: an end whose picker isn't touched stays the day it was, so a range
+/// opened here and used as it is comes back as it was, and Use puts on the kit's When of them
+/// (`SearchFilter.When(first:last:)`), never one the saved searches' reader refuses. The pickers show days in
+/// `SearchFilter.Day.pickerZone`, where every day is one (the Mac's zone may have skipped one: Samoa's 2011-12-30),
+/// so a day picked is the day shown.
 @Observable
 final class CustomWhenRange {
-    var from: Date
-    var through: Date
+    var from: SearchFilter.Day
+    var through: SearchFilter.Day
     var hasFrom = true
     var hasThrough = true
 
@@ -66,22 +80,29 @@ final class CustomWhenRange {
     static let defaultDays = 30
 
     /// The days From offers: every day a When takes (`SearchFilter.Day.years`).
-    static var fromDays: ClosedRange<Date> { SearchFilter.Day.first.start()...SearchFilter.Day.last.start() }
-    /// The days Through offers: every one but the last, which has no day after it for the range to stop before.
+    static var fromDays: ClosedRange<Date> { SearchFilter.Day.first.pickerDate...SearchFilter.Day.last.pickerDate }
+    /// The days Through offers: every one but the last, which has no day after it for the range to stop before (the
+    /// moment before it starts is on the day before, in the pickers' zone).
     static var throughDays: ClosedRange<Date> {
-        SearchFilter.Day.first.start()...SearchFilter.Day.last.start().addingTimeInterval(-1)
+        SearchFilter.Day.first.pickerDate...SearchFilter.Day.last.pickerDate.addingTimeInterval(-1)
+    }
+    /// The calendar the pickers show days in: the user's, in `SearchFilter.Day.pickerZone`.
+    static var pickerCalendar: Calendar {
+        var calendar = Calendar.current
+        calendar.timeZone = SearchFilter.Day.pickerZone
+        return calendar
     }
 
     /// `current`'s days, or for the last so many days, those days up to today; without one, the past month.
     init(_ current: SearchFilter.When?) {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        func daysAgo(_ days: Int) -> Date { calendar.date(byAdding: .day, value: -days, to: today) ?? today }
+        // Today here; a clock past the last day there is has none, and Use then says why it can't be pressed.
+        let today = SearchFilter.Day(Date()) ?? .last
+        func daysAgo(_ days: Int) -> SearchFilter.Day { today.adding(days: -days) ?? .first }
         switch current?.span {
         case .days(let after, let before):
             (hasFrom, hasThrough) = (after != nil, before != nil)
-            from = after?.start() ?? daysAgo(Self.defaultDays)
-            through = current?.lastDay?.start() ?? today
+            from = current?.firstDay ?? daysAgo(Self.defaultDays)
+            through = current?.lastDay ?? today
         case .lastDays(let days):
             (from, through) = (daysAgo(days), today)
         case nil:
@@ -89,19 +110,24 @@ final class CustomWhenRange {
         }
     }
 
-    /// What Use puts on: from the first day to the day after the last (a When's `before` isn't kept); nil with
-    /// neither end, a day outside what the pickers offer, or the first day after the last.
+    /// One end's picker selection: its day as the picker is given it, and the day picked when one is; an end whose
+    /// picker isn't touched keeps its day as it is.
+    func picker(for end: ReferenceWritableKeyPath<CustomWhenRange, SearchFilter.Day>) -> Binding<Date> {
+        Binding(get: { self[keyPath: end].pickerDate },
+                set: { if let day = SearchFilter.Day(pickerDate: $0) { self[keyPath: end] = day } })
+    }
+
+    /// What Use puts on: from the first day through the last; nil with neither end, a last day with no day after it,
+    /// or the first day after the last.
     var when: SearchFilter.When? {
-        SearchFilter.When(from: hasFrom ? from : nil, through: hasThrough ? through : nil)
+        SearchFilter.When(first: hasFrom ? from : nil, last: hasThrough ? through : nil)
     }
 
     /// Why Use can't be pressed, if it can't.
     var problem: String? {
         guard when == nil else { return nil }
         guard hasFrom || hasThrough else { return "Choose a first day, a last day, or both." }
-        let outside = hasFrom && SearchFilter.Day(from) == nil
-            || hasThrough && SearchFilter.Day(through)?.adding(days: 1) == nil
-        guard outside else { return "The first day is after the last." }
+        guard hasThrough, through.adding(days: 1) == nil else { return "The first day is after the last." }
         return "Choose days from " + (SearchFilter.When(after: .first, before: .last)?.title ?? "") + "."
     }
 }
@@ -118,19 +144,22 @@ private struct CustomWhenView: View {
             Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                 GridRow {
                     Toggle("From", isOn: $range.hasFrom)
-                    DatePicker("From", selection: $range.from, in: CustomWhenRange.fromDays,
+                    DatePicker("From", selection: range.picker(for: \.from), in: CustomWhenRange.fromDays,
                                displayedComponents: .date)
                         .labelsHidden()
                         .disabled(!range.hasFrom)
                 }
                 GridRow {
                     Toggle("Through", isOn: $range.hasThrough)
-                    DatePicker("Through", selection: $range.through, in: CustomWhenRange.throughDays,
+                    DatePicker("Through", selection: range.picker(for: \.through), in: CustomWhenRange.throughDays,
                                displayedComponents: .date)
                         .labelsHidden()
                         .disabled(!range.hasThrough)
                 }
             }
+            // The days as they are, wherever the Mac is (`SearchFilter.Day.pickerZone`).
+            .environment(\.timeZone, SearchFilter.Day.pickerZone)
+            .environment(\.calendar, CustomWhenRange.pickerCalendar)
             Text(range.problem ?? "Files from these days, both included: when Photos or the camera says it was taken, "
                  + "else when the file was last changed. Turn an end off to leave it open.")
                 .font(.system(size: 11))

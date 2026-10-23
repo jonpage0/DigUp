@@ -140,11 +140,25 @@ extension SearchFilter {
             return overflow ? nil : Day(daysSince1970: days)
         }
 
-        /// When it starts in `zone`: its midnight, or its first moment where a change of the clocks skips midnight.
-        /// (Foundation's calendar has every day of `years` as the kit does, so it's the day `init(_:in:)` reads back.)
+        /// When it starts in `zone`: its midnight, or its first moment where a change of the clocks skips midnight. A
+        /// day the zone skipped altogether crossing the date line (Samoa's 2011-12-30, Kwajalein's 1993-08-21) has no
+        /// moment there: it gets the next day's start, which `init(_:in:)` reads as the next day.
         public func start(in zone: TimeZone = .current) -> Date {
             Self.calendar(in: zone).date(from: DateComponents(year: year, month: month, day: day))
                 ?? Date(timeIntervalSince1970: Double(daysSince1970 * 86_400))
+        }
+
+        /// The zone a date picker shows days in (Custom Range…'s), whatever zone the Mac is in: UTC, where every day
+        /// of the calendar is a day of the clock. In a zone that skipped a day no moment shows it, so a range ending on
+        /// it can't be shown there, and came back a day longer (cold review WHEN-2).
+        public static let pickerZone = TimeZone.gmt
+
+        /// The moment a date picker in `pickerZone` is given to show it: its start there.
+        public var pickerDate: Date { start(in: Self.pickerZone) }
+
+        /// The day a date picker in `pickerZone` shows for `date`; nil when that's no day of `years`.
+        public init?(pickerDate date: Date) {
+            self.init(date, in: Self.pickerZone)
         }
 
         static func calendar(in zone: TimeZone) -> Calendar {
@@ -211,21 +225,24 @@ extension SearchFilter {
             self.init(after: after, before: before)
         }
 
-        /// The days from `from` to `through`, both kept, as the window's Custom Range… picks them: the days those
-        /// moments are on in `zone`, either left out but not both. Nil for a moment on no day there is (`Day.years`),
-        /// a `through` on the last one (no day after it to stop before), or `from` after `through`: every When made so
-        /// is one the strict reader reads.
-        public init?(from: Date?, through: Date?, in zone: TimeZone = .current) {
-            var after: Day?, before: Day?
-            if let from {
-                guard let day = Day(from, in: zone) else { return nil }
-                after = day
+        /// The days from `first` to `last`, both kept, as the window's Custom Range… holds them, either left out but
+        /// not both. Civil days, not moments: a range opened there and used as it is comes back as it was, wherever
+        /// the Mac is (`firstDay` and `lastDay` are what it opens with). Nil for a `last` that's the last day (no day
+        /// after it to stop before), or `first` after `last`: every When made so is one the strict reader reads.
+        public init?(first: Day?, last: Day?) {
+            var before: Day?
+            if let last {
+                guard let next = last.adding(days: 1) else { return nil }
+                before = next
             }
-            if let through {
-                guard let day = Day(through, in: zone)?.adding(days: 1) else { return nil }
-                before = day
-            }
-            self.init(after: after, before: before)
+            self.init(after: first, before: before)
+        }
+
+        /// The first day it keeps (`after`), as Custom Range… shows it; nil when it's open at that end, or for the
+        /// last so many days.
+        public var firstDay: Day? {
+            guard case .days(let after?, _) = span else { return nil }
+            return after
         }
 
         /// The last day it keeps, the day before `before`, as Custom Range… shows it; nil when it's open at that end,
