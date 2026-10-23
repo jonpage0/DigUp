@@ -142,20 +142,22 @@ import Testing
         }
         // As saved-searches.json keeps it (approved): local days, either left out, or a number of days.
         for json in [#"{"after":"2026-07-01","before":"2026-08-01"}"#, #"{"after":"2026-07-01"}"#,
-                     #"{"before":"2026-08-01"}"#, #"{"lastDays":90}"#, #"{"lastDays":1}"#, #"{"lastDays":36500}"#] {
+                     #"{"before":"2026-08-01"}"#, #"{"lastDays":90}"#, #"{"lastDays":1}"#, #"{"lastDays":36500}"#,
+                     #"{"after":"9999-12-31"}"#, #"{"before":"1583-01-02"}"#] {
             let when = try #require(read(json), "\(json)")
             #expect(String(decoding: try encoder.encode(when), as: UTF8.self) == json)
         }
         #expect(read(#"{"lastDays":90}"#) == SearchFilter.When(lastDays: 90))
         #expect(read(#"{"before":"2026-08-01","after":"2026-07-01"}"#) == (try when("2026-07-01..2026-08-01")))
-        // Not the shape: no day, days the wrong way round or the same, a day the calendar doesn't have or written
-        // another way, a day that's null or not text, a number of days that's 0, over 36,500, not whole or not a
-        // number, both forms at once, another key.
+        // Not the shape: no day, days the wrong way round or the same, a day the calendar doesn't have, of a year
+        // before 1583 or written another way, a `before` that leaves no last day, a day that's null or not text, a
+        // number of days that's 0, over 36,500, not whole or not a number, both forms at once, another key.
         for bad in ["{}", #"{"after":"2026-08-01","before":"2026-07-01"}"#,
                     #"{"after":"2026-07-01","before":"2026-07-01"}"#, #"{"after":"2026-02-30"}"#,
                     #"{"after":"2026-7-1"}"#, #"{"after":"2026/07/01"}"#, #"{"after":"2026-07-01T00:00:00Z"}"#,
                     #"{"after":" 2026-07-01"}"#, #"{"after":"+026-07-01"}"#, #"{"after":"٢٠٢٦-٠٧-٠١"}"#,
-                    #"{"after":"0000-01-01"}"#, #"{"after":null}"#, #"{"after":20260701}"#, #"{"lastDays":0}"#,
+                    #"{"after":"0000-01-01"}"#, #"{"after":"1582-12-31"}"#, #"{"before":"1583-01-01"}"#,
+                    #"{"before":"10000-01-01"}"#, #"{"after":null}"#, #"{"after":20260701}"#, #"{"lastDays":0}"#,
                     #"{"lastDays":36501}"#, #"{"lastDays":-1}"#, #"{"lastDays":1.5}"#, #"{"lastDays":"90"}"#,
                     #"{"lastDays":true}"#, #"{"lastDays":null}"#, #"{"lastDays":1e30}"#,
                     #"{"lastDays":90,"after":"2026-07-01"}"#, #"{"last_days":90}"#,
@@ -186,6 +188,85 @@ import Testing
         #expect(try when("2026-07-31..2026-08-01").title.contains("31") && !(try when("2026-07-31..2026-08-01").title)
             .contains(" – "))
         #expect(try when("2026-07-01..").title.hasPrefix("Since ") && when("..2026-08-01").title.hasPrefix("Before "))
+    }
+
+    // MARK: Custom Range…
+
+    /// Where ranges are picked and shown: here, a zone whose clocks skipped midnight (São Paulo's summer time began
+    /// at 00:00 on 2018-11-04), and zones far east and west.
+    static let zones = [TimeZone.current] + ["America/Sao_Paulo", "Asia/Tokyo", "Pacific/Kiritimati",
+                                             "Pacific/Pago_Pago", "America/Chicago"]
+        .compactMap(TimeZone.init(identifier:))
+
+    /// The cold review's steps (WHEN-1): Custom Range… on a range that ends on the last day there is, its Through moved
+    /// to that day, made a When whose `before` (10000-01-01) the strict reader refuses, and the saved searches with
+    /// it couldn't be read. No range Custom Range… makes is one the reader refuses.
+    @Test func noRangeCustomRangeMakesIsOneTheReaderRefuses() throws {
+        let last = try day("9999-12-31")
+        #expect(SearchFilter.When(from: try day("9999-12-30").start(), through: last.start()) == nil)
+        // Every range made from days at the ends of what it offers, and just past them, is read back as written.
+        let encoder = JSONEncoder(), decoder = JSONDecoder()
+        for zone in Self.zones {
+            let first = try day("1583-01-01").start(in: zone)
+            let edges = [first.addingTimeInterval(-1), first, try day("1583-01-02").start(in: zone),
+                         try day("2026-07-01").start(in: zone), try day("9999-12-30").start(in: zone),
+                         last.start(in: zone), last.start(in: zone).addingTimeInterval(86_400 * 2)]
+            for from in edges.map(Optional.some) + [nil] {
+                for through in edges.map(Optional.some) + [nil] {
+                    guard let made = SearchFilter.When(from: from, through: through, in: zone) else { continue }
+                    #expect((try? decoder.decode(SearchFilter.When.self, from: encoder.encode(made))) == made,
+                            "\(made.text) in \(zone.identifier)")
+                }
+            }
+        }
+    }
+
+    /// And a range opened in it comes back as it was when nothing is changed (the cold review: "..0001-01-01" came
+    /// back as "..0002-01-01"), wherever the Mac is.
+    @Test func aRangeOpenedInCustomRangeComesBackAsItWas() throws {
+        for text in ["2026-07-01..2026-08-01", "2026-07-31..2026-08-01", "..2026-08-01", "2026-07-01..",
+                     "2018-11-03..2018-11-05", "..1583-01-02", "1583-01-01..1583-01-02", "9999-12-30..9999-12-31",
+                     "9999-12-31..", "..0001-01-01", "1582-10-10..1582-10-20"] {
+            guard let opened = SearchFilter.When(text) else { continue }   // the reader refuses it: never opened
+            let after: SearchFilter.Day? = if case .days(let after, _) = opened.span { after } else { nil }
+            for zone in Self.zones {
+                #expect(SearchFilter.When(from: after?.start(in: zone), through: opened.lastDay?.start(in: zone),
+                                          in: zone) == opened, "\(text) in \(zone.identifier)")
+            }
+        }
+    }
+
+    /// A day is in the years 1583 to 9999: ISO 8601's without prior agreement, and the ones this Mac's calendar
+    /// writes as the kit does (Foundation's reads days before October 15, 1582 as Julian ones, ten days off). Nothing
+    /// makes another: not a moment, not counting days on, not a range's end.
+    @Test func aDayIsFrom1583To9999AndNothingMakesAnother() throws {
+        let first = try day("1583-01-01"), last = try day("9999-12-31")
+        for bad in ["0001-01-01", "1582-10-10", "1582-12-31", "0000-01-01"] {
+            #expect(SearchFilter.Day(bad) == nil, "\(bad)")
+        }
+        #expect(SearchFilter.Day(year: 1582, month: 12, day: 31) == nil && SearchFilter.Day(year: 10_000, month: 1,
+                                                                                             day: 1) == nil)
+        #expect(first.adding(days: -1) == nil && last.adding(days: 1) == nil)
+        #expect(first.adding(days: Int.min) == nil && last.adding(days: Int.max) == nil)
+        #expect(first.adding(days: 3_074_245) == last && last.adding(days: -3_074_245) == first)
+        #expect(try day("2024-02-28").adding(days: 2) == (try day("2024-03-01")))
+        for zone in Self.zones {
+            #expect(SearchFilter.Day(first.start(in: zone).addingTimeInterval(-1), in: zone) == nil)
+            #expect(SearchFilter.Day(last.start(in: zone).addingTimeInterval(86_400 * 2), in: zone) == nil)
+            // A day's start is on it, around a midnight the clocks skipped too.
+            var day = try day("2018-11-02")
+            for _ in 0..<5 {
+                #expect(SearchFilter.Day(day.start(in: zone), in: zone) == day, "\(day.text) in \(zone.identifier)")
+                day = try #require(day.adding(days: 1))
+            }
+            for edge in [first, last] { #expect(SearchFilter.Day(edge.start(in: zone), in: zone) == edge) }
+        }
+        for far in [-1e15, 1e15, -Double.infinity, .infinity, .nan] {
+            #expect(SearchFilter.Day(Date(timeIntervalSince1970: far), in: .gmt) == nil, "\(far)")
+        }
+        // A range's `before` leaves it a last day.
+        #expect(SearchFilter.When("..1583-01-01") == nil && SearchFilter.When("..1583-01-02")?.lastDay == first)
+        #expect(SearchFilter.When("..0001-01-01") == nil)
     }
 
     @Test func whenNarrowsWordsRequiredWordsAndAListOfOneKind() throws {

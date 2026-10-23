@@ -72,8 +72,9 @@ import SwiftUI
 ///     -debugFiltersMenu YES   with -debugWindow search: after the snapshot, log the Filters menu's items and draw them
 ///                             into <snapshot>-filtersmenu.png, each submenu's under it (as -debugSavedMenu does)
 ///     -debugWhenSheet YES|use   with -debugWindow search: after the snapshot, open When's Custom Range… (the range
-///                             on, or the past month) and draw it into <snapshot>-when.png; `use` then presses Use and
-///                             logs the tokens
+///                             on, or the past month), log what its Use would put on and draw it into
+///                             <snapshot>-when.png; `use` then presses Use and logs the tokens. -debugWhenThrough DAY
+///                             (YYYY-MM-DD) first sets its Through to that day, as picking it would
 ///     -debugSavedSheet save|edit   with -debugWindow search: then open Save This Search… (its name suggested) or
 ///                             Edit Saved Searches…, and draw it into <snapshot>-saved.png; -debugSaveAs NAME
 ///                             then presses Save with that name
@@ -503,12 +504,21 @@ enum DebugHooks {
         }, to: snapshotPath("filtersmenu"))
     }
 
-    /// After the search window's snapshot: `-debugWhenSheet YES|use` opens When's Custom Range… and draws it into
+    /// After the search window's snapshot: `-debugWhenSheet YES|use` opens When's Custom Range…, sets its Through to
+    /// `-debugWhenThrough DAY` if given (as picking it would), logs what Use would put on, and draws it into
     /// <snapshot>-when.png; `use` then presses Use and logs the tokens.
     private static func whenSheetStep(_ app: AppController, then done: @escaping () -> Void) {
-        guard let mode = UserDefaults.standard.string(forKey: "debugWhenSheet") else { return done() }
+        let defaults = UserDefaults.standard
+        guard let mode = defaults.string(forKey: "debugWhenSheet") else { return done() }
         let window = app.searchWindow!
         window.chooseWhen()
+        if let range = window.whenSheet.range {
+            if let through = defaults.string(forKey: "debugWhenThrough").flatMap(SearchFilter.Day.init(_:)) {
+                range.through = through.start()
+            }
+            log("debug: custom range: Use " + (range.when.map { "puts on \($0.text)" } ?? "can't be pressed")
+                + (range.problem.map { " (\($0))" } ?? ""))
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             save("custom range sheet", { try window.whenSheet.snapshot(to: $0) }, to: snapshotPath("when"))
             guard mode == "use", let use = window.whenSheet.use else { return done() }

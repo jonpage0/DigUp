@@ -40,7 +40,7 @@ enum FileDate {
         return wall - Double(zone.secondsFromGMT(for: Date(timeIntervalSince1970: guess)))
     }
 
-    /// Whether it's a day of the (proleptic Gregorian) calendar, from year 1 to 9999.
+    /// Whether it's a day of the (proleptic Gregorian) calendar, from year 1 to 9999: what a camera's date can be.
     static func isDay(year: Int, month: Int, day: Int) -> Bool {
         guard (1...9999).contains(year), (1...12).contains(month) else { return false }
         let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
@@ -57,19 +57,45 @@ enum FileDate {
         let dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear
         return era * 146_097 + dayOfEra - 719_468
     }
+
+    /// The day `days` days from 1970-01-01 (Howard Hinnant's `civil_from_days`, the inverse of `days`), for days of
+    /// years 1 to 9999.
+    static func civil(fromDays days: Int) -> (year: Int, month: Int, day: Int) {
+        let shifted = days + 719_468   // from 0000-03-01
+        let era = (shifted >= 0 ? shifted : shifted - 146_096) / 146_097
+        let dayOfEra = shifted - era * 146_097
+        let yearOfEra = (dayOfEra - dayOfEra / 1_460 + dayOfEra / 36_524 - dayOfEra / 146_096) / 365
+        let dayOfYear = dayOfEra - (365 * yearOfEra + yearOfEra / 4 - yearOfEra / 100)   // from March 1
+        let monthFromMarch = (5 * dayOfYear + 2) / 153
+        let day = dayOfYear - (153 * monthFromMarch + 2) / 5 + 1
+        let month = monthFromMarch < 10 ? monthFromMarch + 3 : monthFromMarch - 9
+        return (yearOfEra + era * 400 + (month <= 2 ? 1 : 0), month, day)
+    }
 }
 
 extension SearchFilter {
     /// A day of the calendar, as the When filter takes it: "2026-07-01". Not a moment: where it starts depends on the
-    /// time zone it's taken in (`start(in:)`), this Mac's.
+    /// time zone it's taken in (`start(in:)`), this Mac's. Only days of `years` are made, however a day is come to.
     public struct Day: Sendable, Hashable, Comparable {
         public let year: Int
         public let month: Int
         public let day: Int
 
-        /// Nil for a day the calendar doesn't have (February 30), or a year outside 1 to 9999.
+        /// The years a day can be in: ISO 8601's without prior agreement, and the ones this Mac's calendar writes as
+        /// the kit does. Foundation's Gregorian calendar reads days before October 15, 1582 as Julian ones, ten days
+        /// off: a date picker given an earlier day shows, and gives back, another one.
+        public static let years = 1583...9999
+        public static let first = Day(valid: years.lowerBound, month: 1, day: 1)
+        public static let last = Day(valid: years.upperBound, month: 12, day: 31)
+
+        /// Nil for a day the calendar doesn't have (February 30), or a year outside `years`.
         public init?(year: Int, month: Int, day: Int) {
-            guard FileDate.isDay(year: year, month: month, day: day) else { return nil }
+            guard Self.years.contains(year), FileDate.isDay(year: year, month: month, day: day) else { return nil }
+            self.init(valid: year, month: month, day: day)
+        }
+
+        /// For a day known to be one of `years`.
+        private init(valid year: Int, month: Int, day: Int) {
             (self.year, self.month, self.day) = (year, month, day)
         }
 
@@ -82,27 +108,43 @@ extension SearchFilter {
             self.init(year: year, month: month, day: day)
         }
 
-        /// The day `date` is on in `zone`.
-        public init(_ date: Date, in zone: TimeZone = .current) {
-            let parts = Self.calendar(in: zone).dateComponents([.year, .month, .day], from: date)
-            (year, month, day) = (parts.year ?? 1970, parts.month ?? 1, parts.day ?? 1)
+        /// The day `date` is on in `zone` (the clock's time there then, by its offset from UTC then); nil when that's
+        /// no day of `years`.
+        public init?(_ date: Date, in zone: TimeZone = .current) {
+            let local = (date.timeIntervalSince1970 + Double(zone.secondsFromGMT(for: date))) / 86_400
+            // Compared as a number first: one far out (or not a number) is no day, and isn't made a whole one.
+            guard (Double(Self.first.daysSince1970)...Double(Self.last.daysSince1970)).contains(local.rounded(.down))
+            else { return nil }
+            self.init(daysSince1970: Int(local.rounded(.down)))
+        }
+
+        /// The day `days` days from 1970-01-01; nil when that's no day of `years`.
+        private init?(daysSince1970 days: Int) {
+            guard (Self.first.daysSince1970...Self.last.daysSince1970).contains(days) else { return nil }
+            let (year, month, day) = FileDate.civil(fromDays: days)
+            self.init(year: year, month: month, day: day)
+        }
+
+        /// Days from 1970-01-01 to it.
+        var daysSince1970: Int {
+            FileDate.days(year: year, month: month, day: day)
         }
 
         public var text: String {
             String(format: "%04d-%02d-%02d", year, month, day)
         }
 
-        /// The day `count` days after it (before it, for a count below 0).
-        public func adding(days count: Int) -> Day {
-            let gmt = Self.calendar(in: .gmt)
-            let date = gmt.date(byAdding: .day, value: count, to: start(in: .gmt)) ?? start(in: .gmt)
-            return Day(date, in: .gmt)
+        /// The day `count` days after it (before it, for a count below 0); nil past the first or the last day.
+        public func adding(days count: Int) -> Day? {
+            let (days, overflow) = daysSince1970.addingReportingOverflow(count)
+            return overflow ? nil : Day(daysSince1970: days)
         }
 
         /// When it starts in `zone`: its midnight, or its first moment where a change of the clocks skips midnight.
+        /// (Foundation's calendar has every day of `years` as the kit does, so it's the day `init(_:in:)` reads back.)
         public func start(in zone: TimeZone = .current) -> Date {
             Self.calendar(in: zone).date(from: DateComponents(year: year, month: month, day: day))
-                ?? Date(timeIntervalSince1970: Double(FileDate.days(year: year, month: month, day: day) * 86_400))
+                ?? Date(timeIntervalSince1970: Double(daysSince1970 * 86_400))
         }
 
         static func calendar(in zone: TimeZone) -> Calendar {
@@ -135,9 +177,10 @@ extension SearchFilter {
         /// The When menu's: the past week, month, 3 months and year.
         public static let recent: [When] = [7, 30, 90, 365].compactMap { When(lastDays: $0) }
 
-        /// Nil with neither day, or `after` not before `before`.
+        /// Nil with neither day, `after` not before `before`, or a `before` that leaves no last day (`Day.first`): a
+        /// range of days has a first one and a last one, as Custom Range… shows it, wherever either is open.
         public init?(after: Day? = nil, before: Day? = nil) {
-            guard after != nil || before != nil else { return nil }
+            guard after != nil || before != nil, before != Day.first else { return nil }
             if let after, let before, after >= before { return nil }
             span = .days(after: after, before: before)
         }
@@ -166,6 +209,30 @@ extension SearchFilter {
             }
             guard let after = day(days[0]), let before = day(days[1]) else { return nil }
             self.init(after: after, before: before)
+        }
+
+        /// The days from `from` to `through`, both kept, as the window's Custom Range… picks them: the days those
+        /// moments are on in `zone`, either left out but not both. Nil for a moment on no day there is (`Day.years`),
+        /// a `through` on the last one (no day after it to stop before), or `from` after `through`: every When made so
+        /// is one the strict reader reads.
+        public init?(from: Date?, through: Date?, in zone: TimeZone = .current) {
+            var after: Day?, before: Day?
+            if let from {
+                guard let day = Day(from, in: zone) else { return nil }
+                after = day
+            }
+            if let through {
+                guard let day = Day(through, in: zone)?.adding(days: 1) else { return nil }
+                before = day
+            }
+            self.init(after: after, before: before)
+        }
+
+        /// The last day it keeps, the day before `before`, as Custom Range… shows it; nil when it's open at that end,
+        /// or for the last so many days. (`init` keeps a `before` after `Day.first`, so it has one.)
+        public var lastDay: Day? {
+            guard case .days(_, let before?) = span else { return nil }
+            return before.adding(days: -1)
         }
 
         private static let lastPrefix = "last:"
@@ -208,7 +275,8 @@ extension SearchFilter {
                 case 365: "Past year"
                 default: "Past \(days) days"
                 }
-            case .days(let after?, let before?): Self.written(from: after, through: before.adding(days: -1))
+            case .days(let after?, _?):   // `init` keeps a last day before any `before`
+                lastDay.map { Self.written(from: after, through: $0) } ?? ""
             case .days(let after?, nil): "Since \(Self.written(after))"
             case .days(nil, let before?): "Before \(Self.written(before))"
             case .days(nil, nil): ""   // not a When (`init` turns it down)
@@ -233,8 +301,9 @@ extension SearchFilter {
 
 /// A When as a saved search keeps it (`saved-searches.json`'s `{"when": …}`, approved 2026-10-23): `{"after":
 /// "2026-07-01", "before": "2026-08-01"}`, either day left out, or `{"lastDays": 90}`. Read strictly, as the app reads
-/// the file: another key, both forms at once, a day that's null or not written "YYYY-MM-DD", days the wrong way
-/// round, or a number of days that isn't a whole number from 1 to 36,500 aren't this shape.
+/// the file: another key, both forms at once, a day that's null, not written "YYYY-MM-DD" or not of the years 1583 to
+/// 9999 (`Day.years`), days the wrong way round, a `before` of 1583-01-01 (no last day), or a number of days that
+/// isn't a whole number from 1 to 36,500 aren't this shape.
 extension SearchFilter.When: Codable {
     private enum CodingKeys: String, CodingKey {
         case after, before, lastDays
@@ -244,8 +313,9 @@ extension SearchFilter.When: Codable {
         let keys = Set(try decoder.container(keyedBy: JSONKey.self).allKeys.map(\.stringValue))
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let wrong = DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription:
-            "a when is {after, before} in days YYYY-MM-DD, either left out, after earlier than before, or {lastDays} "
-            + "from 1 to \(Self.mostDays)"))
+            "a when is {after, before} in days YYYY-MM-DD of the years \(SearchFilter.Day.years.lowerBound) to "
+            + "\(SearchFilter.Day.years.upperBound), either left out, after earlier than before, before after the "
+            + "first day, or {lastDays} from 1 to \(Self.mostDays)"))
         if keys == [CodingKeys.lastDays.rawValue] {
             guard let when = Self(lastDays: try container.decode(Int.self, forKey: .lastDays)) else { throw wrong }
             self = when

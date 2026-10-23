@@ -861,10 +861,12 @@ final class MCPServer {
         func when(_ key: String) throws -> SearchFilter.When? {
             guard let value = value(key) else { return nil }
             let fields = value as? [String: Any] ?? [:]
-            let wrong = InputError("\(key) is {after, before} as dates YYYY-MM-DD (after included, before not; either "
-                                   + "left out, after earlier than before), or {last_days} from 1 to "
-                                   + "\(SearchFilter.When.mostDays): {after: \"2026-07-01\", before: "
-                                   + "\"2026-08-01\"} is July, {last_days: 90} the last 90 days.")
+            let years = SearchFilter.Day.years
+            let wrong = InputError("\(key) is {after, before} as dates YYYY-MM-DD of the years \(years.lowerBound) to "
+                                   + "\(years.upperBound) (after included, before not; either left out, after earlier "
+                                   + "than before), or {last_days} from 1 to \(SearchFilter.When.mostDays): {after: "
+                                   + "\"2026-07-01\", before: \"2026-08-01\"} is July, {last_days: 90} the last 90 "
+                                   + "days.")
             if fields["last_days"] != nil {
                 guard fields.count == 1, let number = fields["last_days"] as? NSNumber, !MCPServer.isBoolean(number),
                       let days = Int(exactly: number.doubleValue), let when = SearchFilter.When(lastDays: days)

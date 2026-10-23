@@ -296,8 +296,10 @@ struct Arguments {
         }
         if let text = values["--when"] {
             guard let when = SearchFilter.When(text) else {
-                throw CLIError("--when takes days as FROM..BEFORE (YYYY-MM-DD, the first before the second, either "
-                               + "left out: 2026-07-01..2026-08-01, 2026-07-01.., ..2026-08-01) or last:N, from 1 to "
+                let years = SearchFilter.Day.years
+                throw CLIError("--when takes days as FROM..BEFORE (YYYY-MM-DD, years \(years.lowerBound) to "
+                               + "\(years.upperBound), the first before the second, either left out: "
+                               + "2026-07-01..2026-08-01, 2026-07-01.., ..2026-08-01) or last:N, from 1 to "
                                + "\(SearchFilter.When.mostDays) days (last:90)")
             }
             filter.when = when
